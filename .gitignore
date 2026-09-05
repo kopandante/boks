@@ -1,0 +1,5 @@
+/boks
+.env
+.env.*
+*.env
+/lego/
