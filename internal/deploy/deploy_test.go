@@ -39,9 +39,16 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	return "", nil
 }
 
-func (f *fake) Upload(_ context.Context, content []byte, path string) error {
-	f.uploads[path] = string(content)
-	return nil
+// Pipe records what an upload would have written: the deploy's env-file goes through
+// `sh -c '... cat > <path>'`, so the path is the last quoted token of the script.
+func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	if len(args) == 3 && args[0] == "sh" {
+		if _, path, ok := strings.Cut(args[2], "cat > "); ok {
+			f.uploads[strings.Trim(path, "'")] = string(content)
+			return "", nil
+		}
+	}
+	return f.Run(ctx, args...)
 }
 
 func (f *fake) has(prefix string) bool {

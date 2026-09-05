@@ -1,0 +1,62 @@
+# Scheduled certificate renewal, to be copied into .github/workflows/ of the app's repository.
+#
+# Runs daily on purpose: `boks cert renew` calls lego, lego renews only when the certificate is
+# actually due (a third of its lifetime by default, or `cert.renew_days`), and boks reloads the
+# proxy routes only when the file really changed. A day that has nothing to do costs one SSH
+# connection and prints "certificate unchanged, routes left alone".
+#
+# The failure path matters more than the happy one: Traefik's silent renewal failure went
+# unnoticed for months on these servers, so this job is deliberately loud when it breaks.
+
+name: renew certificates
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: install boks and lego
+        run: |
+          go install github.com/kopandante/boks/cmd/boks@latest
+          curl -sSL https://github.com/go-acme/lego/releases/latest/download/lego_Linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin lego
+
+      - name: ssh key
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.BOKS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf 'Host boks-lab\n  HostName %s\n  User ubuntu\n  StrictHostKeyChecking accept-new\n' \
+            "${{ secrets.BOKS_LAB_HOST }}" > ~/.ssh/config
+
+      # lego keeps the ACME account key and the certificate here. Without a cache every run
+      # registers a new account and re-issues from scratch, which burns rate limits fast.
+      - uses: actions/cache@v4
+        with:
+          path: examples/convex-lab/.lego
+          key: lego-${{ github.repository }}
+
+      - name: renew
+        env:
+          CLOUDFLARE_DNS_API_TOKEN: ${{ secrets.CLOUDFLARE_DNS_API_TOKEN }}
+        run: boks -f examples/convex-lab/boks.yml cert renew
+
+      - name: report a failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+        run: |
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT}" \
+            -d text="boks: certificate renewal failed — ${{ github.repository }} run ${{ github.run_id }}"

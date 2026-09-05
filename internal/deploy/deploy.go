@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kopandante/boks/internal/cert"
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
 	"github.com/kopandante/boks/internal/remote"
@@ -155,7 +156,7 @@ func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 	envPath := ""
 	if len(env) > 0 {
 		envPath = fmt.Sprintf(".boks/%s/%s.env", cfg.App, name)
-		if err := r.Upload(ctx, env, envPath); err != nil {
+		if err := remote.Upload(ctx, r, env, envPath); err != nil {
 			return err
 		}
 	}
@@ -179,10 +180,34 @@ func runArgs(cfg *config.Config, name, tag, envPath string) []string {
 }
 
 func service(cfg *config.Config, target string, p config.Port) proxy.Service {
-	return proxy.Service{
+	svc := proxy.Service{
 		Name: proxy.ServiceName(cfg.App, p.Name), Target: fmt.Sprintf("%s:%d", target, p.Port), Host: p.Host,
 		TLS: cfg.TLS, HealthPath: p.HealthPath, HealthPort: p.HealthPort, Timeout: cfg.DeployTimeout,
 	}
+	// Hosts outside the certificate keep kamal-proxy's autocert, so one app can mix a wildcard
+	// with plain HTTP-01 domains.
+	if cfg.Cert.Covers(p.Host) {
+		svc.CertPath, svc.KeyPath = cert.ServerPaths(cfg.Cert)
+	}
+	return svc
+}
+
+// Reroute points the app's routes at the container already running, without deploying anything
+// new. It exists because kamal-proxy holds a manual certificate in memory: after a renewal the
+// files on disk change but the proxy keeps serving the old one until the routes are deployed
+// again. Measured on the stand at 0.05 s per route, with no dropped requests.
+func Reroute(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
+	out, err := r.Run(ctx, "docker", "ps", "--filter", "label=boks.app="+cfg.App,
+		"--filter", "status=running", "--format", "{{.Names}}")
+	if err != nil {
+		return err
+	}
+	running := strings.Fields(out)
+	if len(running) == 0 {
+		return fmt.Errorf("%s is not running here, nothing to reroute", cfg.App)
+	}
+	_, err = switchProxy(ctx, r, log, cfg, running[0])
+	return err
 }
 
 // switchProxy points every route at the new container, one port at a time, and returns the

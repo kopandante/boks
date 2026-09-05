@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
+	"github.com/kopandante/boks/internal/cert"
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/deploy"
 	"github.com/kopandante/boks/internal/proxy"
@@ -22,6 +24,12 @@ const usage = `usage: boks [-f boks.yml] <command>
   proxy boot       make sure kamal-proxy is running (idempotent)
   proxy list       routes known to kamal-proxy
   unlock           clear a stale deploy lock
+  cert issue       obtain the DNS-01 certificate now, install it, reload the routes
+  cert renew       same, but lego skips the run unless the certificate is due (safe in a cron)
+  cert status      subject and expiry of the certificate each server currently serves
+
+Certificates are issued where boks runs, not on the servers: DNS tokens are often bound to an
+IP. Export the provider's credentials (e.g. CLOUDFLARE_DNS_API_TOKEN) before cert issue/renew.
 `
 
 func main() {
@@ -67,6 +75,8 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return ps(ctx, r, out, cfg) })
 	case "proxy":
 		return proxyCmd(ctx, cfg, rest, out)
+	case "cert":
+		return certCmd(ctx, cfg, rest, out)
 	case "unlock":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return deploy.Unlock(ctx, r, cfg.App) })
 	}
@@ -104,6 +114,46 @@ func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config)
 	}
 	fmt.Fprintln(out, routes)
 	return nil
+}
+
+func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf("cert needs one of: issue, renew, status")
+	}
+	if cfg.Cert == nil {
+		return fmt.Errorf("no `cert` block in the config: plain domains are served by kamal-proxy's autocert and need nothing here")
+	}
+	if args[0] == "status" {
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			c, err := cert.Status(ctx, r, cfg)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "%s\n  issuer %s\n  expires %s (in %d days)\n", c.Subject.CommonName,
+				c.Issuer.CommonName, c.NotAfter.Format(time.DateOnly),
+				int(time.Until(c.NotAfter).Hours()/24))
+			return nil
+		})
+	}
+	if args[0] != "issue" && args[0] != "renew" {
+		return fmt.Errorf("unknown cert command %q", args[0])
+	}
+	if err := cert.Obtain(ctx, out, cfg, args[0] == "issue"); err != nil {
+		return err
+	}
+	return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+		changed, err := cert.Install(ctx, r, out, cfg)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			fmt.Fprintln(out, "certificate unchanged, routes left alone")
+			return nil
+		}
+		// kamal-proxy holds the certificate in memory; the routes must be deployed again for
+		// the new file to take effect.
+		return deploy.Reroute(ctx, r, out, cfg)
+	})
 }
 
 func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {

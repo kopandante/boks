@@ -47,6 +47,47 @@ func TestParseRejects(t *testing.T) {
 	}
 }
 
+func TestCertCovers(t *testing.T) {
+	c := &Cert{Domains: []string{"*.lab.example.com", "plain.example.com"}}
+	covered := []string{"api.lab.example.com", "actions.lab.example.com", "plain.example.com"}
+	for _, h := range covered {
+		if !c.Covers(h) {
+			t.Errorf("%s must be covered", h)
+		}
+	}
+	// A wildcard matches exactly one label: the bare domain and a deeper name are not covered,
+	// and neither is an unrelated host — those keep kamal-proxy's autocert.
+	for _, h := range []string{"lab.example.com", "a.b.lab.example.com", "other.example.com", ""} {
+		if c.Covers(h) {
+			t.Errorf("%q must not be covered", h)
+		}
+	}
+	if (*Cert)(nil).Covers("anything") {
+		t.Error("no cert block covers nothing")
+	}
+}
+
+func TestCertSlug(t *testing.T) {
+	if got := (&Cert{Domains: []string{"*.lab.example.com"}}).Slug(); got != "_.lab.example.com" {
+		t.Errorf("got %s, want lego's own naming", got)
+	}
+}
+
+func TestCertRejects(t *testing.T) {
+	base := "app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\ncert:\n"
+	cases := map[string]string{
+		"  dns: cloudflare\n  email: a@b.c\n":                                "cert.domains",
+		"  domains: ['*.x.y']\n  email: a@b.c\n":                             "cert.dns",
+		"  domains: ['*.x.y']\n  dns: cloudflare\n":                          "cert.email",
+		"  domains: ['*.x.y']\n  dns: c\n  email: a@b.c\n  renew_days: -1\n": "renew_days",
+	}
+	for tail, want := range cases {
+		if _, err := Parse([]byte(base + tail)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", tail, want, err)
+		}
+	}
+}
+
 func TestEnvContent(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("A=1"), 0o600); err != nil {
