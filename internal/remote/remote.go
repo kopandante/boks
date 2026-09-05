@@ -24,16 +24,18 @@ type SSH struct {
 }
 
 func (s SSH) Run(ctx context.Context, args ...string) (string, error) {
-	return s.exec(ctx, nil, Shell(args...))
+	return s.exec(ctx, nil, args[0], Shell(args...))
 }
 
 func (s SSH) Upload(ctx context.Context, content []byte, remotePath string) error {
 	script := "umask 077 && " + Shell("mkdir", "-p", path.Dir(remotePath)) + " && cat > " + Quote(remotePath)
-	_, err := s.exec(ctx, content, script)
+	_, err := s.exec(ctx, content, "upload "+remotePath, script)
 	return err
 }
 
-func (s SSH) exec(ctx context.Context, stdin []byte, script string) (string, error) {
+// exec runs script on the host; label names the command in errors (the server itself is
+// named by the caller, which iterates servers).
+func (s SSH) exec(ctx context.Context, stdin []byte, label, script string) (string, error) {
 	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", s.Host, script)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -41,19 +43,9 @@ func (s SSH) exec(ctx context.Context, stdin []byte, script string) (string, err
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s: %s: %w: %s", s.Host, head(script), err, strings.TrimSpace(errb.String()))
+		return "", fmt.Errorf("%s: %w: %s", label, err, strings.TrimSpace(errb.String()))
 	}
 	return strings.TrimSpace(out.String()), nil
-}
-
-func head(script string) string {
-	if i := strings.IndexByte(script, ' '); i > 0 && i < 60 {
-		return script[:i]
-	}
-	if len(script) > 60 {
-		return script[:60] + "…"
-	}
-	return script
 }
 
 // Quote single-quotes s for a POSIX shell.

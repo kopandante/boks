@@ -9,9 +9,3 @@ func TestShellQuoting(t *testing.T) {
 		t.Errorf("got %s\nwant %s", got, want)
 	}
 }
-
-func TestHead(t *testing.T) {
-	if head("'docker' 'pull' 'x'") != "'docker'" {
-		t.Error("head should return the first word")
-	}
-}

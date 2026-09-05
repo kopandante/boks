@@ -6,13 +6,13 @@
 
 ## Скоуп v0.1
 
-- [ ] Go-модуль `github.com/kopandante/boks`, layout `cmd/boks` + `internal/*`, зависимости: stdlib + `gopkg.in/yaml.v3`
-- [ ] `internal/config`: `boks.yml` (app, image, servers, network, proxy_image, env/env_file, volumes, ports[], tls, keep, deploy_timeout), дефолты, валидация, `EnvContent()`; тесты
-- [ ] `internal/remote`: `Runner` (Run/Upload), `SSH` через системный `ssh` (уважает `~/.ssh/config`), shell-quoting
-- [ ] `internal/proxy`: `Boot` (сеть, volumes, контейнер `boks-proxy`, идемпотентно), `DeployArgs`, `List`; тесты
-- [ ] `internal/deploy`: lock → pull → run (`<app>-<tag>-<unix>`, лейблы boks.app/boks.version) → `kamal-proxy deploy` на каждый порт → retire старых → prune образов до `keep`; при провале переключения старый продолжает обслуживать; тесты на FakeRunner
-- [ ] `cmd/boks`: `deploy TAG | rollback TAG | ps | proxy boot|list | unlock`, флаг `-f`
-- [ ] `examples/convex-lab/boks.yml` без секретов (`.env` в `.gitignore`)
+- [x] Go-модуль `github.com/kopandante/boks`, layout `cmd/boks` + `internal/*`, зависимости: stdlib + `gopkg.in/yaml.v3`
+- [x] `internal/config`: `boks.yml` (app, image, servers, network, proxy_image, env/env_file, volumes, ports[], tls, keep, deploy_timeout), дефолты, валидация, `EnvContent()`; тесты
+- [x] `internal/remote`: `Runner` (Run/Upload), `SSH` через системный `ssh` (уважает `~/.ssh/config`), shell-quoting
+- [x] `internal/proxy`: `Boot` (сеть, volumes, контейнер `boks-proxy`, идемпотентно), `DeployArgs`, `List`; тесты
+- [x] `internal/deploy`: lock → pull → run (`<app>-<tag>-<unix>`, лейблы boks.app/boks.version) → `kamal-proxy deploy` на каждый порт → retire старых → prune образов до `keep`; при провале переключения старый продолжает обслуживать; тесты на FakeRunner
+- [x] `cmd/boks`: `deploy TAG | rollback TAG | ps | proxy boot|list | unlock`, флаг `-f`
+- [x] `examples/convex-lab/boks.yml` без секретов (`.env` в `.gitignore`)
 
 Вне скоупа v0.1: preview, db-провижининг, wildcard/lego, bws, webhook-приёмник,
 параллельный обход серверов, `boks logs`.
@@ -42,6 +42,12 @@ ssh boks-lab 'mkdir /tmp/boks-convex-lab.lock'; ./boks ... deploy latest   # п�
 
 ## Критерии готовности
 
-- [ ] все проверки выше зелёные на `boks-lab`; в curl-цикле 0 ошибок при deploy и rollback
-- [ ] секреты из env-файла не появляются в выводе `boks` и в сообщениях об ошибках
+- [x] все проверки выше зелёные на `boks-lab` (2026-09-05): `proxy boot` идемпотентен; `/version` 200, actions 404, http→https 301, оба хоста с production-сертификатами Let's Encrypt; deploy под нагрузкой — 796 запросов, **0 ошибок**; rollback — 656, **0 ошибок**; старый контейнер удалён; lock даёт понятную ошибку, `unlock` снимает; при несуществующем теге деплой падает на pull и lock освобождается
+- [x] секреты из env-файла не появляются в выводе `boks` и в сообщениях об ошибках (grep значения `INSTANCE_SECRET` по всему выводу — 0 совпадений)
 - [ ] `/review-loop` зелёный
+
+## Замечено, вне скоупа v0.1
+
+- Полный `deploy` занимает 40–55 с при переключении за 0.05 с: ожидание health Convex (~4 с),
+  `docker stop` с 10-секундным grace для старого контейнера и отдельное ssh-соединение на каждую
+  команду (~10 команд). Оптимизация: ssh ControlMaster/одна сессия, `--stop-timeout` в конфиге.
