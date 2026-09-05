@@ -13,8 +13,20 @@ import (
 type Runner interface {
 	// Run executes args as a single command and returns its trimmed stdout.
 	Run(ctx context.Context, args ...string) (string, error)
-	// Upload writes content to remotePath with mode 0600, creating parent directories.
-	Upload(ctx context.Context, content []byte, remotePath string) error
+	// Pipe executes args with content on stdin and returns its trimmed stdout.
+	Pipe(ctx context.Context, content []byte, args ...string) (string, error)
+}
+
+// Upload writes content to remotePath with mode 0600, creating parent directories. The path is
+// named in the error: the underlying command is a shell script, so without this a failure reads
+// only as "sh".
+func Upload(ctx context.Context, r Runner, content []byte, remotePath string) error {
+	_, err := r.Pipe(ctx, content, "sh", "-c",
+		"umask 077 && mkdir -p "+Quote(path.Dir(remotePath))+" && cat > "+Quote(remotePath))
+	if err != nil {
+		return fmt.Errorf("upload %s: %w", remotePath, err)
+	}
+	return nil
 }
 
 // SSH runs commands through the system ssh client, so ~/.ssh/config, agents and
@@ -27,10 +39,8 @@ func (s SSH) Run(ctx context.Context, args ...string) (string, error) {
 	return s.exec(ctx, nil, args[0], Shell(args...))
 }
 
-func (s SSH) Upload(ctx context.Context, content []byte, remotePath string) error {
-	script := "umask 077 && " + Shell("mkdir", "-p", path.Dir(remotePath)) + " && cat > " + Quote(remotePath)
-	_, err := s.exec(ctx, content, "upload "+remotePath, script)
-	return err
+func (s SSH) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	return s.exec(ctx, content, args[0], Shell(args...))
 }
 
 // exec runs script on the host; label names the command in errors (the server itself is

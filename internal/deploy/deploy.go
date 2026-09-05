@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kopandante/boks/internal/cert"
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
 	"github.com/kopandante/boks/internal/remote"
@@ -43,6 +44,12 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
 	if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
 		return err
+	}
+	// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
+	// the deploy or, worse, makes it accept and then fail every TLS handshake for that host.
+	if covered(cfg) && !cert.Installed(ctx, r, cfg) {
+		crt, _ := cert.ServerPaths(cfg.Cert)
+		return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
 	}
 	if err := pull(ctx, r, log, cfg.Image+":"+tag, o.Pull); err != nil {
 		return err
@@ -155,7 +162,7 @@ func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 	envPath := ""
 	if len(env) > 0 {
 		envPath = fmt.Sprintf(".boks/%s/%s.env", cfg.App, name)
-		if err := r.Upload(ctx, env, envPath); err != nil {
+		if err := remote.Upload(ctx, r, env, envPath); err != nil {
 			return err
 		}
 	}
@@ -178,11 +185,27 @@ func runArgs(cfg *config.Config, name, tag, envPath string) []string {
 	return append(a, cfg.Image+":"+tag)
 }
 
+// covered reports whether any of the app's hosts is served by the configured certificate.
+func covered(cfg *config.Config) bool {
+	for _, p := range cfg.Ports {
+		if cfg.Cert.Covers(p.Host) {
+			return true
+		}
+	}
+	return false
+}
+
 func service(cfg *config.Config, target string, p config.Port) proxy.Service {
-	return proxy.Service{
+	svc := proxy.Service{
 		Name: proxy.ServiceName(cfg.App, p.Name), Target: fmt.Sprintf("%s:%d", target, p.Port), Host: p.Host,
 		TLS: cfg.TLS, HealthPath: p.HealthPath, HealthPort: p.HealthPort, Timeout: cfg.DeployTimeout,
 	}
+	// Hosts outside the certificate keep kamal-proxy's autocert, so one app can mix a wildcard
+	// with plain HTTP-01 domains.
+	if cfg.Cert.Covers(p.Host) {
+		svc.CertPath, svc.KeyPath = cert.ServerPaths(cfg.Cert)
+	}
+	return svc
 }
 
 // switchProxy points every route at the new container, one port at a time, and returns the

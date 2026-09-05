@@ -25,3 +25,9 @@ ports:
 tls: true
 keep: 2
 deploy_timeout: 60s
+cert:
+  domains: ["*.lab.kopanda.ru"]
+  dns: cloudflare
+  email: kan.evgenii.dev@gmail.com
+  path: .lego
+  staging: true          # the lab uses Let's Encrypt staging; drop this for a real certificate

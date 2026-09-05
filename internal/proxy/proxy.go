@@ -24,6 +24,8 @@ type Service struct {
 	Target     string
 	Host       string
 	TLS        bool
+	CertPath   string // set for a DNS-01 certificate; empty leaves TLS to kamal-proxy's autocert
+	KeyPath    string
 	HealthPath string
 	HealthPort int
 	Timeout    string
@@ -38,6 +40,9 @@ func DeployArgs(s Service) []string {
 		"--target", s.Target, "--host", s.Host}
 	if s.TLS {
 		a = append(a, "--tls")
+	}
+	if s.CertPath != "" {
+		a = append(a, "--tls-certificate-path", s.CertPath, "--tls-private-key-path", s.KeyPath)
 	}
 	if s.HealthPath != "" {
 		a = append(a, "--health-check-path", s.HealthPath)

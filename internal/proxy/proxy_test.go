@@ -19,6 +19,18 @@ func TestDeployArgs(t *testing.T) {
 	}
 }
 
+func TestDeployArgsWithManualCertificate(t *testing.T) {
+	got := strings.Join(DeployArgs(Service{
+		Name: "a-web", Target: "a-1:80", Host: "a.example.com", TLS: true,
+		CertPath: "/certs/boks/_.example.com.crt", KeyPath: "/certs/boks/_.example.com.key",
+	}), " ")
+	want := "docker exec boks-proxy kamal-proxy deploy a-web --target a-1:80 --host a.example.com --tls " +
+		"--tls-certificate-path /certs/boks/_.example.com.crt --tls-private-key-path /certs/boks/_.example.com.key"
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
 func TestDeployArgsMinimal(t *testing.T) {
 	got := strings.Join(DeployArgs(Service{Name: "a-web", Target: "a-1:80", Host: "a.example.com"}), " ")
 	if got != "docker exec boks-proxy kamal-proxy deploy a-web --target a-1:80 --host a.example.com" {
@@ -40,7 +52,9 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	return "", nil
 }
 
-func (f *fake) Upload(context.Context, []byte, string) error { return nil }
+func (f *fake) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
+	return f.Run(ctx, args...)
+}
 
 func TestBootIdempotent(t *testing.T) {
 	f := &fake{state: "running"}

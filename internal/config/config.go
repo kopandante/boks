@@ -33,8 +33,21 @@ type Port struct {
 	HealthPort int    `yaml:"health_port" json:"health_port"`
 }
 
+// Cert describes a certificate obtained by lego over DNS-01 — the case kamal-proxy's built-in
+// autocert cannot serve, because a wildcard has no HTTP-01 challenge. Hosts not covered by it
+// keep using autocert, so an app can mix both.
+type Cert struct {
+	Domains   []string `yaml:"domains"`
+	DNS       string   `yaml:"dns"`   // lego provider name, e.g. "cloudflare"
+	Email     string   `yaml:"email"` // ACME account
+	Path      string   `yaml:"path"`  // local lego state, relative to boks.yml
+	Staging   bool     `yaml:"staging"`
+	RenewDays int      `yaml:"renew_days"` // 0 = lego's own schedule (a third of the lifetime)
+}
+
 // Config is the parsed boks.yml of one app.
 type Config struct {
+	Cert          *Cert             `yaml:"cert"`
 	App           string            `yaml:"app"`
 	Image         string            `yaml:"image"`
 	Servers       []string          `yaml:"servers"`
@@ -106,7 +119,68 @@ func (c *Config) validate() error {
 	if _, err := time.ParseDuration(c.DeployTimeout); err != nil {
 		return fmt.Errorf("deploy_timeout: %q is not a duration such as 60s or 2m", c.DeployTimeout)
 	}
+	if err := c.Cert.validate(); err != nil {
+		return err
+	}
 	return c.validateLists()
+}
+
+func (c *Cert) validate() error {
+	if c == nil {
+		return nil
+	}
+	if len(c.Domains) == 0 {
+		return fmt.Errorf("cert.domains: at least one is required")
+	}
+	if c.DNS == "" {
+		return fmt.Errorf("cert.dns: lego provider name is required (see `lego dnshelp`)")
+	}
+	if c.Email == "" {
+		return fmt.Errorf("cert.email: required for the ACME account")
+	}
+	if c.RenewDays < 0 {
+		return fmt.Errorf("cert.renew_days: must not be negative")
+	}
+	return nil
+}
+
+// Covers reports whether host is served by this certificate. A wildcard matches exactly one
+// label, as in RFC 6125: `*.example.com` covers `api.example.com` but neither `example.com`
+// nor `a.b.example.com`.
+func (c *Cert) Covers(host string) bool {
+	if c == nil {
+		return false
+	}
+	for _, d := range c.Domains {
+		if d == host {
+			return true
+		}
+		if suffix, ok := strings.CutPrefix(d, "*."); ok {
+			if rest, found := strings.CutSuffix(host, "."+suffix); found && rest != "" &&
+				!strings.Contains(rest, ".") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Slug names the certificate files. lego writes one SAN certificate for the whole domain list,
+// named after the first entry with `*` replaced by `_`.
+func (c *Cert) Slug() string {
+	if c == nil || len(c.Domains) == 0 {
+		return ""
+	}
+	return strings.ReplaceAll(c.Domains[0], "*", "_")
+}
+
+// LegoPath is the local lego state directory, resolved against the config's own directory.
+func (c *Config) LegoPath() string {
+	p := ".lego"
+	if c.Cert != nil && c.Cert.Path != "" {
+		p = c.Cert.Path
+	}
+	return c.resolve(p)
 }
 
 func (c *Config) validateLists() error {

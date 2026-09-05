@@ -2,4 +2,7 @@
 .env
 .env.*
 *.env
-/lego/
+# lego's state at any depth: ACME account key, certificate private keys. Anchoring this to the
+# repository root would miss `examples/<app>/.lego/`, which is where a per-app config puts it.
+.lego/
+lego/
