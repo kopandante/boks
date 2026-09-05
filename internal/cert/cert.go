@@ -99,8 +99,10 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 	if bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(crt)) {
 		return nil
 	}
-	// The key goes first: if the run dies between the two, the certificate on the server still
-	// matches the old key, and the next run sees a differing .crt and writes both again.
+	// A run that dies between the two writes leaves a mismatched pair on the server whichever
+	// order they go in. What makes that recoverable is the comparison above — the next run sees
+	// a .crt that differs from the local one and writes both again — and the marker, which was
+	// never updated, so the proxy is not restarted onto the half-written pair.
 	if err := write(ctx, r, key, keyRemote); err != nil {
 		return err
 	}
@@ -189,8 +191,10 @@ func write(ctx context.Context, r remote.Runner, content []byte, path string) er
 	script := "set -e; umask 077; mkdir -p " + remote.Quote(dir) + "; cat > " + remote.Quote(path) +
 		"; chown " + proxyUID + " " + remote.Quote(dir) + " " + remote.Quote(path) +
 		"; chmod 750 " + remote.Quote(dir) + "; chmod 640 " + remote.Quote(path)
-	_, err := r.Pipe(ctx, content, "docker", "exec", "-i", "-u", "0", proxy.Container, "sh", "-c", script)
-	return err
+	if _, err := r.Pipe(ctx, content, "docker", "exec", "-i", "-u", "0", proxy.Container, "sh", "-c", script); err != nil {
+		return fmt.Errorf("install %s: %w", path, err)
+	}
+	return nil
 }
 
 func read(ctx context.Context, r remote.Runner, path string) ([]byte, error) {

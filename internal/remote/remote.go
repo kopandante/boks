@@ -17,11 +17,16 @@ type Runner interface {
 	Pipe(ctx context.Context, content []byte, args ...string) (string, error)
 }
 
-// Upload writes content to remotePath with mode 0600, creating parent directories.
+// Upload writes content to remotePath with mode 0600, creating parent directories. The path is
+// named in the error: the underlying command is a shell script, so without this a failure reads
+// only as "sh".
 func Upload(ctx context.Context, r Runner, content []byte, remotePath string) error {
 	_, err := r.Pipe(ctx, content, "sh", "-c",
 		"umask 077 && mkdir -p "+Quote(path.Dir(remotePath))+" && cat > "+Quote(remotePath))
-	return err
+	if err != nil {
+		return fmt.Errorf("upload %s: %w", remotePath, err)
+	}
+	return nil
 }
 
 // SSH runs commands through the system ssh client, so ~/.ssh/config, agents and
