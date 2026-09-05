@@ -22,12 +22,15 @@ const (
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Port is one published port of the app, routed by kamal-proxy under its own host.
+// The json tags are load-bearing, not decoration: a deploy stores this spec verbatim in the
+// container's `boks.ports` label and a later deploy reads it back to revert a route, so the
+// field names must survive a rename of the Go fields.
 type Port struct {
-	Name       string `yaml:"name"`
-	Port       int    `yaml:"port"`
-	Host       string `yaml:"host"`
-	HealthPath string `yaml:"health_path"`
-	HealthPort int    `yaml:"health_port"`
+	Name       string `yaml:"name" json:"name"`
+	Port       int    `yaml:"port" json:"port"`
+	Host       string `yaml:"host" json:"host"`
+	HealthPath string `yaml:"health_path" json:"health_path"`
+	HealthPort int    `yaml:"health_port" json:"health_port"`
 }
 
 // Config is the parsed boks.yml of one app.
@@ -110,10 +113,20 @@ func (c *Config) validateLists() error {
 	if len(c.Ports) == 0 {
 		return fmt.Errorf("ports: at least one is required")
 	}
+	seenName, seenHost := map[string]bool{}, map[string]bool{}
 	for _, p := range c.Ports {
 		if err := p.validate(); err != nil {
 			return err
 		}
+		if seenName[p.Name] {
+			return fmt.Errorf("ports: duplicate name %q", p.Name)
+		}
+		// Two ports on one host would fight over the same proxy service: kamal-proxy allows
+		// one service per host and the second deploy would take the route from the first.
+		if seenHost[p.Host] {
+			return fmt.Errorf("ports: duplicate host %q", p.Host)
+		}
+		seenName[p.Name], seenHost[p.Host] = true, true
 	}
 	for _, v := range c.Volumes {
 		if err := validateVolume(v); err != nil {
