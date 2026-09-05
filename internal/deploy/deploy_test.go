@@ -212,8 +212,27 @@ func TestRunRevertsWithoutTheLabelUsingTheCurrentConfig(t *testing.T) {
 	if !f.has(want) {
 		t.Errorf("route must go back to the old container, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
-	if !strings.Contains(log.String(), "predates the boks.ports label") {
+	if !strings.Contains(log.String(), "no record of port") {
 		t.Errorf("the assumption must be stated, log:\n%s", log.String())
+	}
+}
+
+// A port name added to the config since the old container started is not in its label, but the
+// container may well listen on that port anyway — two hosts can share one container port. The
+// route must still be attempted: kamal-proxy's health check is what decides, and skipping would
+// strand the route on the failed release for nothing.
+func TestRunRevertsPortsMissingFromTheLabel(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
+		ports(t, config.Port{Name: "actions", Port: 3001, Host: "actions.example.com"}) + "\n"
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
+		t.Fatal("want error")
+	}
+	want := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	if !f.has(want) {
+		t.Errorf("an unrecorded port must still be reverted with the config's value, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
 }
 

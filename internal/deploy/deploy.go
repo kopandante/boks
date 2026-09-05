@@ -213,22 +213,20 @@ func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 		fmt.Fprintf(log, "warning: %d route(s) already point at the new container and cannot be reverted automatically (previous containers: %v)\n", len(switched), names(old))
 		return
 	}
+	// Every switched route is put back. The label makes the target exact when it has a record
+	// for that port; without one the current config is the best guess, which is what boks did
+	// before the label existed. Attempting is never worse than skipping: kamal-proxy only moves
+	// a route after its own health check passes, and the call goes through best(), so a wrong
+	// guess leaves the route exactly where skipping would have left it — on the new container.
 	prev := old[0]
-	if len(prev.ports) == 0 {
-		// Started by a boks that did not write the label yet — the first deploy after an
-		// upgrade. Reverting with the current config's ports is what boks did before the label
-		// existed: correct whenever the ports did not change, and refusing outright would make
-		// the upgrade itself a regression.
-		fmt.Fprintf(log, "warning: %s predates the boks.ports label; reverting with the current config's ports — if a port changed since that container started, its health check will fail\n", prev.name)
-	}
 	for _, p := range switched {
-		target := p // the current config, used as-is when the old container has no record
+		target := p
 		if recorded, ok := prev.ports[p.Name]; ok {
 			recorded.Host = p.Host // the domain belongs to the route, not to the container
 			target = recorded
-		} else if len(prev.ports) > 0 {
-			fmt.Fprintf(log, "warning: %s has no port %q, leaving its route on the new container\n", prev.name, p.Name)
-			continue
+		} else {
+			fmt.Fprintf(log, "warning: %s has no record of port %q; reverting with the current config's %d — if that container listens elsewhere, the health check will refuse and the route stays on the new one\n",
+				prev.name, p.Name, p.Port)
 		}
 		svc := service(cfg, prev.name, target)
 		fmt.Fprintf(log, "revert %s → %s\n", svc.Name, svc.Target)
