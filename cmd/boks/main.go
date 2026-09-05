@@ -17,7 +17,7 @@ import (
 const usage = `usage: boks [-f boks.yml] <command>
 
   deploy <tag>     pull image:<tag>, start it, switch the proxy, retire the previous version
-  rollback <tag>   same as deploy without pulling (the image must already be on the server)
+  rollback <tag>   same as deploy without an explicit pull (docker still fetches a missing image)
   ps               containers and proxy routes of this app on every server
   proxy boot       make sure kamal-proxy is running (idempotent)
   proxy list       routes known to kamal-proxy

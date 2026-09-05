@@ -28,13 +28,14 @@ func TestParseDefaults(t *testing.T) {
 
 func TestParseRejects(t *testing.T) {
 	cases := map[string]string{
-		"app: Demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]":                  "app:",
-		"app: demo\nservers: [a]\nports: [{name: w, port: 1, host: h}]":                            "image",
-		"app: demo\nimage: x\nports: [{name: w, port: 1, host: h}]":                                "servers",
-		"app: demo\nimage: x\nservers: [a]":                                                        "ports",
-		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 70000, host: h}]":              "out of range",
-		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1}]":                           "host is required",
-		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\nvolumes: [data]": "volumes",
+		"app: Demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]":                       "app:",
+		"app: demo\nservers: [a]\nports: [{name: w, port: 1, host: h}]":                                 "image",
+		"app: demo\nimage: x\nports: [{name: w, port: 1, host: h}]":                                     "servers",
+		"app: demo\nimage: x\nservers: [a]":                                                             "ports",
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 70000, host: h}]":                   "out of range",
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1}]":                                "host is required",
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\nvolumes: [data]":      "volumes",
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\ndeploy_timeout: soon": "deploy_timeout",
 	}
 	for in, want := range cases {
 		_, err := Parse([]byte(in))

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -98,6 +99,9 @@ func (c *Config) validate() error {
 	}
 	if c.Keep < 1 {
 		return fmt.Errorf("keep: must be at least 1")
+	}
+	if _, err := time.ParseDuration(c.DeployTimeout); err != nil {
+		return fmt.Errorf("deploy_timeout: %q is not a duration such as 60s or 2m", c.DeployTimeout)
 	}
 	return c.validateLists()
 }

@@ -54,8 +54,10 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := start(ctx, r, log, cfg, name, tag, o.Env); err != nil {
 		return err
 	}
-	if err := switchProxy(ctx, r, log, cfg, name); err != nil {
-		return fmt.Errorf("%w\nnew container %s is left running for inspection; the previous version still serves traffic", err, name)
+	switched, err := switchProxy(ctx, r, log, cfg, name)
+	if err != nil {
+		revert(ctx, r, log, switched, old)
+		return fmt.Errorf("%w\nnew container %s is left running for inspection; see the revert/warning lines above for where traffic goes now", err, name)
 	}
 	retire(ctx, r, log, old)
 	prune(ctx, r, log, cfg, tag)
@@ -123,18 +125,44 @@ func runArgs(cfg *config.Config, name, tag, envPath string) []string {
 	return append(a, cfg.Image+":"+tag)
 }
 
-func switchProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string) error {
+func service(cfg *config.Config, target string, p config.Port) proxy.Service {
+	return proxy.Service{
+		Name: proxy.ServiceName(cfg.App, p.Name), Target: fmt.Sprintf("%s:%d", target, p.Port), Host: p.Host,
+		TLS: cfg.TLS, HealthPath: p.HealthPath, HealthPort: p.HealthPort, Timeout: cfg.DeployTimeout,
+	}
+}
+
+// switchProxy points every route at the new container, one port at a time, and returns the
+// routes that had already moved when an error stopped it.
+func switchProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string) ([]proxy.Service, error) {
+	var done []proxy.Service
 	for _, p := range cfg.Ports {
-		svc := proxy.Service{
-			Name: proxy.ServiceName(cfg.App, p.Name), Target: fmt.Sprintf("%s:%d", name, p.Port), Host: p.Host,
-			TLS: cfg.TLS, HealthPath: p.HealthPath, HealthPort: p.HealthPort, Timeout: cfg.DeployTimeout,
-		}
+		svc := service(cfg, name, p)
 		fmt.Fprintf(log, "proxy %s → %s (%s)\n", svc.Name, svc.Target, p.Host)
 		if _, err := r.Run(ctx, proxy.DeployArgs(svc)...); err != nil {
-			return err
+			return done, err
 		}
+		done = append(done, svc)
 	}
-	return nil
+	return done, nil
+}
+
+// revert moves routes that already reached the new container back to the previous one, so a
+// failed multi-port switch does not leave the app split across two versions.
+func revert(ctx context.Context, r remote.Runner, log io.Writer, switched []proxy.Service, old []string) {
+	if len(switched) == 0 {
+		return
+	}
+	if len(old) != 1 {
+		fmt.Fprintf(log, "warning: %d route(s) already point at the new container and cannot be reverted automatically (previous containers: %v)\n", len(switched), old)
+		return
+	}
+	for _, svc := range switched {
+		_, port, _ := strings.Cut(svc.Target, ":")
+		svc.Target = old[0] + ":" + port
+		fmt.Fprintf(log, "revert %s → %s\n", svc.Name, svc.Target)
+		best(ctx, r, log, proxy.DeployArgs(svc)...)
+	}
 }
 
 // retire stops and removes previous containers. Failures are reported, not fatal: the new
