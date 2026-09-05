@@ -1,0 +1,27 @@
+# Self-hosted Convex on boks-lab: one container, two routed ports.
+# Secrets (INSTANCE_NAME, INSTANCE_SECRET) live in ./.env, which is gitignored.
+app: convex-lab
+image: ghcr.io/get-convex/convex-backend
+servers: [boks-lab]
+network: boks-test          # the network the experiment's boks-proxy already runs in
+env_file: .env
+env:
+  DISABLE_BEACON: "true"
+  DO_NOT_REQUIRE_SSL: "true"
+  CONVEX_CLOUD_ORIGIN: https://api.lab.kopanda.ru
+  CONVEX_SITE_ORIGIN: https://actions.lab.kopanda.ru
+volumes:
+  - data:/convex/data
+ports:
+  - name: api
+    port: 3210
+    host: api.lab.kopanda.ru
+    health_path: /version
+  - name: actions
+    port: 3211
+    host: actions.lab.kopanda.ru
+    health_port: 3210        # 3211 answers 404 on /, health goes through the API port
+    health_path: /version
+tls: true
+keep: 2
+deploy_timeout: 60s

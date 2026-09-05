@@ -1,0 +1,126 @@
+// Command boks deploys pre-built images to servers through Docker and kamal-proxy over SSH.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/kopandante/boks/internal/config"
+	"github.com/kopandante/boks/internal/deploy"
+	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/remote"
+)
+
+const usage = `usage: boks [-f boks.yml] <command>
+
+  deploy <tag>     pull image:<tag>, start it, switch the proxy, retire the previous version
+  rollback <tag>   same as deploy without pulling (the image must already be on the server)
+  ps               containers and proxy routes of this app on every server
+  proxy boot       make sure kamal-proxy is running (idempotent)
+  proxy list       routes known to kamal-proxy
+  unlock           clear a stale deploy lock
+`
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, out, errw io.Writer) int {
+	fs := flag.NewFlagSet("boks", flag.ContinueOnError)
+	fs.SetOutput(errw)
+	cfgPath := fs.String("f", "boks.yml", "path to boks.yml")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprint(errw, usage)
+		return 2
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(errw, "error:", err)
+		return 1
+	}
+	if err := dispatch(context.Background(), cfg, fs.Args(), out); err != nil {
+		fmt.Fprintln(errw, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+type action func(ctx context.Context, r remote.Runner) error
+
+func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
+	cmd, rest := args[0], args[1:]
+	switch cmd {
+	case "deploy", "rollback":
+		if len(rest) != 1 {
+			return fmt.Errorf("%s needs exactly one <tag>", cmd)
+		}
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			return runDeploy(ctx, r, out, cfg, rest[0], cmd == "deploy")
+		})
+	case "ps":
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return ps(ctx, r, out, cfg) })
+	case "proxy":
+		return proxyCmd(ctx, cfg, rest, out)
+	case "unlock":
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return deploy.Unlock(ctx, r, cfg.App) })
+	}
+	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
+}
+
+func each(ctx context.Context, cfg *config.Config, out io.Writer, fn action) error {
+	for _, s := range cfg.Servers {
+		fmt.Fprintf(out, "== %s\n", s)
+		if err := fn(ctx, remote.SSH{Host: s}); err != nil {
+			return fmt.Errorf("%s: %w", s, err)
+		}
+	}
+	return nil
+}
+
+func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string, pull bool) error {
+	env, err := cfg.EnvContent()
+	if err != nil {
+		return err
+	}
+	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Pull: pull, Env: env})
+}
+
+func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config) error {
+	list, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "label=boks.app="+cfg.App,
+		"--format", `table {{.Names}}\t{{.Label "boks.version"}}\t{{.Status}}`)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, list)
+	routes, err := proxy.List(ctx, r)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, routes)
+	return nil
+}
+
+func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf("proxy needs one of: boot, list")
+	}
+	switch args[0] {
+	case "boot":
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			return proxy.Boot(ctx, r, out, cfg.Network, cfg.ProxyImage)
+		})
+	case "list":
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			routes, err := proxy.List(ctx, r)
+			fmt.Fprintln(out, routes)
+			return err
+		})
+	}
+	return fmt.Errorf("unknown proxy command %q", args[0])
+}
