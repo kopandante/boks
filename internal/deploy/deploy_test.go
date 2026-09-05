@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -85,8 +86,8 @@ var fixed = Options{Pull: true, Env: []byte("SECRET=1\n"), Now: func() time.Time
 func TestRunHappyPath(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\n"
-	f.out["docker images ghcr.io/x/y"] = "v2\nv1\nv0\n"
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}]\n"
+	f.out["docker images ghcr.io/x/y"] = "v2 sha-a\nv1 sha-b\nv0 sha-c\n"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -95,15 +96,16 @@ func TestRunHappyPath(t *testing.T) {
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
 		"docker pull ghcr.io/x/y:v2",
-		"docker ps -a --filter label=boks.app=demo --format {{.Names}}",
+		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		"docker run -d --name demo-v2-1700000000 --network boks --restart unless-stopped " +
-			"--label boks.app=demo --label boks.version=v2 --env-file .boks/demo/demo-v2-1700000000.env " +
-			"-v demo-data:/data ghcr.io/x/y:v2",
+			"--label boks.app=demo --label boks.version=v2 " +
+			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
+			"--env-file .boks/demo/demo-v2-1700000000.env -v demo-data:/data ghcr.io/x/y:v2",
 		"docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --tls --health-check-path /up --deploy-timeout 60s",
 		"docker stop demo-v1-1",
 		"docker rm demo-v1-1",
-		"docker images ghcr.io/x/y --format {{.Tag}}",
+		"docker images ghcr.io/x/y --format {{.Tag}} {{.ID}}",
 		"docker rmi ghcr.io/x/y:v0",
 		"rmdir /tmp/boks-demo.lock",
 	}
@@ -127,6 +129,16 @@ func TestRunLocked(t *testing.T) {
 	}
 }
 
+// ports encodes a boks.ports label the way a previous deploy would have written it.
+func ports(t *testing.T, spec ...config.Port) string {
+	t.Helper()
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func TestRunKeepsOldWhenSwitchFails(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
@@ -147,7 +159,8 @@ func TestRunKeepsOldWhenSwitchFails(t *testing.T) {
 func TestRunRevertsSwitchedRoutesWhenLaterPortFails(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\n"
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
+		ports(t, config.Port{Name: "web", Port: 3000, Host: "demo.example.com"}) + "\n"
 	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("host is used by another service")
 	err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now})
 	if err == nil {
@@ -162,10 +175,92 @@ func TestRunRevertsSwitchedRoutesWhenLaterPortFails(t *testing.T) {
 	}
 }
 
+// The port a route is reverted to must come from the old container, not from a config that
+// changed since: the old container listens where it was started.
+func TestRunRevertsToThePortTheOldContainerActuallyListensOn(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
+		ports(t, config.Port{Name: "web", Port: 8080, Host: "demo.example.com", HealthPath: "/healthz"}) + "\n"
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
+		t.Fatal("want error")
+	}
+	want := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:8080 " +
+		"--host demo.example.com --health-check-path /healthz --deploy-timeout 60s"
+	if !f.has(want) {
+		t.Errorf("revert must use the old container's port and health check, calls:\n%s", strings.Join(f.calls, "\n"))
+	}
+	if f.has("--target demo-v1-1:3000") {
+		t.Error("revert must not aim at the current config's port")
+	}
+}
+
+// A container started by a boks without the label — the first deploy after an upgrade — must
+// still get its routes back, using the current config's ports, exactly as boks did before the
+// label existed. Refusing here would make the upgrade itself a regression.
+func TestRunRevertsWithoutTheLabelUsingTheCurrentConfig(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\n"
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
+	var log strings.Builder
+	if err := Run(context.Background(), f, &log, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
+		t.Fatal("want error")
+	}
+	want := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	if !f.has(want) {
+		t.Errorf("route must go back to the old container, calls:\n%s", strings.Join(f.calls, "\n"))
+	}
+	if !strings.Contains(log.String(), "no record of port") {
+		t.Errorf("the assumption must be stated, log:\n%s", log.String())
+	}
+}
+
+// A port name added to the config since the old container started is not in its label, but the
+// container may well listen on that port anyway — two hosts can share one container port. The
+// route must still be attempted: kamal-proxy's health check is what decides, and skipping would
+// strand the route on the failed release for nothing.
+func TestRunRevertsPortsMissingFromTheLabel(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
+		ports(t, config.Port{Name: "actions", Port: 3001, Host: "actions.example.com"}) + "\n"
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
+		t.Fatal("want error")
+	}
+	want := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	if !f.has(want) {
+		t.Errorf("an unrecorded port must still be reverted with the config's value, calls:\n%s", strings.Join(f.calls, "\n"))
+	}
+}
+
+func TestPruneRemovesUntaggedImages(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker images ghcr.io/x/y"] = "v2 sha-new\n<none> sha-dangling\nv1 sha-b\nv0 sha-c\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("docker rmi sha-dangling") {
+		t.Errorf("untagged layers must be pruned, calls:\n%s", strings.Join(f.calls, "\n"))
+	}
+	if f.has("docker rmi sha-new") || f.has("docker rmi ghcr.io/x/y:v2") {
+		t.Error("the image just deployed must never be pruned")
+	}
+	// keep=2 counts tagged versions only: v2 (current) + v1 retained, v0 removed.
+	if !f.has("docker rmi ghcr.io/x/y:v0") || f.has("docker rmi ghcr.io/x/y:v1") {
+		t.Errorf("keep=2 must retain v1 and drop v0, calls:\n%s", strings.Join(f.calls, "\n"))
+	}
+}
+
 func TestRunDoesNotGuessRevertTargetAmongSeveralOld(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\ndemo-v0-9\n"
+	// Both are labelled: what stops the revert here is the ambiguity, not a missing label.
+	p := ports(t, config.Port{Name: "web", Port: 3000, Host: "demo.example.com"})
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + p + "\ndemo-v0-9\t" + p + "\n"
 	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
 	var log strings.Builder
 	if err := Run(context.Background(), f, &log, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
