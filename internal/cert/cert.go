@@ -1,9 +1,13 @@
 // Package cert obtains DNS-01 certificates with lego on the operator's machine and installs
 // them into the proxy's certificate volume on each server.
 //
-// Two facts shape this design, both measured on the stand:
-//   - kamal-proxy keeps a manual certificate in memory and never re-reads the file, so a renewal
-//     only takes effect after the routes are deployed again (see deploy.Reroute).
+// Three facts shape this design, all measured on the stand:
+//   - A freshly created certificate volume is owned by root (`0:0 755`) and `docker exec`
+//     inherits the image's `USER kamal-proxy`, so the proxy user cannot write there at all.
+//     Files go in as root and are handed over with chown/chmod.
+//   - kamal-proxy keeps a certificate in memory and never re-reads the file. Restarting the
+//     container makes it read the paths recorded in its state again; that costs about 0.19 s of
+//     unavailability and preserves routes and TLS.
 //   - DNS tokens are often IP-restricted — the Cloudflare token for these zones is rejected from
 //     the servers and works from the laptop — so issuance belongs on the operator/CI side and
 //     the server only ever receives the finished files.
@@ -12,7 +16,9 @@ package cert
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -28,15 +34,23 @@ import (
 
 const stagingCA = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
-// dir is where installed certificates live inside the proxy container. The volume's root is
-// owned by the proxy user, so files written through `docker exec` land with the right owner and
-// no chown is needed.
+// dir is where installed certificates live inside the proxy container.
 const dir = "/certs/boks"
+
+// proxyUID is the uid:gid of the `kamal-proxy` user in the image; installed files are handed to
+// it because the proxy process is what has to read them.
+const proxyUID = "1001:1001"
 
 // ServerPaths are the certificate paths as kamal-proxy sees them.
 func ServerPaths(c *config.Cert) (crt, key string) {
 	return dir + "/" + c.Slug() + ".crt", dir + "/" + c.Slug() + ".key"
 }
+
+// loadedPath holds the fingerprint of the certificate the proxy was last restarted for. It is
+// what makes a partial failure recoverable: the file is written only after a successful reload,
+// so an interrupted run leaves it stale and the next run reloads again instead of reporting
+// "unchanged" forever.
+func loadedPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".loaded" }
 
 // LocalPaths are the files lego writes.
 func LocalPaths(cfg *config.Config) (crt, key string) {
@@ -65,45 +79,78 @@ func Obtain(ctx context.Context, log io.Writer, cfg *config.Config, force bool) 
 	fmt.Fprintf(log, "lego %s\n", args[0])
 	cmd := exec.CommandContext(ctx, "lego", args...)
 	cmd.Env = os.Environ() // the DNS provider reads its credentials from the environment
-	var errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = io.MultiWriter(log, &errb), io.MultiWriter(log, &errb)
+	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("lego: %w (is the DNS provider's token exported?)", err)
 	}
 	return nil
 }
 
-// Install copies the local certificate into the proxy's volume on one server and reports
-// whether the server's copy changed — an unchanged copy means there is nothing to reload.
-func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) (bool, error) {
-	crtLocal, keyLocal := LocalPaths(cfg)
-	crt, err := os.ReadFile(crtLocal)
+// Install copies the local certificate into the proxy's volume on one server. It writes
+// whenever the server's copy differs, and says nothing about whether the proxy has loaded it —
+// that is Pending's job.
+func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
+	crt, key, err := local(cfg)
 	if err != nil {
-		return false, fmt.Errorf("%w (run `boks cert issue` first)", err)
+		return err
 	}
-	key, err := os.ReadFile(keyLocal)
+	crtRemote, keyRemote := ServerPaths(cfg.Cert)
+	current, _ := read(ctx, r, crtRemote) // absent or unreadable counts as different
+	if bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(crt)) {
+		return nil
+	}
+	// The key goes first: if the run dies between the two, the certificate on the server still
+	// matches the old key, and the next run sees a differing .crt and writes both again.
+	if err := write(ctx, r, key, keyRemote); err != nil {
+		return err
+	}
+	if err := write(ctx, r, crt, crtRemote); err != nil {
+		return err
+	}
+	fmt.Fprintf(log, "cert installed: %s\n", crtRemote)
+	return nil
+}
+
+// Pending reports whether the proxy still has to be restarted to serve what is on disk.
+func Pending(ctx context.Context, r remote.Runner, cfg *config.Config) (bool, error) {
+	crt, _, err := local(cfg)
 	if err != nil {
 		return false, err
 	}
-	crtRemote, keyRemote := ServerPaths(cfg.Cert)
-	current, _ := read(ctx, r, crtRemote) // absent or unreadable counts as changed
-	if bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(crt)) {
-		return false, nil
-	}
-	for _, f := range []struct {
-		content []byte
-		path    string
-	}{{crt, crtRemote}, {key, keyRemote}} {
-		if err := write(ctx, r, f.content, f.path); err != nil {
-			return false, err
-		}
-	}
-	fmt.Fprintf(log, "cert installed: %s\n", crtRemote)
-	return true, nil
+	loaded, _ := read(ctx, r, loadedPath(cfg.Cert)) // absent marker means "never loaded"
+	return string(bytes.TrimSpace(loaded)) != fingerprint(crt), nil
 }
 
-// Status reads the certificate a server currently serves from disk.
-func Status(ctx context.Context, r remote.Runner, cfg *config.Config) (*x509.Certificate, error) {
+// Reload restarts the proxy so it re-reads the certificate files, then records what it loaded.
+// Measured on the stand: about 0.19 s of unavailability, routes and TLS preserved.
+func Reload(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
+	crt, _, err := local(cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(log, "restarting the proxy to load the certificate (~0.2s)")
+	if _, err := r.Run(ctx, "docker", "restart", proxy.Container); err != nil {
+		return err
+	}
+	return write(ctx, r, []byte(fingerprint(crt)+"\n"), loadedPath(cfg.Cert))
+}
+
+// Installed reports whether this server already has the certificate a deploy would point
+// kamal-proxy at.
+func Installed(ctx context.Context, r remote.Runner, cfg *config.Config) bool {
+	crtRemote, _ := ServerPaths(cfg.Cert)
+	out, err := read(ctx, r, crtRemote)
+	return err == nil && len(bytes.TrimSpace(out)) > 0
+}
+
+// Status is what a server holds: the certificate on disk, and whether the proxy has actually
+// loaded it. Reporting only the file would confirm a renewal that never took effect.
+type Status struct {
+	Cert    *x509.Certificate
+	Pending bool
+}
+
+func Read(ctx context.Context, r remote.Runner, cfg *config.Config) (*Status, error) {
 	crtRemote, _ := ServerPaths(cfg.Cert)
 	content, err := read(ctx, r, crtRemote)
 	if err != nil {
@@ -113,14 +160,36 @@ func Status(ctx context.Context, r remote.Runner, cfg *config.Config) (*x509.Cer
 	if block == nil {
 		return nil, fmt.Errorf("%s: not a PEM certificate", crtRemote)
 	}
-	return x509.ParseCertificate(block.Bytes)
+	parsed, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	loaded, _ := read(ctx, r, loadedPath(cfg.Cert))
+	return &Status{Cert: parsed, Pending: string(bytes.TrimSpace(loaded)) != fingerprint(content)}, nil
 }
 
-// write creates the file inside the proxy container, so it is owned by the proxy user and
-// readable only by it.
+func local(cfg *config.Config) (crt, key []byte, err error) {
+	crtPath, keyPath := LocalPaths(cfg)
+	if crt, err = os.ReadFile(crtPath); err != nil {
+		return nil, nil, fmt.Errorf("%w (run `boks cert issue` first)", err)
+	}
+	key, err = os.ReadFile(keyPath)
+	return crt, key, err
+}
+
+func fingerprint(pemBytes []byte) string {
+	sum := sha256.Sum256(bytes.TrimSpace(pemBytes))
+	return hex.EncodeToString(sum[:])
+}
+
+// write puts the file inside the proxy container as root, then hands it to the proxy user:
+// mode 640 so the key is not world-readable, and the directory 750. Writing as the proxy user
+// instead fails outright on a fresh volume, which is root-owned (measured: `0:0 755`).
 func write(ctx context.Context, r remote.Runner, content []byte, path string) error {
-	_, err := r.Pipe(ctx, content, "docker", "exec", "-i", proxy.Container, "sh", "-c",
-		"umask 077 && mkdir -p "+remote.Quote(dir)+" && cat > "+remote.Quote(path))
+	script := "set -e; umask 077; mkdir -p " + remote.Quote(dir) + "; cat > " + remote.Quote(path) +
+		"; chown " + proxyUID + " " + remote.Quote(dir) + " " + remote.Quote(path) +
+		"; chmod 750 " + remote.Quote(dir) + "; chmod 640 " + remote.Quote(path)
+	_, err := r.Pipe(ctx, content, "docker", "exec", "-i", "-u", "0", proxy.Container, "sh", "-c", script)
 	return err
 }
 

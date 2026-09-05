@@ -125,13 +125,17 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 	}
 	if args[0] == "status" {
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			c, err := cert.Status(ctx, r, cfg)
+			s, err := cert.Read(ctx, r, cfg)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "%s\n  issuer %s\n  expires %s (in %d days)\n", c.Subject.CommonName,
-				c.Issuer.CommonName, c.NotAfter.Format(time.DateOnly),
-				int(time.Until(c.NotAfter).Hours()/24))
+			state := "loaded by the proxy"
+			if s.Pending {
+				state = "ON DISK ONLY — the proxy is still serving the previous one; run `boks cert renew`"
+			}
+			fmt.Fprintf(out, "%s\n  issuer %s\n  expires %s (in %d days)\n  %s\n", s.Cert.Subject.CommonName,
+				s.Cert.Issuer.CommonName, s.Cert.NotAfter.Format(time.DateOnly),
+				int(time.Until(s.Cert.NotAfter).Hours()/24), state)
 			return nil
 		})
 	}
@@ -142,17 +146,24 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 		return err
 	}
 	return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-		changed, err := cert.Install(ctx, r, out, cfg)
+		if err := proxy.Boot(ctx, r, out, cfg.Network, cfg.ProxyImage); err != nil {
+			return err
+		}
+		if err := cert.Install(ctx, r, out, cfg); err != nil {
+			return err
+		}
+		// Whether a reload is still owed is tracked on the server, not inferred from whether
+		// this run wrote a file: a run that installed and then died must not leave the proxy
+		// serving the old certificate while later runs report success.
+		pending, err := cert.Pending(ctx, r, cfg)
 		if err != nil {
 			return err
 		}
-		if !changed {
-			fmt.Fprintln(out, "certificate unchanged, routes left alone")
+		if !pending {
+			fmt.Fprintln(out, "certificate unchanged and already loaded")
 			return nil
 		}
-		// kamal-proxy holds the certificate in memory; the routes must be deployed again for
-		// the new file to take effect.
-		return deploy.Reroute(ctx, r, out, cfg)
+		return cert.Reload(ctx, r, out, cfg)
 	})
 }
 

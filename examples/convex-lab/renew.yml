@@ -26,10 +26,17 @@ jobs:
           go-version: "1.26"
 
       - name: install boks and lego
+        env:
+          # Pinned on purpose: an unpinned "latest" download changes asset names between
+          # releases, and the failure mode is a tarball that is really an HTML error page.
+          LEGO_VERSION: v5.4.1
         run: |
+          set -euo pipefail
           go install github.com/kopandante/boks/cmd/boks@latest
-          curl -sSL https://github.com/go-acme/lego/releases/latest/download/lego_Linux_x86_64.tar.gz \
+          # -f makes curl fail on 404 instead of piping GitHub's error page into tar.
+          curl -fsSL "https://github.com/go-acme/lego/releases/download/${LEGO_VERSION}/lego_${LEGO_VERSION}_linux_amd64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin lego
+          lego --version
 
       - name: ssh key
         run: |
@@ -39,17 +46,29 @@ jobs:
           printf 'Host boks-lab\n  HostName %s\n  User ubuntu\n  StrictHostKeyChecking accept-new\n' \
             "${{ secrets.BOKS_LAB_HOST }}" > ~/.ssh/config
 
-      # lego keeps the ACME account key and the certificate here. Without a cache every run
+      # lego keeps the ACME account key and the certificate here. Without this every run
       # registers a new account and re-issues from scratch, which burns rate limits fast.
-      - uses: actions/cache@v4
+      #
+      # restore/save rather than the combined action, with a run-unique key: on an exact key hit
+      # the combined action does not save again, so the cache would freeze at the first run's
+      # contents. The certificate would then be restored stale forever, re-issued on every run
+      # once it passed the renewal threshold, and Let's Encrypt would start refusing duplicates.
+      - uses: actions/cache/restore@v4
         with:
           path: examples/convex-lab/.lego
-          key: lego-${{ github.repository }}
+          key: lego-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: lego-${{ github.repository }}-
 
       - name: renew
         env:
           CLOUDFLARE_DNS_API_TOKEN: ${{ secrets.CLOUDFLARE_DNS_API_TOKEN }}
         run: boks -f examples/convex-lab/boks.yml cert renew
+
+      - uses: actions/cache/save@v4
+        if: always() # a renewal that happened must not be lost because a later step failed
+        with:
+          path: examples/convex-lab/.lego
+          key: lego-${{ github.repository }}-${{ github.run_id }}
 
       - name: report a failure
         if: failure()

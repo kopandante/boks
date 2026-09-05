@@ -45,6 +45,12 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
 		return err
 	}
+	// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
+	// the deploy or, worse, makes it accept and then fail every TLS handshake for that host.
+	if covered(cfg) && !cert.Installed(ctx, r, cfg) {
+		crt, _ := cert.ServerPaths(cfg.Cert)
+		return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
+	}
 	if err := pull(ctx, r, log, cfg.Image+":"+tag, o.Pull); err != nil {
 		return err
 	}
@@ -179,6 +185,16 @@ func runArgs(cfg *config.Config, name, tag, envPath string) []string {
 	return append(a, cfg.Image+":"+tag)
 }
 
+// covered reports whether any of the app's hosts is served by the configured certificate.
+func covered(cfg *config.Config) bool {
+	for _, p := range cfg.Ports {
+		if cfg.Cert.Covers(p.Host) {
+			return true
+		}
+	}
+	return false
+}
+
 func service(cfg *config.Config, target string, p config.Port) proxy.Service {
 	svc := proxy.Service{
 		Name: proxy.ServiceName(cfg.App, p.Name), Target: fmt.Sprintf("%s:%d", target, p.Port), Host: p.Host,
@@ -190,24 +206,6 @@ func service(cfg *config.Config, target string, p config.Port) proxy.Service {
 		svc.CertPath, svc.KeyPath = cert.ServerPaths(cfg.Cert)
 	}
 	return svc
-}
-
-// Reroute points the app's routes at the container already running, without deploying anything
-// new. It exists because kamal-proxy holds a manual certificate in memory: after a renewal the
-// files on disk change but the proxy keeps serving the old one until the routes are deployed
-// again. Measured on the stand at 0.05 s per route, with no dropped requests.
-func Reroute(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
-	out, err := r.Run(ctx, "docker", "ps", "--filter", "label=boks.app="+cfg.App,
-		"--filter", "status=running", "--format", "{{.Names}}")
-	if err != nil {
-		return err
-	}
-	running := strings.Fields(out)
-	if len(running) == 0 {
-		return fmt.Errorf("%s is not running here, nothing to reroute", cfg.App)
-	}
-	_, err = switchProxy(ctx, r, log, cfg, running[0])
-	return err
 }
 
 // switchProxy points every route at the new container, one port at a time, and returns the
