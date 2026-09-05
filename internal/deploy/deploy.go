@@ -209,19 +209,28 @@ func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	if len(switched) == 0 {
 		return
 	}
-	if len(old) != 1 || len(old[0].ports) == 0 {
+	if len(old) != 1 {
 		fmt.Fprintf(log, "warning: %d route(s) already point at the new container and cannot be reverted automatically (previous containers: %v)\n", len(switched), names(old))
 		return
 	}
 	prev := old[0]
+	if len(prev.ports) == 0 {
+		// Started by a boks that did not write the label yet — the first deploy after an
+		// upgrade. Reverting with the current config's ports is what boks did before the label
+		// existed: correct whenever the ports did not change, and refusing outright would make
+		// the upgrade itself a regression.
+		fmt.Fprintf(log, "warning: %s predates the boks.ports label; reverting with the current config's ports — if a port changed since that container started, its health check will fail\n", prev.name)
+	}
 	for _, p := range switched {
-		prevPort, ok := prev.ports[p.Name]
-		if !ok {
+		target := p // the current config, used as-is when the old container has no record
+		if recorded, ok := prev.ports[p.Name]; ok {
+			recorded.Host = p.Host // the domain belongs to the route, not to the container
+			target = recorded
+		} else if len(prev.ports) > 0 {
 			fmt.Fprintf(log, "warning: %s has no port %q, leaving its route on the new container\n", prev.name, p.Name)
 			continue
 		}
-		prevPort.Host = p.Host // the domain belongs to the route, not to the container
-		svc := service(cfg, prev.name, prevPort)
+		svc := service(cfg, prev.name, target)
 		fmt.Fprintf(log, "revert %s → %s\n", svc.Name, svc.Target)
 		best(ctx, r, log, proxy.DeployArgs(svc)...)
 	}

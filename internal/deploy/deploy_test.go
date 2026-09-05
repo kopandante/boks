@@ -196,8 +196,10 @@ func TestRunRevertsToThePortTheOldContainerActuallyListensOn(t *testing.T) {
 	}
 }
 
-// A container from an older boks has no port label: guessing is worse than saying so.
-func TestRunDoesNotRevertWithoutTheOldContainersPortLabel(t *testing.T) {
+// A container started by a boks without the label — the first deploy after an upgrade — must
+// still get its routes back, using the current config's ports, exactly as boks did before the
+// label existed. Refusing here would make the upgrade itself a regression.
+func TestRunRevertsWithoutTheLabelUsingTheCurrentConfig(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\n"
@@ -206,11 +208,12 @@ func TestRunDoesNotRevertWithoutTheOldContainersPortLabel(t *testing.T) {
 	if err := Run(context.Background(), f, &log, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
 		t.Fatal("want error")
 	}
-	if f.has("--target demo-v1-1:") {
-		t.Errorf("must not guess a port for an unlabelled container, calls:\n%s", strings.Join(f.calls, "\n"))
+	want := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	if !f.has(want) {
+		t.Errorf("route must go back to the old container, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
-	if !strings.Contains(log.String(), "cannot be reverted automatically") {
-		t.Errorf("operator must be told, log:\n%s", log.String())
+	if !strings.Contains(log.String(), "predates the boks.ports label") {
+		t.Errorf("the assumption must be stated, log:\n%s", log.String())
 	}
 }
 
