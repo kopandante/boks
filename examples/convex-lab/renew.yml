@@ -60,15 +60,23 @@ jobs:
       # Reusing the ACME account keeps registrations off the rate limiter — hosted runners share
       # outbound addresses, and account creation is limited per IP. Without this secret lego
       # simply registers a new account each run, which still works.
+      # The emptiness check lives in the script, not in `if:` — the secrets context is not
+      # available to a step condition, and a workflow that references it there is rejected as a
+      # whole, so nothing would run at all: neither the renewal nor the failure alert below.
       - name: acme account
-        if: ${{ secrets.LEGO_ACCOUNT_KEY != '' }}
         env:
-          ACCOUNT_DIR: examples/convex-lab/.lego/accounts/acme-v02.api.letsencrypt.org/${{ secrets.LEGO_EMAIL }}/keys
+          ACCOUNT_KEY: ${{ secrets.LEGO_ACCOUNT_KEY }}
+          LEGO_EMAIL: ${{ secrets.LEGO_EMAIL }}
         run: |
           set -euo pipefail
-          install -m 700 -d "$ACCOUNT_DIR"
-          printf '%s\n' "${{ secrets.LEGO_ACCOUNT_KEY }}" > "$ACCOUNT_DIR/${{ secrets.LEGO_EMAIL }}.key"
-          chmod 600 "$ACCOUNT_DIR/${{ secrets.LEGO_EMAIL }}.key"
+          if [ -z "${ACCOUNT_KEY:-}" ]; then
+            echo "no LEGO_ACCOUNT_KEY secret: lego will register a new ACME account this run"
+            exit 0
+          fi
+          DIR="examples/convex-lab/.lego/accounts/acme-v02.api.letsencrypt.org/${LEGO_EMAIL}/keys"
+          install -m 700 -d "$DIR"
+          printf '%s\n' "$ACCOUNT_KEY" > "$DIR/${LEGO_EMAIL}.key"
+          chmod 600 "$DIR/${LEGO_EMAIL}.key"
 
       - name: fetch the current certificate from the server
         run: boks -f examples/convex-lab/boks.yml cert pull

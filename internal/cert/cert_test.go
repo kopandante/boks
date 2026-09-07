@@ -112,6 +112,11 @@ func TestInstallSkipsAnIdenticalCertificate(t *testing.T) {
 	f, cfg := newFake(), testConfig(t)
 	crt, _ := ServerPaths(cfg.Cert)
 	f.files[crt] = certPEM
+	meta, err := os.ReadFile(localBase(cfg) + ".json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.files[metaPath(cfg.Cert)] = string(meta) // a server that is already fully up to date
 	if err := Install(context.Background(), f, io.Discard, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +160,60 @@ func TestPendingWithoutLocalLegoState(t *testing.T) {
 	pending, err := Pending(ctx, f, cfg)
 	if err != nil || !pending {
 		t.Fatalf("installed but not loaded is pending regardless of local files, got %v %v", pending, err)
+	}
+}
+
+// The case the pull exists for: a machine that holds only what pull fetched. On the ~59 days out
+// of 60 when lego decides nothing is due, `cert renew` must be a quiet no-op there — reading the
+// private key before deciding would break it every one of those days.
+func TestInstallSkipsWithoutTheLocalKeyWhenNothingChanged(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(localBase(cfg) + ".key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatalf("an unchanged certificate must not need the key: %v", err)
+	}
+}
+
+// A server set up before boks stored the metadata holds the current certificate and no .json.
+// The certificate matches, so nothing would ever be written — and `cert pull` needs that file.
+func TestInstallRepairsMissingMetadataOnAnUnchangedCertificate(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.files, metaPath(cfg.Cert)) // the state a previous release leaves behind
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.files[metaPath(cfg.Cert)]; !ok {
+		t.Error("the metadata must be restored without re-issuing the certificate")
+	}
+}
+
+// A pull that writes the certificate and then fails on the metadata leaves behind exactly the
+// bare-.crt state that makes lego issue a fresh certificate on every run.
+func TestPullWritesNothingWhenTheMetadataIsMissing(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.files, metaPath(cfg.Cert))
+	base := localBase(cfg)
+	for _, p := range []string{base + ".crt", base + ".json"} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Pull(ctx, f, io.Discard, cfg); err == nil {
+		t.Fatal("want an error when the server has no metadata")
+	}
+	if _, err := os.Stat(base + ".crt"); err == nil {
+		t.Error("a failed pull must not leave a lone certificate behind")
 	}
 }
 

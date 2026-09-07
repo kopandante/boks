@@ -100,14 +100,30 @@ func Obtain(ctx context.Context, log io.Writer, cfg *config.Config, force bool) 
 // whenever the server's copy differs, and says nothing about whether the proxy has loaded it —
 // that is Pending's job.
 func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
-	crt, key, err := local(cfg)
+	crtPath, keyPath := LocalPaths(cfg)
+	crt, err := os.ReadFile(crtPath)
 	if err != nil {
+		return fmt.Errorf("%w (run `boks cert issue` first)", err)
+	}
+	// Metadata is reconciled on its own, before the certificate comparison below: a server set up
+	// by a boks that did not store it holds the current certificate and no .json, and that
+	// combination would otherwise be unrepairable — the certificate matches, so the comparison
+	// returns early and never writes anything, while `cert pull` needs the .json to exist.
+	if err := installMeta(ctx, r, log, cfg); err != nil {
 		return err
 	}
 	crtRemote, keyRemote := ServerPaths(cfg.Cert)
 	current, _ := read(ctx, r, crtRemote) // absent or unreadable counts as different
 	if bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(crt)) {
 		return nil
+	}
+	// The private key is read only now, on the path that actually writes it. Reading it earlier
+	// would break the case this whole feature exists for: a renewal running where `cert pull`
+	// left only the certificate and its metadata, on any of the ~59 days out of 60 when lego
+	// decides nothing is due.
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		return err
 	}
 	// A run that dies partway leaves a mismatched set on the server whichever order these go in.
 	// What makes that recoverable is the comparison above — the next run sees a .crt that differs
@@ -117,15 +133,28 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 	if err := write(ctx, r, key, keyRemote); err != nil {
 		return err
 	}
-	if meta, err := os.ReadFile(localBase(cfg) + ".json"); err == nil {
-		if err := write(ctx, r, meta, metaPath(cfg.Cert)); err != nil {
-			return err
-		}
-	}
 	if err := write(ctx, r, crt, crtRemote); err != nil {
 		return err
 	}
 	fmt.Fprintf(log, "cert installed: %s\n", crtRemote)
+	return nil
+}
+
+// installMeta puts lego's metadata on the server when the local copy differs from what is there.
+// Absent locally means there is nothing to install — not an error.
+func installMeta(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
+	meta, err := os.ReadFile(localBase(cfg) + ".json")
+	if err != nil {
+		return nil
+	}
+	current, _ := read(ctx, r, metaPath(cfg.Cert))
+	if bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(meta)) {
+		return nil
+	}
+	if err := write(ctx, r, meta, metaPath(cfg.Cert)); err != nil {
+		return err
+	}
+	fmt.Fprintf(log, "cert metadata installed: %s\n", metaPath(cfg.Cert))
 	return nil
 }
 
@@ -134,18 +163,27 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 // secret, so a scheduled renewal elsewhere never has to hold the private key.
 func Pull(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
 	crtRemote, _ := ServerPaths(cfg.Cert)
+	files := []struct{ remote, local string }{
+		{crtRemote, localBase(cfg) + ".crt"},
+		{metaPath(cfg.Cert), localBase(cfg) + ".json"},
+	}
+	// Both are fetched before either is written. Writing the certificate and then failing on the
+	// metadata would leave exactly the state that makes lego ignore what is there and issue a
+	// fresh certificate on every run.
+	got := make([][]byte, len(files))
+	for i, f := range files {
+		content, err := read(ctx, r, f.remote)
+		if err != nil {
+			return fmt.Errorf("pull %s: %w (a server set up before boks stored the metadata has "+
+				"no .json; run `boks cert renew` once where the lego state lives to install it)", f.remote, err)
+		}
+		got[i] = append(bytes.TrimSpace(content), '\n')
+	}
 	if err := os.MkdirAll(filepath.Dir(localBase(cfg)), 0o700); err != nil {
 		return err
 	}
-	for _, f := range []struct{ remote, local string }{
-		{crtRemote, localBase(cfg) + ".crt"},
-		{metaPath(cfg.Cert), localBase(cfg) + ".json"},
-	} {
-		content, err := read(ctx, r, f.remote)
-		if err != nil {
-			return fmt.Errorf("pull %s: %w", f.remote, err)
-		}
-		if err := os.WriteFile(f.local, append(bytes.TrimSpace(content), '\n'), 0o600); err != nil {
+	for i, f := range files {
+		if err := os.WriteFile(f.local, got[i], 0o600); err != nil {
 			return err
 		}
 		fmt.Fprintf(log, "pulled %s\n", f.local)
@@ -227,15 +265,6 @@ func Read(ctx context.Context, r remote.Runner, cfg *config.Config) (*Status, er
 	}
 	loaded, _ := read(ctx, r, loadedPath(cfg.Cert))
 	return &Status{Cert: parsed, Pending: string(bytes.TrimSpace(loaded)) != fingerprint(content)}, nil
-}
-
-func local(cfg *config.Config) (crt, key []byte, err error) {
-	crtPath, keyPath := LocalPaths(cfg)
-	if crt, err = os.ReadFile(crtPath); err != nil {
-		return nil, nil, fmt.Errorf("%w (run `boks cert issue` first)", err)
-	}
-	key, err = os.ReadFile(keyPath)
-	return crt, key, err
 }
 
 func fingerprint(pemBytes []byte) string {
