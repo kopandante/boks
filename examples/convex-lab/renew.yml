@@ -1,0 +1,89 @@
+# Scheduled certificate renewal, to be copied into .github/workflows/ of the app's repository.
+#
+# Nothing secret is cached. An earlier version of this file kept lego's whole state directory in
+# an actions/cache, which meant the ACME account key and the certificate private key sat in a
+# store that any pull request of the repository can restore from. The state now lives where it
+# belongs: the certificate on the server, the ACME account key in the repository's secrets.
+#
+# `boks cert pull` fetches only the certificate and lego's metadata for it — measured against
+# lego 5: those two files are exactly what it needs to answer "is a renewal due", and a bare
+# .crt is not enough (it would issue a fresh certificate every run). The private key never
+# leaves the server; when a renewal does happen, lego generates a new key here and boks installs
+# the new pair.
+#
+# Runs daily on purpose: lego renews only when actually due (a third of the lifetime by default,
+# or `cert.renew_days`), and boks reloads the proxy only when the file on the server really
+# changed. A day with nothing to do costs two SSH connections and prints "certificate unchanged
+# and already loaded".
+#
+# The failure path matters more than the happy one: Traefik's silent renewal failure went
+# unnoticed for months on these servers, so this job is deliberately loud when it breaks.
+
+name: renew certificates
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: install boks and lego
+        env:
+          # Pinned on purpose: an unpinned "latest" download changes asset names between
+          # releases, and the failure mode is a tarball that is really an HTML error page.
+          LEGO_VERSION: v5.4.1
+        run: |
+          set -euo pipefail
+          go install github.com/kopandante/boks/cmd/boks@latest
+          # -f makes curl fail on 404 instead of piping GitHub's error page into tar.
+          curl -fsSL "https://github.com/go-acme/lego/releases/download/${LEGO_VERSION}/lego_${LEGO_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin lego
+          lego --version
+
+      - name: ssh key
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.BOKS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf 'Host boks-lab\n  HostName %s\n  User ubuntu\n  StrictHostKeyChecking accept-new\n' \
+            "${{ secrets.BOKS_LAB_HOST }}" > ~/.ssh/config
+
+      # Reusing the ACME account keeps registrations off the rate limiter — hosted runners share
+      # outbound addresses, and account creation is limited per IP. Without this secret lego
+      # simply registers a new account each run, which still works.
+      - name: acme account
+        if: ${{ secrets.LEGO_ACCOUNT_KEY != '' }}
+        env:
+          ACCOUNT_DIR: examples/convex-lab/.lego/accounts/acme-v02.api.letsencrypt.org/${{ secrets.LEGO_EMAIL }}/keys
+        run: |
+          set -euo pipefail
+          install -m 700 -d "$ACCOUNT_DIR"
+          printf '%s\n' "${{ secrets.LEGO_ACCOUNT_KEY }}" > "$ACCOUNT_DIR/${{ secrets.LEGO_EMAIL }}.key"
+          chmod 600 "$ACCOUNT_DIR/${{ secrets.LEGO_EMAIL }}.key"
+
+      - name: fetch the current certificate from the server
+        run: boks -f examples/convex-lab/boks.yml cert pull
+
+      - name: renew
+        env:
+          CLOUDFLARE_DNS_API_TOKEN: ${{ secrets.CLOUDFLARE_DNS_API_TOKEN }}
+        run: boks -f examples/convex-lab/boks.yml cert renew
+
+      - name: report a failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+        run: |
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT}" \
+            -d text="boks: certificate renewal failed — ${{ github.repository }} run ${{ github.run_id }}"

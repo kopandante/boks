@@ -27,6 +27,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
   cert renew       same, but lego skips the run unless the certificate is due (safe in a cron)
   cert status      subject and expiry of the certificate each server currently serves
+  cert pull        copy the certificate and its lego metadata back from the first server, so a
+                   renewal elsewhere can tell whether anything is due without holding the key
 
 Certificates are issued where boks runs, not on the servers: DNS tokens are often bound to an
 IP. Export the provider's credentials (e.g. CLOUDFLARE_DNS_API_TOKEN) before cert issue/renew.
@@ -118,7 +120,7 @@ func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config)
 
 func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
 	if len(args) != 1 {
-		return fmt.Errorf("cert needs one of: issue, renew, status")
+		return fmt.Errorf("cert needs one of: issue, renew, status, pull")
 	}
 	if cfg.Cert == nil {
 		return fmt.Errorf("no `cert` block in the config: plain domains are served by kamal-proxy's autocert and need nothing here")
@@ -138,6 +140,12 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 				int(time.Until(s.Cert.NotAfter).Hours()/24), state)
 			return nil
 		})
+	}
+	if args[0] == "pull" {
+		// One server is enough: they all hold the same certificate, and lego only needs to read
+		// it to decide whether a renewal is due.
+		fmt.Fprintf(out, "== %s\n", cfg.Servers[0])
+		return cert.Pull(ctx, remote.SSH{Host: cfg.Servers[0]}, out, cfg)
 	}
 	if args[0] != "issue" && args[0] != "renew" {
 		return fmt.Errorf("unknown cert command %q", args[0])

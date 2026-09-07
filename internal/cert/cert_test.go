@@ -55,7 +55,11 @@ func testConfig(t *testing.T) *config.Config {
 	if err := os.MkdirAll(certs, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string]string{"_.lab.example.com.crt": certPEM, "_.lab.example.com.key": "KEY"} {
+	for name, content := range map[string]string{
+		"_.lab.example.com.crt":  certPEM,
+		"_.lab.example.com.key":  "KEY",
+		"_.lab.example.com.json": `{"domain":"*.lab.example.com"}`, // lego's own metadata
+	} {
 		if err := os.WriteFile(filepath.Join(certs, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -116,6 +120,69 @@ func TestInstallSkipsAnIdenticalCertificate(t *testing.T) {
 	}
 }
 
+// A deploy points routes at the certificate path, which makes the proxy read it — so a deploy
+// is a load and must clear the debt, or status would keep claiming a reload is owed.
+func TestMarkLoadedClearsWhatADeployLoaded(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkLoaded(ctx, f, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(f.calls, "\n"), "docker restart") {
+		t.Error("recording a load must not restart anything")
+	}
+	pending, err := Pending(ctx, f, cfg)
+	if err != nil || pending {
+		t.Fatalf("nothing owed after a deploy loaded it, got %v %v", pending, err)
+	}
+}
+
+// Pending compares two things that both live on the server, so it answers from a machine with no
+// lego state — a CI runner, or a second operator.
+func TestPendingWithoutLocalLegoState(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	crtLocal, keyLocal := LocalPaths(cfg)
+	for _, p := range []string{crtLocal, keyLocal} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Pending(ctx, f, cfg)
+	if err != nil || !pending {
+		t.Fatalf("installed but not loaded is pending regardless of local files, got %v %v", pending, err)
+	}
+}
+
+// Pull brings back exactly what a renewal needs to decide, and nothing secret: measured against
+// lego 5, a bare .crt is ignored and a fresh certificate issued, while .crt plus .json is
+// recognised and skipped until due.
+func TestPullFetchesTheCertificateAndMetadataOnly(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := localBase(cfg)
+	for _, p := range []string{base + ".crt", base + ".json", base + ".key"} {
+		os.Remove(p) //nolint:errcheck // why: absence is the state under test, not an error
+	}
+	if err := Pull(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{base + ".crt", base + ".json"} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s must be pulled: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(base + ".key"); err == nil {
+		t.Error("the private key must not be pulled — a renewal does not need it")
+	}
+}
+
 // The whole point of tracking the reload separately: a run that installed the file and then died
 // must leave the next run knowing a reload is still owed.
 func TestPendingUntilReloadRecordsIt(t *testing.T) {
@@ -139,8 +206,10 @@ func TestPendingUntilReloadRecordsIt(t *testing.T) {
 	}
 }
 
-// A certificate replaced on disk makes a reload owed again, even though the marker exists.
-func TestPendingAgainAfterTheCertificateChanges(t *testing.T) {
+// A renewal installed on the server makes a reload owed again, even though the marker exists.
+// Note what does NOT make it pending: a new certificate sitting only on the operator's disk —
+// the proxy cannot be behind on something the server has never been given.
+func TestPendingAgainAfterANewCertificateIsInstalled(t *testing.T) {
 	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
 	if err := Install(ctx, f, io.Discard, cfg); err != nil {
 		t.Fatal(err)
@@ -153,8 +222,15 @@ func TestPendingAgainAfterTheCertificateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err := Pending(ctx, f, cfg)
+	if err != nil || pending {
+		t.Fatalf("a certificate only on the local disk is not owed to the proxy yet, got %v %v", pending, err)
+	}
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = Pending(ctx, f, cfg)
 	if err != nil || !pending {
-		t.Fatalf("a new certificate must be pending again, got %v %v", pending, err)
+		t.Fatalf("once installed it must be pending, got %v %v", pending, err)
 	}
 }
 

@@ -67,6 +67,13 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		revert(ctx, r, log, cfg, switched, old)
 		return fmt.Errorf("%w\nnew container %s is left running for inspection; see the revert/warning lines above for where traffic goes now", err, name)
 	}
+	// Routing a host at a certificate path makes the proxy read that file, so the deploy is a
+	// load: record it, or `cert status` will keep claiming a reload is owed.
+	if covered(cfg) {
+		if err := cert.MarkLoaded(ctx, r, cfg); err != nil {
+			fmt.Fprintf(log, "warning: could not record the loaded certificate: %v\n", err)
+		}
+	}
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
 	return nil

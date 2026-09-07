@@ -46,6 +46,12 @@ func ServerPaths(c *config.Cert) (crt, key string) {
 	return dir + "/" + c.Slug() + ".crt", dir + "/" + c.Slug() + ".key"
 }
 
+// metaPath is lego's own metadata for the certificate. The server keeps a copy because it is
+// what a renewal elsewhere needs to decide whether anything is due: measured against lego 5,
+// a bare .crt is ignored and a fresh certificate is issued, while .crt plus .json is recognised
+// and skipped until it is actually time. The private key is not part of that decision.
+func metaPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".json" }
+
 // loadedPath holds the fingerprint of the certificate the proxy was last restarted for. It is
 // what makes a partial failure recoverable: the file is written only after a successful reload,
 // so an interrupted run leaves it stale and the next run reloads again instead of reporting
@@ -54,8 +60,12 @@ func loadedPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".loaded"
 
 // LocalPaths are the files lego writes.
 func LocalPaths(cfg *config.Config) (crt, key string) {
-	base := filepath.Join(cfg.LegoPath(), "certificates", cfg.Cert.Slug())
+	base := localBase(cfg)
 	return base + ".crt", base + ".key"
+}
+
+func localBase(cfg *config.Config) string {
+	return filepath.Join(cfg.LegoPath(), "certificates", cfg.Cert.Slug())
 }
 
 // Obtain runs lego. lego decides on its own whether a renewal is due (`--renew-days`, or a
@@ -99,12 +109,18 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 	if bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(crt)) {
 		return nil
 	}
-	// A run that dies between the two writes leaves a mismatched pair on the server whichever
-	// order they go in. What makes that recoverable is the comparison above — the next run sees
-	// a .crt that differs from the local one and writes both again — and the marker, which was
-	// never updated, so the proxy is not restarted onto the half-written pair.
+	// A run that dies partway leaves a mismatched set on the server whichever order these go in.
+	// What makes that recoverable is the comparison above — the next run sees a .crt that differs
+	// from the local one and writes everything again — and the marker, which was never updated,
+	// so the proxy is not restarted onto a half-written pair. The certificate goes last for the
+	// same reason: it is what that comparison keys on.
 	if err := write(ctx, r, key, keyRemote); err != nil {
 		return err
+	}
+	if meta, err := os.ReadFile(localBase(cfg) + ".json"); err == nil {
+		if err := write(ctx, r, meta, metaPath(cfg.Cert)); err != nil {
+			return err
+		}
 	}
 	if err := write(ctx, r, crt, crtRemote); err != nil {
 		return err
@@ -113,28 +129,71 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 	return nil
 }
 
-// Pending reports whether the proxy still has to be restarted to serve what is on disk.
+// Pull copies the certificate and lego's metadata for it back from a server into the local lego
+// directory — the two files a renewal needs to decide whether anything is due. Neither is
+// secret, so a scheduled renewal elsewhere never has to hold the private key.
+func Pull(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
+	crtRemote, _ := ServerPaths(cfg.Cert)
+	if err := os.MkdirAll(filepath.Dir(localBase(cfg)), 0o700); err != nil {
+		return err
+	}
+	for _, f := range []struct{ remote, local string }{
+		{crtRemote, localBase(cfg) + ".crt"},
+		{metaPath(cfg.Cert), localBase(cfg) + ".json"},
+	} {
+		content, err := read(ctx, r, f.remote)
+		if err != nil {
+			return fmt.Errorf("pull %s: %w", f.remote, err)
+		}
+		if err := os.WriteFile(f.local, append(bytes.TrimSpace(content), '\n'), 0o600); err != nil {
+			return err
+		}
+		fmt.Fprintf(log, "pulled %s\n", f.local)
+	}
+	return nil
+}
+
+// Pending reports whether the proxy still has to load what is on the server's disk. Both sides
+// of the comparison come from the server, so this answers the same way from a machine that has
+// no lego state at all — a CI runner, or a second operator.
 func Pending(ctx context.Context, r remote.Runner, cfg *config.Config) (bool, error) {
-	crt, _, err := local(cfg)
+	installed, err := serverFingerprint(ctx, r, cfg)
 	if err != nil {
 		return false, err
 	}
 	loaded, _ := read(ctx, r, loadedPath(cfg.Cert)) // absent marker means "never loaded"
-	return string(bytes.TrimSpace(loaded)) != fingerprint(crt), nil
+	return string(bytes.TrimSpace(loaded)) != installed, nil
 }
 
 // Reload restarts the proxy so it re-reads the certificate files, then records what it loaded.
 // Measured on the stand: about 0.19 s of unavailability, routes and TLS preserved.
 func Reload(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
-	crt, _, err := local(cfg)
-	if err != nil {
-		return err
-	}
 	fmt.Fprintln(log, "restarting the proxy to load the certificate (~0.2s)")
 	if _, err := r.Run(ctx, "docker", "restart", proxy.Container); err != nil {
 		return err
 	}
-	return write(ctx, r, []byte(fingerprint(crt)+"\n"), loadedPath(cfg.Cert))
+	return MarkLoaded(ctx, r, cfg)
+}
+
+// MarkLoaded records the certificate the proxy is now serving. A deploy calls it too: pointing a
+// route at a certificate path makes kamal-proxy read the file there and then, so without this
+// the marker would go stale after an ordinary deploy and `cert status` would claim a reload was
+// owed when the proxy is in fact serving the current certificate.
+func MarkLoaded(ctx context.Context, r remote.Runner, cfg *config.Config) error {
+	installed, err := serverFingerprint(ctx, r, cfg)
+	if err != nil {
+		return err
+	}
+	return write(ctx, r, []byte(installed+"\n"), loadedPath(cfg.Cert))
+}
+
+func serverFingerprint(ctx context.Context, r remote.Runner, cfg *config.Config) (string, error) {
+	crtRemote, _ := ServerPaths(cfg.Cert)
+	content, err := read(ctx, r, crtRemote)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w (run `boks cert issue` first)", crtRemote, err)
+	}
+	return fingerprint(content), nil
 }
 
 // Installed reports whether this server already has the certificate a deploy would point
