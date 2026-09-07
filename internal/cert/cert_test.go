@@ -2,11 +2,19 @@ package cert
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kopandante/boks/internal/config"
 )
@@ -45,8 +53,52 @@ func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string
 	return "", nil
 }
 
-// certPEM is a syntactically valid PEM block; the tests that use it never parse it.
-const certPEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+// newPair returns a real self-signed certificate and its key. Install checks that the two match
+// before writing them, so the fixtures have to be genuine crypto rather than PEM-shaped strings.
+func newPair(t *testing.T) (crtPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "*.lab.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(90 * 24 * time.Hour),
+		DNSNames:     []string{"*.lab.example.com"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// replacementPair stands in for a renewal: a different certificate, with its key written
+// alongside so the local pair stays consistent.
+func replacementPair(t *testing.T, cfg *config.Config) []byte {
+	t.Helper()
+	crt, key := newPair(t)
+	if err := os.WriteFile(localBase(cfg)+".key", key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return crt
+}
 
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
@@ -55,12 +107,13 @@ func testConfig(t *testing.T) *config.Config {
 	if err := os.MkdirAll(certs, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string]string{
-		"_.lab.example.com.crt":  certPEM,
-		"_.lab.example.com.key":  "KEY",
-		"_.lab.example.com.json": `{"domain":"*.lab.example.com"}`, // lego's own metadata
+	crtPEM, keyPEM := newPair(t)
+	for name, content := range map[string][]byte{
+		"_.lab.example.com.crt":  crtPEM,
+		"_.lab.example.com.key":  keyPEM,
+		"_.lab.example.com.json": []byte(`{"domain":"*.lab.example.com"}`), // lego's own metadata
 	} {
-		if err := os.WriteFile(filepath.Join(certs, name), []byte(content), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(certs, name), content, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -103,7 +156,7 @@ func TestInstallWritesAsRootAndHandsOverToTheProxyUser(t *testing.T) {
 		}
 	}
 	crt, key := ServerPaths(cfg.Cert)
-	if string(f.writes[crt]) != certPEM || string(f.writes[key]) != "KEY" {
+	if len(f.writes[crt]) == 0 || len(f.writes[key]) == 0 {
 		t.Errorf("both files must be installed, got %v", f.writes)
 	}
 }
@@ -111,7 +164,7 @@ func TestInstallWritesAsRootAndHandsOverToTheProxyUser(t *testing.T) {
 func TestInstallSkipsAnIdenticalCertificate(t *testing.T) {
 	f, cfg := newFake(), testConfig(t)
 	crt, _ := ServerPaths(cfg.Cert)
-	f.files[crt] = certPEM
+	f.files[crt] = string(mustRead(t, localBase(cfg)+".crt"))
 	meta, err := os.ReadFile(localBase(cfg) + ".json")
 	if err != nil {
 		t.Fatal(err)
@@ -260,6 +313,47 @@ func TestPullWritesNothingWhenTheMetadataIsMissing(t *testing.T) {
 	}
 }
 
+// `cert pull` refreshes the certificate and never the key, so an operator who issued here once
+// and later pulled a renewal holds a certificate and a key from different issuances. Installing
+// that would leave the proxy serving a certificate its key cannot answer for — TLS broken for
+// every host under the wildcard, and nothing failing at install time.
+func TestInstallRefusesAMismatchedLocalPair(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	renewed, _ := newPair(t) // what a renewal elsewhere produced; its key stayed on the server
+	if err := os.WriteFile(localBase(cfg)+".crt", renewed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Install(ctx, f, io.Discard, cfg)
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	if !strings.Contains(err.Error(), "not a pair") {
+		t.Errorf("the error must name the problem, got %v", err)
+	}
+	crt, key := ServerPaths(cfg.Cert)
+	if len(f.writes[crt]) != 0 || len(f.writes[key]) != 0 {
+		t.Error("nothing may reach the server when the pair does not match")
+	}
+}
+
+// The operator is told at pull time, not only when a later install refuses.
+func TestPullWarnsThatTheLocalKeyIsNowStale(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	renewed, _ := newPair(t)
+	crtRemote, _ := ServerPaths(cfg.Cert)
+	f.files[crtRemote] = string(renewed) // the server carries a certificate renewed elsewhere
+	var log strings.Builder
+	if err := Pull(ctx, f, &log, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "belongs to an earlier certificate") {
+		t.Errorf("the stale key must be called out, log:\n%s", log.String())
+	}
+}
+
 // Pull brings back exactly what a renewal needs to decide, and nothing secret: measured against
 // lego 5, a bare .crt is ignored and a fresh certificate issued, while .crt plus .json is
 // recognised and skipped until due.
@@ -320,7 +414,7 @@ func TestPendingAgainAfterANewCertificateIsInstalled(t *testing.T) {
 		t.Fatal(err)
 	}
 	crtLocal, _ := LocalPaths(cfg)
-	if err := os.WriteFile(crtLocal, []byte(strings.Replace(certPEM, "MIIB", "MIIC", 1)), 0o600); err != nil {
+	if err := os.WriteFile(crtLocal, replacementPair(t, cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := Pending(ctx, f, cfg)

@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -135,6 +136,15 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 	if err != nil {
 		return err
 	}
+	// `cert pull` refreshes the certificate and never the key — the key stays on the server that
+	// issued it. So a machine that issued once and later pulled a renewal holds a certificate and
+	// a key from different issuances, and installing that pair would leave the proxy serving a
+	// certificate its key cannot answer for: TLS broken for every host the wildcard covers, with
+	// nothing failing at install time. Refuse instead.
+	if _, err := tls.X509KeyPair(crt, key); err != nil {
+		return fmt.Errorf("%s and %s are not a pair (%w) — a pulled certificate comes without its "+
+			"key; run `boks cert issue` to issue a matched pair", crtPath, keyPath, err)
+	}
 	// A run that dies partway leaves a mismatched set on the server whichever order these go in.
 	// What makes that recoverable is the comparison above — the next run sees a .crt that differs
 	// from the local one and writes everything again — and the marker, which was never updated,
@@ -197,6 +207,14 @@ func Pull(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Confi
 			return err
 		}
 		fmt.Fprintf(log, "pulled %s\n", f.local)
+	}
+	// Say so straight away rather than let the next install refuse: a key left over from an
+	// earlier issuance here no longer belongs to the certificate just pulled.
+	if key, err := os.ReadFile(localBase(cfg) + ".key"); err == nil {
+		if _, err := tls.X509KeyPair(got[0], key); err != nil {
+			fmt.Fprintf(log, "warning: the local %s.key belongs to an earlier certificate and is now "+
+				"unusable here; the key for this one stayed on the server\n", localBase(cfg))
+		}
 	}
 	return nil
 }
