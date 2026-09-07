@@ -144,6 +144,49 @@ func TestMarkLoadedClearsWhatADeployLoaded(t *testing.T) {
 	}
 }
 
+// A deploy loads the certificate for its own routes only — kamal-proxy reads the file per
+// service. Letting one app's deploy vouch for the whole server would leave a second app under
+// the same wildcard serving the old certificate until expiry, with nothing reporting a debt.
+func TestADeploysLoadDoesNotVouchForAnotherApp(t *testing.T) {
+	ctx, f, app1 := context.Background(), newFake(), testConfig(t)
+	app2 := *app1
+	app2.App = "other"
+	if err := Install(ctx, f, io.Discard, app1); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkLoaded(ctx, f, app1); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Pending(ctx, f, app1)
+	if err != nil || pending {
+		t.Fatalf("the app that deployed is settled, got %v %v", pending, err)
+	}
+	pending, err = Pending(ctx, f, &app2)
+	if err != nil || !pending {
+		t.Fatalf("an app nobody deployed still owes a load, got %v %v", pending, err)
+	}
+}
+
+// A restart makes the proxy re-read the files for every service, so it settles the debt for
+// apps that were never deployed — otherwise each of them would trigger its own restart.
+func TestARestartSettlesEveryApp(t *testing.T) {
+	ctx, f, app1 := context.Background(), newFake(), testConfig(t)
+	app2 := *app1
+	app2.App = "other"
+	if err := Install(ctx, f, io.Discard, app1); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reload(ctx, f, io.Discard, app1); err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range []*config.Config{app1, &app2} {
+		pending, err := Pending(ctx, f, cfg)
+		if err != nil || pending {
+			t.Fatalf("%s: a restart covers every service, got %v %v", cfg.App, pending, err)
+		}
+	}
+}
+
 // Pending compares two things that both live on the server, so it answers from a machine with no
 // lego state — a CI runner, or a second operator.
 func TestPendingWithoutLocalLegoState(t *testing.T) {

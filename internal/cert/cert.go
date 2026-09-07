@@ -52,11 +52,21 @@ func ServerPaths(c *config.Cert) (crt, key string) {
 // and skipped until it is actually time. The private key is not part of that decision.
 func metaPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".json" }
 
-// loadedPath holds the fingerprint of the certificate the proxy was last restarted for. It is
-// what makes a partial failure recoverable: the file is written only after a successful reload,
-// so an interrupted run leaves it stale and the next run reloads again instead of reporting
-// "unchanged" forever.
-func loadedPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".loaded" }
+// There are two ways the proxy comes to hold a certificate, and they differ in reach — which is
+// why they are recorded apart. A restart makes it re-read the files for EVERY service on the
+// server; deploying a route makes it read them for that service only (measured on the stand:
+// replacing the files alone changes nothing until one or the other happens). Collapsing the two
+// into a single mark would let one app's deploy vouch for apps it never touched, and a second
+// app under the same wildcard would then serve the old certificate until expiry with nothing
+// reporting a debt.
+//
+// Written only after the load actually succeeded, so an interrupted run leaves the mark stale
+// and the next run loads again instead of reporting "unchanged" forever.
+func restartedPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".restarted" }
+
+func loadedPath(cfg *config.Config) string {
+	return dir + "/" + cfg.Cert.Slug() + "." + cfg.App + ".loaded"
+}
 
 // LocalPaths are the files lego writes.
 func LocalPaths(cfg *config.Config) (crt, key string) {
@@ -199,8 +209,19 @@ func Pending(ctx context.Context, r remote.Runner, cfg *config.Config) (bool, er
 	if err != nil {
 		return false, err
 	}
-	loaded, _ := read(ctx, r, loadedPath(cfg.Cert)) // absent marker means "never loaded"
-	return string(bytes.TrimSpace(loaded)) != installed, nil
+	return !loaded(ctx, r, cfg, installed), nil
+}
+
+// loaded reports whether this app's routes are serving the installed certificate: either the
+// proxy was restarted with it, which covers every service, or this app's own routes were
+// deployed with it. An absent mark means "not this way", so the answer errs towards reloading.
+func loaded(ctx context.Context, r remote.Runner, cfg *config.Config, installed string) bool {
+	for _, p := range []string{restartedPath(cfg.Cert), loadedPath(cfg)} {
+		if mark, err := read(ctx, r, p); err == nil && string(bytes.TrimSpace(mark)) == installed {
+			return true
+		}
+	}
+	return false
 }
 
 // Reload restarts the proxy so it re-reads the certificate files, then records what it loaded.
@@ -210,19 +231,23 @@ func Reload(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	if _, err := r.Run(ctx, "docker", "restart", proxy.Container); err != nil {
 		return err
 	}
-	return MarkLoaded(ctx, r, cfg)
+	return mark(ctx, r, cfg, restartedPath(cfg.Cert))
 }
 
-// MarkLoaded records the certificate the proxy is now serving. A deploy calls it too: pointing a
-// route at a certificate path makes kamal-proxy read the file there and then, so without this
-// the marker would go stale after an ordinary deploy and `cert status` would claim a reload was
-// owed when the proxy is in fact serving the current certificate.
+// MarkLoaded records that this app's routes now serve the installed certificate. A deploy calls
+// it: pointing a route at a certificate path makes kamal-proxy read the file there and then, so
+// without this an ordinary deploy would leave `cert status` claiming a reload was owed. It
+// deliberately marks this app only — a deploy says nothing about anyone else's services.
 func MarkLoaded(ctx context.Context, r remote.Runner, cfg *config.Config) error {
+	return mark(ctx, r, cfg, loadedPath(cfg))
+}
+
+func mark(ctx context.Context, r remote.Runner, cfg *config.Config, path string) error {
 	installed, err := serverFingerprint(ctx, r, cfg)
 	if err != nil {
 		return err
 	}
-	return write(ctx, r, []byte(installed+"\n"), loadedPath(cfg.Cert))
+	return write(ctx, r, []byte(installed+"\n"), path)
 }
 
 func serverFingerprint(ctx context.Context, r remote.Runner, cfg *config.Config) (string, error) {
@@ -263,8 +288,7 @@ func Read(ctx context.Context, r remote.Runner, cfg *config.Config) (*Status, er
 	if err != nil {
 		return nil, err
 	}
-	loaded, _ := read(ctx, r, loadedPath(cfg.Cert))
-	return &Status{Cert: parsed, Pending: string(bytes.TrimSpace(loaded)) != fingerprint(content)}, nil
+	return &Status{Cert: parsed, Pending: !loaded(ctx, r, cfg, fingerprint(content))}, nil
 }
 
 func fingerprint(pemBytes []byte) string {
