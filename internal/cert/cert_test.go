@@ -1,12 +1,21 @@
 package cert
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kopandante/boks/internal/config"
 )
@@ -45,8 +54,52 @@ func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string
 	return "", nil
 }
 
-// certPEM is a syntactically valid PEM block; the tests that use it never parse it.
-const certPEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+// newPair returns a real self-signed certificate and its key. Install checks that the two match
+// before writing them, so the fixtures have to be genuine crypto rather than PEM-shaped strings.
+func newPair(t *testing.T) (crtPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "*.lab.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(90 * 24 * time.Hour),
+		DNSNames:     []string{"*.lab.example.com"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// replacementPair stands in for a renewal: a different certificate, with its key written
+// alongside so the local pair stays consistent.
+func replacementPair(t *testing.T, cfg *config.Config) []byte {
+	t.Helper()
+	crt, key := newPair(t)
+	if err := os.WriteFile(localBase(cfg)+".key", key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return crt
+}
 
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
@@ -55,8 +108,13 @@ func testConfig(t *testing.T) *config.Config {
 	if err := os.MkdirAll(certs, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for name, content := range map[string]string{"_.lab.example.com.crt": certPEM, "_.lab.example.com.key": "KEY"} {
-		if err := os.WriteFile(filepath.Join(certs, name), []byte(content), 0o600); err != nil {
+	crtPEM, keyPEM := newPair(t)
+	for name, content := range map[string][]byte{
+		"_.lab.example.com.crt":  crtPEM,
+		"_.lab.example.com.key":  keyPEM,
+		"_.lab.example.com.json": []byte(`{"domain":"*.lab.example.com"}`), // lego's own metadata
+	} {
+		if err := os.WriteFile(filepath.Join(certs, name), content, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -99,20 +157,278 @@ func TestInstallWritesAsRootAndHandsOverToTheProxyUser(t *testing.T) {
 		}
 	}
 	crt, key := ServerPaths(cfg.Cert)
-	if string(f.writes[crt]) != certPEM || string(f.writes[key]) != "KEY" {
-		t.Errorf("both files must be installed, got %v", f.writes)
+	// Compared by content, not merely by presence: swapping the two paths would still put a
+	// non-empty file at each of them.
+	if !bytes.Equal(f.writes[crt], mustRead(t, localBase(cfg)+".crt")) {
+		t.Errorf("the certificate path must receive the certificate, got %q", f.writes[crt])
+	}
+	if !bytes.Equal(f.writes[key], mustRead(t, localBase(cfg)+".key")) {
+		t.Errorf("the key path must receive the key, got %q", f.writes[key])
 	}
 }
 
 func TestInstallSkipsAnIdenticalCertificate(t *testing.T) {
 	f, cfg := newFake(), testConfig(t)
 	crt, _ := ServerPaths(cfg.Cert)
-	f.files[crt] = certPEM
+	f.files[crt] = string(mustRead(t, localBase(cfg)+".crt"))
+	meta, err := os.ReadFile(localBase(cfg) + ".json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.files[metaPath(cfg.Cert)] = string(meta) // a server that is already fully up to date
 	if err := Install(context.Background(), f, io.Discard, cfg); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.writes) != 0 {
 		t.Errorf("nothing to do, but wrote %v", f.writes)
+	}
+}
+
+// A deploy points routes at the certificate path, which makes the proxy read it — so a deploy
+// is a load and must clear the debt, or status would keep claiming a reload is owed.
+func TestMarkLoadedClearsWhatADeployLoaded(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkLoaded(ctx, f, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(f.calls, "\n"), "docker restart") {
+		t.Error("recording a load must not restart anything")
+	}
+	pending, err := Pending(ctx, f, cfg)
+	if err != nil || pending {
+		t.Fatalf("nothing owed after a deploy loaded it, got %v %v", pending, err)
+	}
+}
+
+// A deploy loads the certificate for its own routes only — kamal-proxy reads the file per
+// service. Letting one app's deploy vouch for the whole server would leave a second app under
+// the same wildcard serving the old certificate until expiry, with nothing reporting a debt.
+func TestADeploysLoadDoesNotVouchForAnotherApp(t *testing.T) {
+	ctx, f, app1 := context.Background(), newFake(), testConfig(t)
+	app2 := *app1
+	app2.App = "other"
+	if err := Install(ctx, f, io.Discard, app1); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkLoaded(ctx, f, app1); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Pending(ctx, f, app1)
+	if err != nil || pending {
+		t.Fatalf("the app that deployed is settled, got %v %v", pending, err)
+	}
+	pending, err = Pending(ctx, f, &app2)
+	if err != nil || !pending {
+		t.Fatalf("an app nobody deployed still owes a load, got %v %v", pending, err)
+	}
+}
+
+// The mark that settles `cert status` for one app must not settle the restart, because a restart
+// is the only thing that reaches apps the config never names. The path this guards survives
+// expiry: a renewal installs the new certificate and dies before restarting, a deploy of A then
+// loads it for A's routes alone, and from then on the daily `cert renew -f a.yml` would report
+// "already loaded" forever while B serves the old certificate until it runs out.
+func TestADeploysLoadDoesNotCancelTheRestartTheProxyStillOwes(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil { // the renewal that died before reloading
+		t.Fatal(err)
+	}
+	if err := MarkLoaded(ctx, f, cfg); err != nil { // an ordinary deploy of this app afterwards
+		t.Fatal(err)
+	}
+	pending, err := Pending(ctx, f, cfg)
+	if err != nil || pending {
+		t.Fatalf("this app's own routes do carry it, got %v %v", pending, err)
+	}
+	pending, err = ReloadPending(ctx, f, cfg)
+	if err != nil || !pending {
+		t.Fatalf("the proxy has not re-read anything, the restart is still owed, got %v %v", pending, err)
+	}
+	if err := Reload(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = ReloadPending(ctx, f, cfg)
+	if err != nil || pending {
+		t.Fatalf("the restart settles it, got %v %v", pending, err)
+	}
+}
+
+// A restart makes the proxy re-read the files for every service, so it settles the debt for
+// apps that were never deployed — otherwise each of them would trigger its own restart.
+func TestARestartSettlesEveryApp(t *testing.T) {
+	ctx, f, app1 := context.Background(), newFake(), testConfig(t)
+	app2 := *app1
+	app2.App = "other"
+	if err := Install(ctx, f, io.Discard, app1); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reload(ctx, f, io.Discard, app1); err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range []*config.Config{app1, &app2} {
+		pending, err := Pending(ctx, f, cfg)
+		if err != nil || pending {
+			t.Fatalf("%s: a restart covers every service, got %v %v", cfg.App, pending, err)
+		}
+	}
+}
+
+// Pending compares two things that both live on the server, so it answers from a machine with no
+// lego state — a CI runner, or a second operator.
+func TestPendingWithoutLocalLegoState(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	crtLocal, keyLocal := LocalPaths(cfg)
+	for _, p := range []string{crtLocal, keyLocal} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending, err := Pending(ctx, f, cfg)
+	if err != nil || !pending {
+		t.Fatalf("installed but not loaded is pending regardless of local files, got %v %v", pending, err)
+	}
+}
+
+// The case the pull exists for: a machine that holds only what pull fetched. On the ~59 days out
+// of 60 when lego decides nothing is due, `cert renew` must be a quiet no-op there — reading the
+// private key before deciding would break it every one of those days.
+func TestInstallSkipsWithoutTheLocalKeyWhenNothingChanged(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(localBase(cfg) + ".key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatalf("an unchanged certificate must not need the key: %v", err)
+	}
+}
+
+// A server set up before boks stored the metadata holds the current certificate and no .json.
+// The certificate matches, so nothing would ever be written — and `cert pull` needs that file.
+func TestInstallRepairsMissingMetadataOnAnUnchangedCertificate(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.files, metaPath(cfg.Cert)) // the state a previous release leaves behind
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.files[metaPath(cfg.Cert)]; !ok {
+		t.Error("the metadata must be restored without re-issuing the certificate")
+	}
+}
+
+// A pull that writes the certificate and then fails on the metadata leaves behind exactly the
+// bare-.crt state that makes lego issue a fresh certificate on every run.
+func TestPullWritesNothingWhenTheMetadataIsMissing(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.files, metaPath(cfg.Cert))
+	base := localBase(cfg)
+	for _, p := range []string{base + ".crt", base + ".json"} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Pull(ctx, f, io.Discard, cfg); err == nil {
+		t.Fatal("want an error when the server has no metadata")
+	}
+	if _, err := os.Stat(base + ".crt"); err == nil {
+		t.Error("a failed pull must not leave a lone certificate behind")
+	}
+}
+
+// `cert pull` refreshes the certificate and never the key, so an operator who issued here once
+// and later pulled a renewal holds a certificate and a key from different issuances. Installing
+// that would leave the proxy serving a certificate its key cannot answer for — TLS broken for
+// every host under the wildcard, and nothing failing at install time.
+func TestInstallRefusesAMismatchedLocalPair(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	renewed, _ := newPair(t) // what a renewal elsewhere produced; its key stayed on the server
+	if err := os.WriteFile(localBase(cfg)+".crt", renewed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Install(ctx, f, io.Discard, cfg)
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	if !strings.Contains(err.Error(), "not a pair") {
+		t.Errorf("the error must name the problem, got %v", err)
+	}
+	// Not just the pair: the metadata too. A refusal that had already moved the server's .json on
+	// to the new issuance would leave it describing a certificate the server does not have.
+	if len(f.writes) != 0 {
+		t.Errorf("nothing may reach the server when the pair does not match, wrote %v", f.writes)
+	}
+}
+
+// The operator is told at pull time, not only when a later install refuses.
+func TestPullWarnsThatTheLocalKeyIsNowStale(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	renewed, _ := newPair(t)
+	crtRemote, _ := ServerPaths(cfg.Cert)
+	f.files[crtRemote] = string(renewed) // the server carries a certificate renewed elsewhere
+	var log strings.Builder
+	if err := Pull(ctx, f, &log, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "does not match the certificate just pulled") {
+		t.Errorf("the stale key must be called out, log:\n%s", log.String())
+	}
+}
+
+// The counterpart: a warning that fired every time would pass the test above and teach the
+// operator to ignore it. The ordinary pull — the server holds what this machine issued — is silent.
+func TestPullIsSilentWhileTheLocalKeyStillMatches(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	var log strings.Builder
+	if err := Pull(ctx, f, &log, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(log.String(), "warning") {
+		t.Errorf("the pair still matches, nothing to warn about, log:\n%s", log.String())
+	}
+}
+
+// Pull brings back exactly what a renewal needs to decide, and nothing secret: measured against
+// lego 5, a bare .crt is ignored and a fresh certificate issued, while .crt plus .json is
+// recognised and skipped until due.
+func TestPullFetchesTheCertificateAndMetadataOnly(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	base := localBase(cfg)
+	for _, p := range []string{base + ".crt", base + ".json", base + ".key"} {
+		os.Remove(p) //nolint:errcheck // why: absence is the state under test, not an error
+	}
+	if err := Pull(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{base + ".crt", base + ".json"} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s must be pulled: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(base + ".key"); err == nil {
+		t.Error("the private key must not be pulled — a renewal does not need it")
 	}
 }
 
@@ -139,8 +455,10 @@ func TestPendingUntilReloadRecordsIt(t *testing.T) {
 	}
 }
 
-// A certificate replaced on disk makes a reload owed again, even though the marker exists.
-func TestPendingAgainAfterTheCertificateChanges(t *testing.T) {
+// A renewal installed on the server makes a reload owed again, even though the marker exists.
+// Note what does NOT make it pending: a new certificate sitting only on the operator's disk —
+// the proxy cannot be behind on something the server has never been given.
+func TestPendingAgainAfterANewCertificateIsInstalled(t *testing.T) {
 	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
 	if err := Install(ctx, f, io.Discard, cfg); err != nil {
 		t.Fatal(err)
@@ -149,12 +467,19 @@ func TestPendingAgainAfterTheCertificateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	crtLocal, _ := LocalPaths(cfg)
-	if err := os.WriteFile(crtLocal, []byte(strings.Replace(certPEM, "MIIB", "MIIC", 1)), 0o600); err != nil {
+	if err := os.WriteFile(crtLocal, replacementPair(t, cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := Pending(ctx, f, cfg)
+	if err != nil || pending {
+		t.Fatalf("a certificate only on the local disk is not owed to the proxy yet, got %v %v", pending, err)
+	}
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = Pending(ctx, f, cfg)
 	if err != nil || !pending {
-		t.Fatalf("a new certificate must be pending again, got %v %v", pending, err)
+		t.Fatalf("once installed it must be pending, got %v %v", pending, err)
 	}
 }
 

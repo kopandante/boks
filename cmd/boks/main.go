@@ -27,6 +27,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
   cert renew       same, but lego skips the run unless the certificate is due (safe in a cron)
   cert status      subject and expiry of the certificate each server currently serves
+  cert pull        copy the certificate and its lego metadata back from the first server, so a
+                   renewal elsewhere can tell whether anything is due without holding the key
 
 Certificates are issued where boks runs, not on the servers: DNS tokens are often bound to an
 IP. Export the provider's credentials (e.g. CLOUDFLARE_DNS_API_TOKEN) before cert issue/renew.
@@ -118,7 +120,7 @@ func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config)
 
 func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
 	if len(args) != 1 {
-		return fmt.Errorf("cert needs one of: issue, renew, status")
+		return fmt.Errorf("cert needs one of: issue, renew, status, pull")
 	}
 	if cfg.Cert == nil {
 		return fmt.Errorf("no `cert` block in the config: plain domains are served by kamal-proxy's autocert and need nothing here")
@@ -139,6 +141,12 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 			return nil
 		})
 	}
+	if args[0] == "pull" {
+		// One server is enough: they all hold the same certificate, and lego only needs to read
+		// it to decide whether a renewal is due.
+		fmt.Fprintf(out, "== %s\n", cfg.Servers[0])
+		return cert.Pull(ctx, remote.SSH{Host: cfg.Servers[0]}, out, cfg)
+	}
 	if args[0] != "issue" && args[0] != "renew" {
 		return fmt.Errorf("unknown cert command %q", args[0])
 	}
@@ -154,8 +162,10 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 		}
 		// Whether a reload is still owed is tracked on the server, not inferred from whether
 		// this run wrote a file: a run that installed and then died must not leave the proxy
-		// serving the old certificate while later runs report success.
-		pending, err := cert.Pending(ctx, r, cfg)
+		// serving the old certificate while later runs report success. The question here is
+		// whether the PROXY has re-read the file — not whether this app's routes happen to carry
+		// it — because a restart is the only thing that reaches apps this config never names.
+		pending, err := cert.ReloadPending(ctx, r, cfg)
 		if err != nil {
 			return err
 		}
