@@ -43,6 +43,11 @@ jobs:
           LEGO_VERSION: v5.4.1
         run: |
           set -euo pipefail
+          # boks lives in a private repository, so `go install` needs a credential and needs to be
+          # told not to go through the public proxy, which cannot see it. Without both, this step
+          # fails on a 404 that looks like a missing module.
+          export GOPRIVATE=github.com/kopandante/*
+          git config --global url."https://${{ secrets.BOKS_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
           go install github.com/kopandante/boks/cmd/boks@latest
           # -f makes curl fail on 404 instead of piping GitHub's error page into tar.
           curl -fsSL "https://github.com/go-acme/lego/releases/download/${LEGO_VERSION}/lego_${LEGO_VERSION}_linux_amd64.tar.gz" \
@@ -67,13 +72,18 @@ jobs:
         env:
           ACCOUNT_KEY: ${{ secrets.LEGO_ACCOUNT_KEY }}
           LEGO_EMAIL: ${{ secrets.LEGO_EMAIL }}
+          # lego files accounts per CA directory, and boks picks the CA from `cert.staging` in
+          # boks.yml. A key filed under the wrong host is not an error — lego simply does not find
+          # it and registers a new account every run, which is exactly what this secret exists to
+          # avoid. Keep this in step with `staging:`; the lab config has staging on.
+          ACME_HOST: acme-staging-v02.api.letsencrypt.org
         run: |
           set -euo pipefail
           if [ -z "${ACCOUNT_KEY:-}" ]; then
             echo "no LEGO_ACCOUNT_KEY secret: lego will register a new ACME account this run"
             exit 0
           fi
-          DIR="examples/convex-lab/.lego/accounts/acme-v02.api.letsencrypt.org/${LEGO_EMAIL}/keys"
+          DIR="examples/convex-lab/.lego/accounts/${ACME_HOST}/${LEGO_EMAIL}/keys"
           install -m 700 -d "$DIR"
           printf '%s\n' "$ACCOUNT_KEY" > "$DIR/${LEGO_EMAIL}.key"
           chmod 600 "$DIR/${LEGO_EMAIL}.key"
@@ -92,6 +102,13 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
         run: |
-          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+          # The run is red either way; this is the channel that gets someone to look. So it must
+          # not be the quiet part: without the secrets the URL would be .../bot/sendMessage, and
+          # curl without -f exits 0 on the 404 — an alert that reports success and reaches nobody.
+          if [ -z "${TELEGRAM_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT:-}" ]; then
+            echo "::warning::renewal failed and no Telegram secrets are set — nobody was notified"
+            exit 0
+          fi
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT}" \
             -d text="boks: certificate renewal failed — ${{ github.repository }} run ${{ github.run_id }}"

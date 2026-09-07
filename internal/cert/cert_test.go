@@ -1,6 +1,7 @@
 package cert
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -156,8 +157,13 @@ func TestInstallWritesAsRootAndHandsOverToTheProxyUser(t *testing.T) {
 		}
 	}
 	crt, key := ServerPaths(cfg.Cert)
-	if len(f.writes[crt]) == 0 || len(f.writes[key]) == 0 {
-		t.Errorf("both files must be installed, got %v", f.writes)
+	// Compared by content, not merely by presence: swapping the two paths would still put a
+	// non-empty file at each of them.
+	if !bytes.Equal(f.writes[crt], mustRead(t, localBase(cfg)+".crt")) {
+		t.Errorf("the certificate path must receive the certificate, got %q", f.writes[crt])
+	}
+	if !bytes.Equal(f.writes[key], mustRead(t, localBase(cfg)+".key")) {
+		t.Errorf("the key path must receive the key, got %q", f.writes[key])
 	}
 }
 
@@ -217,6 +223,36 @@ func TestADeploysLoadDoesNotVouchForAnotherApp(t *testing.T) {
 	pending, err = Pending(ctx, f, &app2)
 	if err != nil || !pending {
 		t.Fatalf("an app nobody deployed still owes a load, got %v %v", pending, err)
+	}
+}
+
+// The mark that settles `cert status` for one app must not settle the restart, because a restart
+// is the only thing that reaches apps the config never names. The path this guards survives
+// expiry: a renewal installs the new certificate and dies before restarting, a deploy of A then
+// loads it for A's routes alone, and from then on the daily `cert renew -f a.yml` would report
+// "already loaded" forever while B serves the old certificate until it runs out.
+func TestADeploysLoadDoesNotCancelTheRestartTheProxyStillOwes(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil { // the renewal that died before reloading
+		t.Fatal(err)
+	}
+	if err := MarkLoaded(ctx, f, cfg); err != nil { // an ordinary deploy of this app afterwards
+		t.Fatal(err)
+	}
+	pending, err := Pending(ctx, f, cfg)
+	if err != nil || pending {
+		t.Fatalf("this app's own routes do carry it, got %v %v", pending, err)
+	}
+	pending, err = ReloadPending(ctx, f, cfg)
+	if err != nil || !pending {
+		t.Fatalf("the proxy has not re-read anything, the restart is still owed, got %v %v", pending, err)
+	}
+	if err := Reload(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = ReloadPending(ctx, f, cfg)
+	if err != nil || pending {
+		t.Fatalf("the restart settles it, got %v %v", pending, err)
 	}
 }
 
@@ -330,9 +366,10 @@ func TestInstallRefusesAMismatchedLocalPair(t *testing.T) {
 	if !strings.Contains(err.Error(), "not a pair") {
 		t.Errorf("the error must name the problem, got %v", err)
 	}
-	crt, key := ServerPaths(cfg.Cert)
-	if len(f.writes[crt]) != 0 || len(f.writes[key]) != 0 {
-		t.Error("nothing may reach the server when the pair does not match")
+	// Not just the pair: the metadata too. A refusal that had already moved the server's .json on
+	// to the new issuance would leave it describing a certificate the server does not have.
+	if len(f.writes) != 0 {
+		t.Errorf("nothing may reach the server when the pair does not match, wrote %v", f.writes)
 	}
 }
 
@@ -349,8 +386,24 @@ func TestPullWarnsThatTheLocalKeyIsNowStale(t *testing.T) {
 	if err := Pull(ctx, f, &log, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(log.String(), "belongs to an earlier certificate") {
+	if !strings.Contains(log.String(), "does not match the certificate just pulled") {
 		t.Errorf("the stale key must be called out, log:\n%s", log.String())
+	}
+}
+
+// The counterpart: a warning that fired every time would pass the test above and teach the
+// operator to ignore it. The ordinary pull — the server holds what this machine issued — is silent.
+func TestPullIsSilentWhileTheLocalKeyStillMatches(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	var log strings.Builder
+	if err := Pull(ctx, f, &log, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(log.String(), "warning") {
+		t.Errorf("the pair still matches, nothing to warn about, log:\n%s", log.String())
 	}
 }
 

@@ -162,8 +162,10 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 		}
 		// Whether a reload is still owed is tracked on the server, not inferred from whether
 		// this run wrote a file: a run that installed and then died must not leave the proxy
-		// serving the old certificate while later runs report success.
-		pending, err := cert.Pending(ctx, r, cfg)
+		// serving the old certificate while later runs report success. The question here is
+		// whether the PROXY has re-read the file — not whether this app's routes happen to carry
+		// it — because a restart is the only thing that reaches apps this config never names.
+		pending, err := cert.ReloadPending(ctx, r, cfg)
 		if err != nil {
 			return err
 		}

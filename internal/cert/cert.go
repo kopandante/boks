@@ -116,34 +116,45 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 	if err != nil {
 		return fmt.Errorf("%w (run `boks cert issue` first)", err)
 	}
-	// Metadata is reconciled on its own, before the certificate comparison below: a server set up
-	// by a boks that did not store it holds the current certificate and no .json, and that
-	// combination would otherwise be unrepairable — the certificate matches, so the comparison
-	// returns early and never writes anything, while `cert pull` needs the .json to exist.
+	crtRemote, keyRemote := ServerPaths(cfg.Cert)
+	current, _ := read(ctx, r, crtRemote) // absent or unreadable counts as different
+	changed := !bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(crt))
+	// The private key is read only on the path that actually writes it. Reading it unconditionally
+	// would break the case this whole feature exists for: a renewal running where `cert pull` left
+	// only the certificate and its metadata, on any of the ~59 days out of 60 when lego decides
+	// nothing is due.
+	var key []byte
+	if changed {
+		key, err = os.ReadFile(keyPath)
+		if err != nil {
+			// A bare ENOENT here reads as a bug in boks. It is the expected state on a CI runner,
+			// where `cert pull` deliberately brings back no key, and it only surfaces when some
+			// server turns out to lag behind the certificate that runner holds.
+			return fmt.Errorf("%w — this server's certificate differs from the local one and "+
+				"installing it needs the key, which `cert pull` never fetches; run this where the "+
+				"pair was issued, or `boks cert issue` to issue a new pair everywhere", err)
+		}
+		// `cert pull` refreshes the certificate and never the key — the key stays on the server
+		// that issued it. So a machine that issued once and later pulled a renewal holds a
+		// certificate and a key from different issuances, and installing that pair would leave the
+		// proxy serving a certificate its key cannot answer for: TLS broken for every host the
+		// wildcard covers, with nothing failing at install time. Refuse instead.
+		if _, err := tls.X509KeyPair(crt, key); err != nil {
+			return fmt.Errorf("%s and %s are not a pair (%w) — a pulled certificate comes without "+
+				"its key; run `boks cert issue` to issue a matched pair", crtPath, keyPath, err)
+		}
+	}
+	// Metadata is reconciled independently of whether the certificate changed: a server set up by
+	// a boks that did not store it holds the current certificate and no .json, and that
+	// combination would otherwise be unrepairable — the certificate matches, so nothing is written
+	// while `cert pull` needs the .json to exist. It goes after the refusal above, though, so a
+	// run that refuses leaves the server exactly as it found it rather than moving its metadata on
+	// to an issuance whose certificate never arrives.
 	if err := installMeta(ctx, r, log, cfg); err != nil {
 		return err
 	}
-	crtRemote, keyRemote := ServerPaths(cfg.Cert)
-	current, _ := read(ctx, r, crtRemote) // absent or unreadable counts as different
-	if bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(crt)) {
+	if !changed {
 		return nil
-	}
-	// The private key is read only now, on the path that actually writes it. Reading it earlier
-	// would break the case this whole feature exists for: a renewal running where `cert pull`
-	// left only the certificate and its metadata, on any of the ~59 days out of 60 when lego
-	// decides nothing is due.
-	key, err := os.ReadFile(keyPath)
-	if err != nil {
-		return err
-	}
-	// `cert pull` refreshes the certificate and never the key — the key stays on the server that
-	// issued it. So a machine that issued once and later pulled a renewal holds a certificate and
-	// a key from different issuances, and installing that pair would leave the proxy serving a
-	// certificate its key cannot answer for: TLS broken for every host the wildcard covers, with
-	// nothing failing at install time. Refuse instead.
-	if _, err := tls.X509KeyPair(crt, key); err != nil {
-		return fmt.Errorf("%s and %s are not a pair (%w) — a pulled certificate comes without its "+
-			"key; run `boks cert issue` to issue a matched pair", crtPath, keyPath, err)
 	}
 	// A run that dies partway leaves a mismatched set on the server whichever order these go in.
 	// What makes that recoverable is the comparison above — the next run sees a .crt that differs
@@ -208,33 +219,58 @@ func Pull(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Confi
 		}
 		fmt.Fprintf(log, "pulled %s\n", f.local)
 	}
-	// Say so straight away rather than let the next install refuse: a key left over from an
-	// earlier issuance here no longer belongs to the certificate just pulled.
+	// Say so straight away rather than let the next install refuse. Which of the two issuances is
+	// the newer one is not knowable from here: normally the server's, but a server rolled back or
+	// given a recreated volume serves an older certificate than this machine holds, and the pull
+	// just overwrote the newer one. So report the mismatch and where to look, not a direction.
 	if key, err := os.ReadFile(localBase(cfg) + ".key"); err == nil {
 		if _, err := tls.X509KeyPair(got[0], key); err != nil {
-			fmt.Fprintf(log, "warning: the local %s.key belongs to an earlier certificate and is now "+
-				"unusable here; the key for this one stayed on the server\n", localBase(cfg))
+			fmt.Fprintf(log, "warning: %s.key does not match the certificate just pulled — they come "+
+				"from different issuances, and this pull overwrote the local certificate with the "+
+				"server's. `boks cert status` shows what each server is serving; `boks cert issue` "+
+				"replaces both with a fresh matched pair\n", localBase(cfg))
 		}
 	}
 	return nil
 }
 
-// Pending reports whether the proxy still has to load what is on the server's disk. Both sides
-// of the comparison come from the server, so this answers the same way from a machine that has
-// no lego state at all — a CI runner, or a second operator.
+// Pending reports whether THIS APP's routes still have to pick up what is on the server's disk —
+// the question `cert status` asks, and it is answered for the app the config names. Either mark
+// settles it: a restart covers every service, and this app's own deploy covers this app. Both
+// sides of the comparison come from the server, so this answers the same way from a machine that
+// has no lego state at all — a CI runner, or a second operator.
 func Pending(ctx context.Context, r remote.Runner, cfg *config.Config) (bool, error) {
 	installed, err := serverFingerprint(ctx, r, cfg)
 	if err != nil {
 		return false, err
 	}
-	return !loaded(ctx, r, cfg, installed), nil
+	return !markMatches(ctx, r, installed, restartedPath(cfg.Cert), loadedPath(cfg)), nil
 }
 
-// loaded reports whether this app's routes are serving the installed certificate: either the
-// proxy was restarted with it, which covers every service, or this app's own routes were
-// deployed with it. An absent mark means "not this way", so the answer errs towards reloading.
-func loaded(ctx context.Context, r remote.Runner, cfg *config.Config, installed string) bool {
-	for _, p := range []string{restartedPath(cfg.Cert), loadedPath(cfg)} {
+// ReloadPending reports whether the PROXY still owes a restart, which is a different question
+// from Pending and must not be answered with the per-app mark. `cert issue/renew` is the only
+// thing that restarts, and a restart is what reaches services this config knows nothing about:
+// a second app under the same wildcard, deployed from its own boks.yml.
+//
+// Letting one app's deploy settle it opens a path that survives expiry. A renewal installs the
+// new certificate and dies before the restart, or the restart itself fails; an ordinary deploy of
+// app A then makes the proxy read the new file for A's routes and records `<slug>.a.loaded`; and
+// from then on the daily `cert renew -f a.yml` reports "unchanged and already loaded" forever
+// while app B keeps serving the old certificate until it expires, with nothing reporting a debt.
+// So this consults the restart mark alone — the one thing that is written only after the proxy
+// really re-read the files for everyone.
+func ReloadPending(ctx context.Context, r remote.Runner, cfg *config.Config) (bool, error) {
+	installed, err := serverFingerprint(ctx, r, cfg)
+	if err != nil {
+		return false, err
+	}
+	return !markMatches(ctx, r, installed, restartedPath(cfg.Cert)), nil
+}
+
+// markMatches reports whether any of the given marks records the installed certificate. An absent
+// or unreadable mark means "not loaded this way", so the answer errs towards loading again.
+func markMatches(ctx context.Context, r remote.Runner, installed string, paths ...string) bool {
+	for _, p := range paths {
 		if mark, err := read(ctx, r, p); err == nil && string(bytes.TrimSpace(mark)) == installed {
 			return true
 		}
@@ -306,7 +342,9 @@ func Read(ctx context.Context, r remote.Runner, cfg *config.Config) (*Status, er
 	if err != nil {
 		return nil, err
 	}
-	return &Status{Cert: parsed, Pending: !loaded(ctx, r, cfg, fingerprint(content))}, nil
+	// Status speaks for the app the config names, so either mark settles it — see Pending.
+	settled := markMatches(ctx, r, fingerprint(content), restartedPath(cfg.Cert), loadedPath(cfg))
+	return &Status{Cert: parsed, Pending: !settled}, nil
 }
 
 func fingerprint(pemBytes []byte) string {
