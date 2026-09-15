@@ -29,6 +29,30 @@ func Upload(ctx context.Context, r Runner, content []byte, remotePath string) er
 	return nil
 }
 
+// UploadAtomic writes content so that a reader never sees a partial file: the bytes land in a
+// neighbouring temporary file and are moved into place with rename, which is atomic within a
+// filesystem. A half-written release snapshot would be worse than a missing one — rollback would
+// run something that never existed.
+func UploadAtomic(ctx context.Context, r Runner, content []byte, remotePath string) error {
+	tmp := remotePath + ".tmp"
+	script := "umask 077 && mkdir -p " + Quote(path.Dir(remotePath)) +
+		" && cat > " + Quote(tmp) + " && mv " + Quote(tmp) + " " + Quote(remotePath)
+	if _, err := r.Pipe(ctx, content, "sh", "-c", script); err != nil {
+		return fmt.Errorf("write %s: %w", remotePath, err)
+	}
+	return nil
+}
+
+// Append adds a line to a file, creating it if needed. Used for the operation journal, where the
+// order of entries is the information.
+func Append(ctx context.Context, r Runner, content []byte, remotePath string) error {
+	script := "umask 077 && mkdir -p " + Quote(path.Dir(remotePath)) + " && cat >> " + Quote(remotePath)
+	if _, err := r.Pipe(ctx, content, "sh", "-c", script); err != nil {
+		return fmt.Errorf("append %s: %w", remotePath, err)
+	}
+	return nil
+}
+
 // SSH runs commands through the system ssh client, so ~/.ssh/config, agents and
 // ProxyJump apply without any configuration of our own.
 type SSH struct {
