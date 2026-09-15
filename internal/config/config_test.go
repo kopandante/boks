@@ -47,6 +47,28 @@ func TestParseRejects(t *testing.T) {
 	}
 }
 
+func TestParseIsStrict(t *testing.T) {
+	cases := map[string]string{
+		minimal + "volums: [data:/x]\n": "volums",
+		minimal + "---\n" + minimal:     "more than one",
+		"":                              "empty",
+	}
+	for in, want := range cases {
+		_, err := Parse([]byte(in))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+}
+
+// The shipped example has to keep parsing: strict decoding turns any drift between it and the
+// schema into a failure here rather than into a surprise on someone's first deploy.
+func TestExampleParses(t *testing.T) {
+	if _, err := Load(filepath.Join("..", "..", "examples", "convex-lab", "boks.yml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCertCovers(t *testing.T) {
 	c := &Cert{Domains: []string{"*.lab.example.com", "plain.example.com"}}
 	covered := []string{"api.lab.example.com", "actions.lab.example.com", "plain.example.com"}
