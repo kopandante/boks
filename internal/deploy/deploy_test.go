@@ -103,14 +103,16 @@ func TestRunHappyPath(t *testing.T) {
 		"mkdir /tmp/boks-demo.lock",
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
+		"docker volume ls --quiet --filter name=^demo-data$",
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		"docker run -d --name demo-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
-			"--env-file .boks/demo/demo-v2-1700000000.env -v demo-data:/data ghcr.io/x/y:v2",
-		"docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v2-1700000000:3000 " +
+			"--env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
+		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --tls --health-check-path /up --deploy-timeout 60s",
+		"docker exec boks-proxy kamal-proxy list --json",
 		"docker stop demo-v1-1",
 		"docker rm demo-v1-1",
 		"docker images ghcr.io/x/y --format {{.Tag}} {{.ID}}",
@@ -361,6 +363,38 @@ func TestRoutelessRevivesOnlyWhatWasRunning(t *testing.T) {
 	}
 }
 
+// Renaming the volume would hand the app an empty one and lose the data silently, so the deploy
+// stops and says how to move it.
+func TestRunRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
+	f := newFake()
+	f.out["docker volume ls --quiet --filter name=^demo-data$"] = "demo-data"
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "old naming scheme") {
+		t.Fatalf("want a refusal naming the old volume, got %v", err)
+	}
+	if f.has("docker run -d --name demo-") {
+		t.Errorf("the app must not start before the data is moved: %v", f.calls)
+	}
+}
+
+// A port renamed in the config leaves its old service behind; it has to go, or it keeps pointing
+// at the container this deploy is about to remove.
+func TestRunRemovesRoutesTheConfigNoLongerDescribes(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker exec boks-proxy kamal-proxy list --json"] =
+		`{"demo.web":{},"demo.legacy":{},"other.web":{}}`
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("docker exec boks-proxy kamal-proxy remove demo.legacy") {
+		t.Errorf("stale route must be removed: %v", f.calls)
+	}
+	if f.has("kamal-proxy remove demo.web") || f.has("kamal-proxy remove other.web") {
+		t.Errorf("only this app's undescribed routes may go: %v", f.calls)
+	}
+}
+
 func TestRunLocked(t *testing.T) {
 	f := newFake()
 	f.fail["mkdir"] = errors.New("File exists")
@@ -405,12 +439,12 @@ func TestRunRevertsSwitchedRoutesWhenLaterPortFails(t *testing.T) {
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
 		ports(t, config.Port{Name: "web", Port: 3000, Host: "demo.example.com"}) + "\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("host is used by another service")
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("host is used by another service")
 	err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now})
 	if err == nil {
 		t.Fatal("want error")
 	}
-	revert := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	revert := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
 	if !f.has(revert) {
 		t.Errorf("web route must be pointed back at the old container, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
@@ -426,11 +460,11 @@ func TestRunRevertsToThePortTheOldContainerActuallyListensOn(t *testing.T) {
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
 		ports(t, config.Port{Name: "web", Port: 8080, Host: "demo.example.com", HealthPath: "/healthz"}) + "\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("boom")
 	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
 		t.Fatal("want error")
 	}
-	want := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:8080 " +
+	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:8080 " +
 		"--host demo.example.com --health-check-path /healthz --deploy-timeout 60s"
 	if !f.has(want) {
 		t.Errorf("revert must use the old container's port and health check, calls:\n%s", strings.Join(f.calls, "\n"))
@@ -447,12 +481,12 @@ func TestRunRevertsWithoutTheLabelUsingTheCurrentConfig(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("boom")
 	var log strings.Builder
 	if err := Run(context.Background(), f, &log, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
 		t.Fatal("want error")
 	}
-	want := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
 	if !f.has(want) {
 		t.Errorf("route must go back to the old container, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
@@ -470,11 +504,11 @@ func TestRunRevertsPortsMissingFromTheLabel(t *testing.T) {
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
 		ports(t, config.Port{Name: "actions", Port: 3001, Host: "actions.example.com"}) + "\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("boom")
 	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
 		t.Fatal("want error")
 	}
-	want := "docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
 	if !f.has(want) {
 		t.Errorf("an unrecorded port must still be reverted with the config's value, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
@@ -505,13 +539,13 @@ func TestRunDoesNotGuessRevertTargetAmongSeveralOld(t *testing.T) {
 	// Both are labelled: what stops the revert here is the ambiguity, not a missing label.
 	p := ports(t, config.Port{Name: "web", Port: 3000, Host: "demo.example.com"})
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + p + "\ndemo-v0-9\t" + p + "\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo-actions"] = errors.New("boom")
+	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("boom")
 	var log strings.Builder
 	if err := Run(context.Background(), f, &log, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
 		t.Fatal("want error")
 	}
-	if f.has("docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v1-1") ||
-		f.has("docker exec boks-proxy kamal-proxy deploy demo-web --target demo-v0-9") {
+	if f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1") ||
+		f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v0-9") {
 		t.Errorf("must not revert to an arbitrary previous container, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
 	if !strings.Contains(log.String(), "cannot be reverted automatically") {

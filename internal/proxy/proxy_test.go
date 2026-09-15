@@ -9,10 +9,10 @@ import (
 
 func TestDeployArgs(t *testing.T) {
 	got := strings.Join(DeployArgs(Service{
-		Name: "demo-actions", Target: "demo-v2-1:3211", Host: "actions.example.com",
+		Name: "demo.actions", Target: "demo-v2-1:3211", Host: "actions.example.com",
 		TLS: true, HealthPath: "/version", HealthPort: 3210, Timeout: "60s",
 	}), " ")
-	want := "docker exec boks-proxy kamal-proxy deploy demo-actions --target demo-v2-1:3211 " +
+	want := "docker exec boks-proxy kamal-proxy deploy demo.actions --target demo-v2-1:3211 " +
 		"--host actions.example.com --tls --health-check-path /version --health-check-port 3210 --deploy-timeout 60s"
 	if got != want {
 		t.Errorf("got  %s\nwant %s", got, want)

@@ -56,6 +56,9 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		crt, _ := cert.ServerPaths(cfg.Cert)
 		return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
 	}
+	if err := checkLegacyVolumes(ctx, r, cfg); err != nil {
+		return err
+	}
 	if err := pull(ctx, r, log, cfg.Image+":"+tag, o.Pull); err != nil {
 		return err
 	}
@@ -79,6 +82,11 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 			fmt.Fprintf(log, "warning: could not record the loaded certificate: %v\n", err)
 		}
 	}
+	// After the routes are live and before anything is deleted: a stale service would otherwise
+	// keep pointing at the container retire is about to remove.
+	if err := removeOrphanRoutes(ctx, r, log, cfg); err != nil {
+		fmt.Fprintf(log, "warning: could not remove stale routes: %v\n", err)
+	}
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
 	return nil
@@ -92,6 +100,9 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 // brought back: a container left stopped by an earlier deploy must stay stopped, or a failed
 // deploy would end with two copies where there was one.
 func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, tag string, o Options) error {
+	if err := checkLegacyVolumes(ctx, r, cfg); err != nil {
+		return err
+	}
 	// The proxy is what normally creates the network every app container joins; without it the
 	// network has to be made here, or the first deploy on a fresh server cannot start at all.
 	if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
@@ -246,6 +257,57 @@ func waitHealthy(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 	}
 }
 
+// checkLegacyVolumes refuses a deploy that would start the app on a fresh, empty volume because
+// the data still sits under the previous naming scheme. Copying is the operator's call, not
+// something boks should do behind their back, so this says what to run instead.
+func checkLegacyVolumes(ctx context.Context, r remote.Runner, cfg *config.Config) error {
+	for _, v := range cfg.Volumes {
+		name, _, _ := strings.Cut(v, ":")
+		legacy, current := cfg.App+"-"+name, cfg.App+proxy.NameSep+name
+		if !volumeExists(ctx, r, legacy) || volumeExists(ctx, r, current) {
+			continue
+		}
+		return fmt.Errorf("volume %q holds this app's data under the old naming scheme and %q does not exist yet; "+
+			"deploying now would start on an empty volume. Move the data first:\n"+
+			"  docker volume create %s\n"+
+			"  docker run --rm -v %s:/from -v %s:/to alpine sh -c 'cp -a /from/. /to/'",
+			legacy, current, current, legacy, current)
+	}
+	return nil
+}
+
+func volumeExists(ctx context.Context, r remote.Runner, name string) bool {
+	// The filter is a regular expression, so the dot of the current scheme has to be escaped: bare
+	// it would match any character and report a volume that is not there.
+	out, err := r.Run(ctx, "docker", "volume", "ls", "--quiet", "--filter",
+		"name=^"+regexp.QuoteMeta(name)+"$")
+	return err == nil && strings.TrimSpace(out) != ""
+}
+
+// removeOrphanRoutes drops the proxy services this app owns that its config no longer describes.
+// Without it a renamed port leaves a service pointing at a container retire is about to remove,
+// and the deploy still reports success.
+func removeOrphanRoutes(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
+	names, err := proxy.Names(ctx, r)
+	if err != nil {
+		return err
+	}
+	wanted := make(map[string]bool, len(cfg.Ports))
+	for _, p := range cfg.Ports {
+		wanted[proxy.ServiceName(cfg.App, p.Name)] = true
+	}
+	for _, name := range names {
+		if !proxy.Owns(cfg.App, name) || wanted[name] {
+			continue
+		}
+		fmt.Fprintf(log, "remove stale route %s\n", name)
+		if err := proxy.Remove(ctx, r, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func lock(ctx context.Context, r remote.Runner, app string) error {
 	if _, err := r.Run(ctx, "mkdir", lockPath(app)); err != nil {
 		return fmt.Errorf("another deploy of %s seems to be in progress (run `boks unlock` to clear %s)", app, lockPath(app))
@@ -359,7 +421,7 @@ func runArgs(cfg *config.Config, name, tag, envPath string) []string {
 	}
 	for _, v := range cfg.Volumes {
 		vol, path, _ := strings.Cut(v, ":")
-		a = append(a, "-v", cfg.App+"-"+vol+":"+path)
+		a = append(a, "-v", cfg.App+proxy.NameSep+vol+":"+path)
 	}
 	return append(a, cfg.Image+":"+tag)
 }

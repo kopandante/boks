@@ -3,9 +3,12 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/kopandante/boks/internal/remote"
 )
@@ -31,8 +34,43 @@ type Service struct {
 	Timeout    string
 }
 
+// NameSep joins an app and one of its ports into a service name, and the app with a volume name.
+// A dot rather than a dash because both halves may contain dashes: `a-b` with port `c` and `a`
+// with port `b-c` used to produce the same service, and the second deploy took the route of the
+// first. The dot is not allowed in either half, so the join is unambiguous.
+const NameSep = "."
+
 func ServiceName(app, port string) string {
-	return app + "-" + port
+	return app + NameSep + port
+}
+
+// Owns reports whether a proxy service belongs to this app.
+func Owns(app, service string) bool {
+	return strings.HasPrefix(service, app+NameSep)
+}
+
+// Names lists the services kamal-proxy currently holds. The JSON form is an object keyed by
+// service name, so the keys are the answer.
+func Names(ctx context.Context, r remote.Runner) ([]string, error) {
+	out, err := r.Run(ctx, "docker", "exec", Container, "kamal-proxy", "list", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var services map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &services); err != nil {
+		return nil, fmt.Errorf("reading the proxy service list: %w", err)
+	}
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func Remove(ctx context.Context, r remote.Runner, service string) error {
+	_, err := r.Run(ctx, "docker", "exec", Container, "kamal-proxy", "remove", service)
+	return err
 }
 
 func DeployArgs(s Service) []string {
