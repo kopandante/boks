@@ -135,6 +135,8 @@ func (f *fake) has(prefix string) bool {
 	return false
 }
 
+var errNotFound = errors.New("No such file or directory")
+
 func parse(t *testing.T, yaml string) *config.Config {
 	cfg, err := config.Parse([]byte(yaml))
 	if err != nil {

@@ -20,7 +20,9 @@ import (
 const usage = `usage: boks [-f boks.yml] <command>
 
   deploy <tag>     pull image:<tag>, start it, switch the proxy, retire the previous version
-  rollback <tag>   same as deploy without an explicit pull (docker still fetches a missing image)
+  rollback [id]    return to a recorded release (the previous one by default), reproducing the
+                   image by digest, the ports, volumes and environment it actually ran with.
+                   The ids are what "boks releases" prints
   ps               containers and proxy routes of this app on every server
   releases         releases recorded on each server, newest last
   proxy boot       make sure kamal-proxy is running (idempotent)
@@ -68,12 +70,23 @@ type action func(ctx context.Context, r remote.Runner) error
 func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
-	case "deploy", "rollback":
+	case "deploy":
 		if len(rest) != 1 {
-			return fmt.Errorf("%s needs exactly one <tag>", cmd)
+			return fmt.Errorf("deploy needs exactly one <tag>")
 		}
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return runDeploy(ctx, r, out, cfg, rest[0], cmd == "deploy")
+			return runDeploy(ctx, r, out, cfg, rest[0], true)
+		})
+	case "rollback":
+		if len(rest) > 1 {
+			return fmt.Errorf("rollback takes at most one release id; `boks releases` lists them")
+		}
+		id := ""
+		if len(rest) == 1 {
+			id = rest[0]
+		}
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			return deploy.Rollback(ctx, r, out, cfg, id, deploy.Options{})
 		})
 	case "releases":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return releases(ctx, r, out, cfg) })

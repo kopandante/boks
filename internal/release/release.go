@@ -60,6 +60,15 @@ type Entry struct {
 	Result     string    `json:"result,omitempty"`
 }
 
+// Reference is what to run: the digest when it was recorded, because a tag can be overwritten and
+// then means a different image than the one this release actually ran.
+func (s Snapshot) Reference() string {
+	if s.Digest != "" {
+		return s.Image + "@" + s.Digest
+	}
+	return s.Image + ":" + s.Tag
+}
+
 func Dir(app string) string { return ".boks/" + app }
 
 // EnvPath is where the environment file of release id lives. One owner for the name: the deploy
