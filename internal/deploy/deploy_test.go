@@ -11,17 +11,19 @@ import (
 
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/release"
 )
 
 type fake struct {
 	calls   []string
 	uploads map[string]string
+	appends map[string]string
 	out     map[string]string
 	fail    map[string]error
 }
 
 func newFake() *fake {
-	f := &fake{uploads: map[string]string{}, out: map[string]string{}, fail: map[string]error{}}
+	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{}}
 	f.out[proxyList] = "{}" // what kamal-proxy prints when it holds no services
 	return f
 }
@@ -48,8 +50,19 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 // `sh -c '... cat > <path>'`, so the path is the last quoted token of the script.
 func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
 	if len(args) == 3 && args[0] == "sh" {
+		// An atomic write ends in `mv <tmp> <path>`; a plain one ends in `cat > <path>`. Either way
+		// the destination is the last quoted token.
+		if _, tail, ok := strings.Cut(args[2], " && mv "); ok {
+			_, dest, _ := strings.Cut(tail, "' '")
+			f.uploads[strings.Trim(dest, "'")] = string(content)
+			return "", nil
+		}
 		if _, path, ok := strings.Cut(args[2], "cat > "); ok {
 			f.uploads[strings.Trim(path, "'")] = string(content)
+			return "", nil
+		}
+		if _, path, ok := strings.Cut(args[2], "cat >> "); ok {
+			f.appends[strings.Trim(path, "'")] += string(content)
 			return "", nil
 		}
 	}
@@ -112,12 +125,16 @@ func TestRunHappyPath(t *testing.T) {
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		proxyList,
+		"sh -c cat '.boks/demo/journal.jsonl' 2>/dev/null || true",
+		"sh -c cat '.boks/demo/current' 2>/dev/null || true",
 		"docker run -d --name demo-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
 			"--env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
 		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --tls --health-check-path /up --deploy-timeout 60s",
+		"docker inspect --format {{index .RepoDigests 0}} ghcr.io/x/y:v2",
+		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
 		"docker stop demo-v1-1",
 		"docker rm demo-v1-1",
 		"docker images ghcr.io/x/y --format {{.Tag}} {{.ID}}",
@@ -183,11 +200,17 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
 		proxyProbe,
+		// The journal entry is opened before the first change on the server, and stopping the
+		// running copy is one: a run cut right after the stop must leave a trace.
+		"sh -c cat '.boks/bot/journal.jsonl' 2>/dev/null || true",
+		"sh -c cat '.boks/bot/current' 2>/dev/null || true",
 		"docker stop bot-v1-1",
 		"docker run -d --name bot-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
+		"docker inspect --format {{index .RepoDigests 0}} ghcr.io/x/bot:v2",
+		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
 		"docker stop bot-v1-1",
 		"docker rm bot-v1-1",
 		"docker images ghcr.io/x/bot --format {{.Tag}} {{.ID}}",
@@ -1075,5 +1098,62 @@ func TestContainerNameSanitizes(t *testing.T) {
 	got := ContainerName("app", "sha:ab/12", time.Unix(5, 0))
 	if got != "app-sha-ab-12-5" {
 		t.Errorf("got %s", got)
+	}
+}
+
+// The snapshot is what rollback will run, so it has to hold the release rather than point at a
+// config that may since have changed.
+func TestDeployRecordsWhatItRan(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker inspect --format {{index .RepoDigests 0}}"] = "ghcr.io/x/y@sha256:abc"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	body, ok := f.uploads[".boks/demo/releases/demo-v2-1700000000.json"]
+	if !ok {
+		t.Fatalf("no snapshot written: %v", f.uploads)
+	}
+	if err := json.Unmarshal([]byte(body), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.Digest != "sha256:abc" || snap.Tag != "v2" || len(snap.Ports) != 1 ||
+		len(snap.Volumes) != 1 || snap.EnvPath != ".boks/demo/demo-v2-1700000000.env" {
+		t.Errorf("snapshot does not describe the release: %+v", snap)
+	}
+	if f.uploads[".boks/demo/current"] != "demo-v2-1700000000\n" {
+		t.Errorf("current not moved: %q", f.uploads[".boks/demo/current"])
+	}
+	if !strings.Contains(f.appends[".boks/demo/journal.jsonl"], `"result":"ok"`) {
+		t.Errorf("journal not closed: %q", f.appends[".boks/demo/journal.jsonl"])
+	}
+}
+
+// A deploy that died between switching routes and retiring the old container leaves no trace in
+// docker. The journal is the only place that knows, and the next run has to say so.
+func TestDeployWarnsAboutAnOperationThatNeverFinished(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["sh -c cat '.boks/demo/journal.jsonl'"] =
+		`{"op":"1","action":"deploy","to":"demo-v1-1","started_at":"2026-09-15T10:00:00Z"}`
+	var log strings.Builder
+	if err := Run(context.Background(), f, &log, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "never finished") {
+		t.Errorf("the interrupted deploy must be reported: %q", log.String())
+	}
+}
+
+func TestFailedSwitchClosesTheJournalEntry(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.fail["docker exec boks-proxy kamal-proxy deploy"] = errors.New("health check failed")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(f.appends[".boks/demo/journal.jsonl"], `"result":"failed"`) {
+		t.Errorf("a failed deploy must be recorded as failed: %q", f.appends[".boks/demo/journal.jsonl"])
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/kopandante/boks/internal/cert"
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -80,12 +81,18 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	name := ContainerName(cfg.App, tag, o.Now())
+	op, err := beginOperation(ctx, r, log, cfg, "deploy", name, o.Now())
+	if err != nil {
+		return err
+	}
 	if err := start(ctx, r, log, cfg, name, tag, o.Env); err != nil {
+		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 		return err
 	}
 	switched, err := switchProxy(ctx, r, log, cfg, name, plan)
 	if err != nil {
 		revert(ctx, r, log, cfg, plan, switched, old)
+		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 		return fmt.Errorf("%w\nnew container %s is left running for inspection; see the revert/warning lines above for where traffic goes now", err, name)
 	}
 	// Routing a host at a certificate path makes the proxy read that file, so the deploy is a
@@ -98,6 +105,7 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := settle(ctx, r, log, cfg, name, plan, held); err != nil {
 		return keptOld(err, old)
 	}
+	record(ctx, r, log, cfg, name, tag, op, o.Now())
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
 	return nil
@@ -159,6 +167,10 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 			return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
 		}
 	}
+	op, err := beginOperation(ctx, r, log, cfg, "deploy", name, o.Now())
+	if err != nil {
+		return err
+	}
 	var stopped []string
 	for _, c := range live {
 		fmt.Fprintf(log, "stop %s\n", c)
@@ -168,6 +180,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		stopped = append(stopped, c)
 		if _, err := r.Run(ctx, "docker", "stop", c); err != nil {
 			revive(ctx, r, log, stopped)
+			finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 			return fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
 		}
 	}
@@ -179,6 +192,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		// A failed `docker run` may still have created the container, and a failed stop may have
 		// left it running. The old copy comes back only once the new one is verifiably gone;
 		// otherwise both would run at once, which is the one outcome this path exists to prevent.
+		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 		if !discard(ctx, r, log, name) {
 			return fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
 				err, name, stopped)
@@ -208,6 +222,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 				"%v are kept stopped until a deploy can check them\n", kept)
 		}
 	}
+	record(ctx, r, log, cfg, name, tag, op, o.Now())
 	retire(ctx, r, log, gone)
 	prune(ctx, r, log, cfg, tag)
 	return nil
@@ -542,6 +557,70 @@ func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, k
 	return nil
 }
 
+// beginOperation opens the journal entry and, on the way, says whether the previous one was ever
+// closed. A deploy cut between switching routes and retiring the old container leaves no trace in
+// docker — the journal is the only place that knows.
+func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to string, now time.Time) (string, error) {
+	if open, err := release.Unfinished(ctx, r, cfg.App); err == nil && open != nil {
+		fmt.Fprintf(log, "warning: %s of %s started %s and never finished; this run replaces it\n",
+			open.Action, cfg.App, open.StartedAt.Format(time.RFC3339))
+	}
+	from, err := release.Current(ctx, r, cfg.App)
+	if err != nil {
+		return "", err
+	}
+	return release.Begin(ctx, r, cfg.App, action, from, to, now)
+}
+
+func finish(ctx context.Context, r remote.Runner, log io.Writer, app, op, result string, now time.Time) {
+	if op == "" {
+		return
+	}
+	if err := release.Finish(context.WithoutCancel(ctx), r, app, op, result, now); err != nil {
+		fmt.Fprintf(log, "warning: could not close the journal entry: %v\n", err)
+	}
+}
+
+// record writes what this release actually is, points `current` at it and closes the operation.
+// The order is deliberate: the snapshot exists before anything claims to be current, and the
+// journal closes last, so an interruption always leaves more evidence rather than less.
+func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, op string, now time.Time) {
+	snapshot := release.Snapshot{
+		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digestOf(ctx, r, cfg.Image, tag),
+		Ports: cfg.Ports, Volumes: cfg.Volumes, Network: cfg.Network,
+		EnvPath: envPathFor(cfg.App, name), CreatedAt: now,
+	}
+	if err := release.Save(ctx, r, snapshot); err != nil {
+		fmt.Fprintf(log, "warning: could not record the release: %v\n", err)
+		return
+	}
+	if err := release.SetCurrent(ctx, r, cfg.App, name); err != nil {
+		fmt.Fprintf(log, "warning: could not mark %s as current: %v\n", name, err)
+		return
+	}
+	finish(ctx, r, log, cfg.App, op, "ok", now)
+	if err := release.Prune(ctx, r, cfg.App, cfg.Keep); err != nil {
+		fmt.Fprintf(log, "warning: could not prune old releases: %v\n", err)
+	}
+}
+
+// digestOf pins what was actually pulled: a tag can be overwritten, a digest cannot, so a rollback
+// aiming at this snapshot gets the same image rather than whatever the tag means by then.
+func digestOf(ctx context.Context, r remote.Runner, image, tag string) string {
+	out, err := r.Run(ctx, "docker", "inspect", "--format", "{{index .RepoDigests 0}}", image+":"+tag)
+	if err != nil {
+		return ""
+	}
+	if _, digest, ok := strings.Cut(strings.TrimSpace(out), "@"); ok {
+		return digest
+	}
+	return ""
+}
+
+// envPathFor is where a release's environment file lives on the server; the snapshot records it so
+// a rollback knows which file belonged to which release.
+func envPathFor(app, name string) string { return release.Dir(app) + "/" + name + ".env" }
+
 func lock(ctx context.Context, r remote.Runner, app string) error {
 	if _, err := r.Run(ctx, "mkdir", lockPath(app)); err != nil {
 		return fmt.Errorf("another deploy of %s seems to be in progress (run `boks unlock` to clear %s)", app, lockPath(app))
@@ -636,7 +715,7 @@ func parsePorts(label string) map[string]config.Port {
 func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag string, env []byte) error {
 	envPath := ""
 	if len(env) > 0 {
-		envPath = fmt.Sprintf(".boks/%s/%s.env", cfg.App, name)
+		envPath = envPathFor(cfg.App, name)
 		if err := remote.Upload(ctx, r, env, envPath); err != nil {
 			return err
 		}
