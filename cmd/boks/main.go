@@ -110,6 +110,11 @@ func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config)
 		return err
 	}
 	fmt.Fprintln(out, list)
+	// An app without routes has no proxy to ask, and on such a server the proxy may not even be
+	// running — listing routes would fail on a deploy that is perfectly fine.
+	if len(cfg.Ports) == 0 {
+		return nil
+	}
 	routes, err := proxy.List(ctx, r)
 	if err != nil {
 		return err

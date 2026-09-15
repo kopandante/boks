@@ -31,7 +31,6 @@ func TestParseRejects(t *testing.T) {
 		"app: Demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]":                              "app:",
 		"app: demo\nservers: [a]\nports: [{name: w, port: 1, host: h}]":                                        "image",
 		"app: demo\nimage: x\nports: [{name: w, port: 1, host: h}]":                                            "servers",
-		"app: demo\nimage: x\nservers: [a]":                                                                    "ports",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 70000, host: h}]":                          "out of range",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1}]":                                       "host is required",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\nvolumes: [data]":             "volumes",
@@ -44,6 +43,18 @@ func TestParseRejects(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want error containing %q, got %v", in, want, err)
 		}
+	}
+}
+
+// An app that publishes nothing (a bot, a worker) is a valid shape: it is judged by the image's
+// own HEALTHCHECK instead of by a route.
+func TestParseAcceptsAnAppWithoutPorts(t *testing.T) {
+	cfg, err := Parse([]byte("app: bot\nimage: ghcr.io/x/bot\nservers: [lab]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Ports) != 0 {
+		t.Errorf("want no ports, got %v", cfg.Ports)
 	}
 }
 

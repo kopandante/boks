@@ -20,6 +20,8 @@ type Options struct {
 	Pull bool
 	Env  []byte
 	Now  func() time.Time
+	// Poll is how often the health of a routeless app is checked; zero means once a second.
+	Poll time.Duration
 }
 
 var unsafe = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
@@ -42,6 +44,9 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
+	if len(cfg.Ports) == 0 {
+		return runRouteless(ctx, r, log, cfg, tag, o)
+	}
 	if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
 		return err
 	}
@@ -77,6 +82,87 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
 	return nil
+}
+
+// runRouteless deploys an app that publishes nothing — a bot, a worker. Two differences from the
+// routed path, both forced by the absence of a route. There is no traffic to switch, so the proxy
+// is not booted at all; and overlapping the two versions would mean two live copies draining the
+// same queue, so the old container is stopped BEFORE the new one starts and brought back if the
+// new one never becomes healthy.
+func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, tag string, o Options) error {
+	if err := pull(ctx, r, log, cfg.Image+":"+tag, o.Pull); err != nil {
+		return err
+	}
+	old, err := containers(ctx, r, cfg.App)
+	if err != nil {
+		return err
+	}
+	for _, c := range names(old) {
+		fmt.Fprintf(log, "stop %s\n", c)
+		best(ctx, r, log, "docker", "stop", c)
+	}
+	name := ContainerName(cfg.App, tag, o.Now())
+	if err := start(ctx, r, log, cfg, name, tag, o.Env); err != nil {
+		revive(ctx, r, log, old)
+		return err
+	}
+	if err := waitHealthy(ctx, r, log, cfg, name, o.Poll); err != nil {
+		best(ctx, r, log, "docker", "stop", name)
+		best(ctx, r, log, "docker", "rm", name)
+		revive(ctx, r, log, old)
+		return err
+	}
+	retire(ctx, r, log, names(old))
+	prune(ctx, r, log, cfg, tag)
+	return nil
+}
+
+// revive restarts the containers that were stopped to make room for a deploy that then failed.
+func revive(ctx context.Context, r remote.Runner, log io.Writer, old []container) {
+	for _, c := range names(old) {
+		fmt.Fprintf(log, "restart %s (the new version did not come up)\n", c)
+		best(ctx, r, log, "docker", "start", c)
+	}
+}
+
+// healthFormat asks for the health of a container and says `none` when the image declares no
+// HEALTHCHECK — the two cases have to be told apart, because without a route health is the only
+// evidence that a deploy worked.
+const healthFormat = "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}"
+
+func waitHealthy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string, poll time.Duration) error {
+	if poll <= 0 {
+		poll = time.Second
+	}
+	timeout, err := time.ParseDuration(cfg.DeployTimeout)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(log, "waiting for %s to report healthy\n", name)
+	deadline := time.Now().Add(timeout)
+	for {
+		state, err := r.Run(ctx, "docker", "inspect", "--format", healthFormat, name)
+		if err != nil {
+			return err
+		}
+		switch state {
+		case "healthy":
+			return nil
+		case "none":
+			return fmt.Errorf("%s has no HEALTHCHECK: an app without routes is judged by its own "+
+				"health check, so add one to the image or publish a port", cfg.Image)
+		case "unhealthy":
+			return fmt.Errorf("%s reported unhealthy", name)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not become healthy within %s (last state %q)", name, cfg.DeployTimeout, state)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
 }
 
 func lock(ctx context.Context, r remote.Runner, app string) error {
@@ -144,6 +230,11 @@ func names(cs []container) []string {
 // health check the old container passed too, and JSON keeps that exact instead of inventing a
 // format that is only partly faithful.
 func portLabel(ports []config.Port) string {
+	// An app without routes has no ports at all, and `null` in the label would read as a missing
+	// label rather than as an empty list — write the empty list.
+	if len(ports) == 0 {
+		return "[]"
+	}
 	b, err := json.Marshal(ports)
 	if err != nil {
 		return ""

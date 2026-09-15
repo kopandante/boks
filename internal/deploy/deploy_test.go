@@ -124,6 +124,78 @@ func TestRunHappyPath(t *testing.T) {
 	}
 }
 
+const noPorts = `
+app: bot
+image: ghcr.io/x/bot
+servers: [lab]
+deploy_timeout: 2s
+`
+
+// An app with no routes is replaced in place: the proxy is never touched and the old container is
+// stopped BEFORE the new one starts, so two copies never drain the same queue at once.
+func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t\n"
+	f.out["docker inspect --format"] = "healthy"
+	o := fixed
+	o.Poll = time.Nanosecond
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", o); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"mkdir /tmp/boks-bot.lock",
+		"docker pull ghcr.io/x/bot:v2",
+		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}",
+		"docker stop bot-v1-1",
+		"docker run -d --name bot-v2-1700000000 --network boks --restart unless-stopped " +
+			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] " +
+			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
+		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
+		"docker stop bot-v1-1",
+		"docker rm bot-v1-1",
+		"docker images ghcr.io/x/bot --format {{.Tag}} {{.ID}}",
+		"rmdir /tmp/boks-bot.lock",
+	}
+	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(f.calls, "\n"), strings.Join(want, "\n"))
+	}
+	if f.has("docker network inspect") || f.has("docker exec boks-proxy") {
+		t.Errorf("the proxy must not be touched for an app without routes: %v", f.calls)
+	}
+}
+
+// Without a route, the image's own HEALTHCHECK is the only evidence a deploy worked. An image that
+// declares none gets a refusal, not a deploy that reports success and proves nothing.
+func TestRoutelessRefusesAnImageWithoutHealthcheck(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t\n"
+	f.out["docker inspect --format"] = "none"
+	o := fixed
+	o.Poll = time.Nanosecond
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", o)
+	if err == nil || !strings.Contains(err.Error(), "HEALTHCHECK") {
+		t.Fatalf("want a refusal naming HEALTHCHECK, got %v", err)
+	}
+	if !f.has("docker rm bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
+		t.Errorf("the new copy must go and the old one must come back: %v", f.calls)
+	}
+}
+
+func TestRoutelessBringsTheOldCopyBackWhenTheNewOneIsUnhealthy(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t\n"
+	f.out["docker inspect --format"] = "unhealthy"
+	o := fixed
+	o.Poll = time.Nanosecond
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", o)
+	if err == nil || !strings.Contains(err.Error(), "unhealthy") {
+		t.Fatalf("want an unhealthy error, got %v", err)
+	}
+	if !f.has("docker start bot-v1-1") {
+		t.Errorf("old copy must be restarted: %v", f.calls)
+	}
+}
+
 func TestRunLocked(t *testing.T) {
 	f := newFake()
 	f.fail["mkdir"] = errors.New("File exists")
