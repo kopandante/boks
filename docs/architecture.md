@@ -63,7 +63,7 @@ compose-файлов: они использовались ради готовы�
 1. `docker pull` образа с тегом на сервере.
 2. Запуск нового контейнера (`app-<version>`, лейблы: app, version, hosts, ports) в сети
    прокси.
-3. Для каждого публикуемого порта: `kamal-proxy deploy <app>-<name> --target <container>:<port>
+3. Для каждого публикуемого порта: `kamal-proxy deploy <app>.<name> --target <container>:<port>
    --host <domain> --tls --health-check-path ...` — прокси сам ждёт health check и только потом
    переключает трафик. Для порта без 2xx-эндпоинта (у Convex — 3211) health проверяется через
    другой порт того же контейнера: `--health-check-port 3210 --health-check-path /version`.

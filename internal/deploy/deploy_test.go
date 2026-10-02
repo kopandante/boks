@@ -470,14 +470,29 @@ func TestRunRemovesRoutesTheConfigNoLongerDescribes(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
-	removed, retired := f.at(removeVia+"demo.legacy"), f.at("docker rm demo-v1-1")
-	if removed < 0 || retired < 0 || removed > retired {
-		t.Errorf("the stale route must go before the old container: %v", f.calls)
+	switched, removed, retired := f.at(deployVia+"demo.web"), f.at(removeVia+"demo.legacy"), f.at("docker rm demo-v1-1")
+	if switched < 0 || removed < switched || retired < removed {
+		t.Errorf("the stale route must go after the switch and before the old container: %v", f.calls)
 	}
 	for _, keep := range []string{"demo.web", "other.web", "demo-web", "idle"} {
 		if f.has(removeVia + keep) {
 			t.Errorf("%s is not a stale route of this app: %v", keep, f.calls)
 		}
+	}
+}
+
+// A switch that fails leaves the stale route in place: until the new routes are live it may still
+// be what serves the app.
+func TestRunKeepsStaleRoutesWhenTheSwitchFails(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+	})
+	f.fail[deployVia+"demo.web"] = errors.New("unhealthy")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if f.has(removeVia) {
+		t.Errorf("no route may be removed after a failed switch: %v", f.calls)
 	}
 }
 
