@@ -685,6 +685,25 @@ func TestRoutelessRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
 	}
 }
 
+// In a rename chain (x→y, y→z) the name y meant another port on the old container, so a revert
+// that went by name would send one.example.com to the old y's port. The route is its host.
+func TestRunRevertsARenameChainByHost(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.x": {Hosts: []string{"one.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+		"demo.y": {Hosts: []string{"two.example.com"}, Targets: []string{"demo-v1-1:3001"}},
+	})
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t,
+		config.Port{Name: "x", Port: 3000, Host: "one.example.com"},
+		config.Port{Name: "y", Port: 3001, Host: "two.example.com"}) + "\n"
+	f.fail[deployVia+"demo.y --target demo-v2-1700000000:3001"] = errors.New("unhealthy")
+	if err := Run(context.Background(), f, io.Discard, parse(t, chainPorts), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if !f.has(deployVia+"demo.x --target demo-v1-1:3000 --host one.example.com") || f.has(deployVia+"demo.x --target demo-v1-1:3001") {
+		t.Errorf("one.example.com must go back to the old x port: %v", f.calls)
+	}
+}
+
 // An app whose ports were all removed still has the routes it had; left alone they answer with a
 // 502 from a container this deploy removes. They go after the new copy is healthy and before the
 // old one is retired — without booting or routing through the proxy.

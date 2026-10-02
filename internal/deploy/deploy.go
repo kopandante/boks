@@ -186,7 +186,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		revive(ctx, r, log, stopped)
 		return err
 	}
-	if err := removeUnwanted(ctx, r, log, stale, nil); err != nil {
+	if err := removeExcept(ctx, r, log, stale, nil); err != nil {
 		return keptOld(err, old)
 	}
 	retire(ctx, r, log, names(old))
@@ -405,12 +405,12 @@ func settle(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 		was  string
 		port string
 	}
-	wanted := map[string]bool{}
+	keep := map[string]bool{} // not to be removed: the config's own names, and names a rename already removed
 	busy := map[string]bool{} // services still carrying a port's traffic under a name not their own
 	var pending []move
 	for _, p := range cfg.Ports {
 		svc := service(cfg, target, p)
-		wanted[svc.Name] = true
+		keep[svc.Name] = true
 		if was := plan[p.Name]; was != svc.Name {
 			busy[was] = true
 			pending = append(pending, move{svc, was, p.Name})
@@ -428,7 +428,7 @@ func settle(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 				return err
 			}
 			delete(busy, m.was)
-			wanted[m.was] = true // already gone, not an orphan
+			keep[m.was] = true
 			progress = true
 		}
 		pending = left
@@ -437,7 +437,7 @@ func settle(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	for _, m := range pending {
 		fmt.Fprintf(log, "warning: port %s keeps its route under %s: %s still carries another port\n", m.port, m.was, m.svc.Name)
 	}
-	return removeUnwanted(ctx, r, log, h, wanted)
+	return removeExcept(ctx, r, log, h, keep)
 }
 
 func rename(ctx context.Context, r remote.Runner, log io.Writer, svc proxy.Service, was string) error {
@@ -463,9 +463,9 @@ func ownRoutes(ctx context.Context, r remote.Runner, cfg *config.Config, mine []
 	return readRoutes(ctx, r, cfg, mine)
 }
 
-func removeUnwanted(ctx context.Context, r remote.Runner, log io.Writer, h held, wanted map[string]bool) error {
+func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, keep map[string]bool) error {
 	for _, n := range h.names {
-		if wanted[n] {
+		if keep[n] {
 			continue
 		}
 		fmt.Fprintf(log, "remove stale route %s\n", n)
@@ -654,12 +654,7 @@ func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	prev := old[0]
 	for _, p := range switched {
 		target := p
-		// A port carried by its predecessor's service was recorded under the predecessor's name.
-		recorded, ok := prev.ports[p.Name]
-		if !ok {
-			recorded, ok = prev.ports[formerPort(cfg.App, plan[p.Name])]
-		}
-		if ok {
+		if recorded, ok := prev.record(p); ok {
 			recorded.Host = p.Host // the domain belongs to the route, not to the container
 			target = recorded
 		} else {
@@ -673,13 +668,18 @@ func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	}
 }
 
-// formerPort is the port a service of this app was named after, under either naming scheme.
-func formerPort(app, service string) string {
-	if port, ok := strings.CutPrefix(service, app+proxy.NameSep); ok {
-		return port
+// record is what the container was started with for the route of p. A route is its host — the
+// config gives each host to one port — so the record that served p's host is where that host was,
+// even when ports were renamed and p's name meant another port then. The name is the fallback
+// for a port whose host changed.
+func (c container) record(p config.Port) (config.Port, bool) {
+	for _, recorded := range c.ports {
+		if recorded.Host == p.Host {
+			return recorded, true
+		}
 	}
-	port, _ := strings.CutPrefix(service, app+"-")
-	return port
+	recorded, ok := c.ports[p.Name]
+	return recorded, ok
 }
 
 // retire stops and removes previous containers. Failures are reported, not fatal: the new
