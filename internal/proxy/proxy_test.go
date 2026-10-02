@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDeployArgs(t *testing.T) {
@@ -39,8 +41,9 @@ func TestDeployArgsMinimal(t *testing.T) {
 }
 
 type fake struct {
-	calls []string
-	state string
+	calls  []string
+	state  string
+	silent int // how many times a just-started proxy does not answer yet
 }
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
@@ -49,8 +52,14 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	if strings.HasPrefix(cmd, "docker ps -a") {
 		return f.state, nil
 	}
+	if cmd == answer && f.silent > 0 {
+		f.silent--
+		return "", errors.New("dial unix /home/kamal-proxy/.config/kamal-proxy/kamal-proxy.sock: connect: no such file or directory")
+	}
 	return "", nil
 }
+
+const answer = "docker exec boks-proxy kamal-proxy list"
 
 func (f *fake) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
 	return f.Run(ctx, args...)
@@ -73,9 +82,35 @@ func TestBootStartsMissingProxy(t *testing.T) {
 	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
 		t.Fatal(err)
 	}
-	last := f.calls[len(f.calls)-1]
-	if !strings.HasPrefix(last, "docker run -d --name boks-proxy") || !strings.HasSuffix(last, " img") {
-		t.Errorf("expected docker run, got %s", last)
+	started := f.calls[len(f.calls)-2]
+	if !strings.HasPrefix(started, "docker run -d --name boks-proxy") || !strings.HasSuffix(started, " img") {
+		t.Errorf("expected docker run, got %s", started)
+	}
+	if f.calls[len(f.calls)-1] != answer {
+		t.Errorf("Boot must wait for the proxy to answer: %v", f.calls)
+	}
+}
+
+// A proxy that was just started is not yet a proxy that answers: the deploy asks it for its
+// services right away, so Boot returns only once it does — or says it never did.
+func TestBootWaitsForAJustStartedProxyToAnswer(t *testing.T) {
+	answerPoll = time.Nanosecond
+	f := &fake{state: "", silent: 3}
+	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	for _, c := range f.calls {
+		if c == answer {
+			asked++
+		}
+	}
+	if asked != 4 {
+		t.Errorf("want three silent tries and one answer, asked %d times: %v", asked, f.calls)
+	}
+	never := &fake{state: "exited", silent: answerTries}
+	if err := Boot(context.Background(), never, io.Discard, "boks", "img"); err == nil || !strings.Contains(err.Error(), "does not answer") {
+		t.Errorf("a proxy that never answers must fail Boot, got %v", err)
 	}
 }
 
@@ -84,8 +119,8 @@ func TestBootRestartsStoppedProxy(t *testing.T) {
 	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls[len(f.calls)-1] != "docker start boks-proxy" {
-		t.Errorf("expected docker start, got %v", f.calls)
+	if f.calls[len(f.calls)-2] != "docker start boks-proxy" || f.calls[len(f.calls)-1] != answer {
+		t.Errorf("expected docker start, then the wait for an answer, got %v", f.calls)
 	}
 }
 

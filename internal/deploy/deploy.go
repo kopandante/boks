@@ -108,7 +108,8 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 // reaches a container that still exists, rather than one this deploy deleted.
 func keptOld(err error, old []container) error {
 	return fmt.Errorf("the new version is up, but bringing the proxy's routes in line with the config failed: %w\n"+
-		"the previous containers %v were kept rather than leave a route pointing at a removed one; check `boks proxy list` and deploy again",
+		"the previous containers %v were not removed, so no route points at a deleted container — but a route left over may still answer "+
+		"with an error; check `boks proxy list` and deploy again",
 		err, names(old))
 }
 
@@ -145,7 +146,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	// Removing every port does not remove the routes the app had: they would keep answering, with
 	// a 502, from the container retire is about to delete. They are read before anything is
 	// stopped, so a proxy that cannot answer fails the deploy while nothing has changed yet.
-	stale, err := ownRoutes(ctx, r, cfg, names(old))
+	stale, err := ownRoutes(ctx, r, log, cfg, names(old))
 	if err != nil {
 		return err
 	}
@@ -316,11 +317,15 @@ func checkLegacyVolume(ctx context.Context, r remote.Runner, app, legacy, curren
 	if err != nil {
 		return fmt.Errorf("checking which containers use %s: %w", legacy, err)
 	}
+	// A container without the label is nobody's app — a `docker run -v` left behind by hand — and
+	// says nothing about whose data this is.
 	var mine, theirs []string
 	for _, line := range strings.Fields(strings.ReplaceAll(out, "\t", "|")) {
-		if c, owner, _ := strings.Cut(line, "|"); owner == app {
+		switch c, owner, _ := strings.Cut(line, "|"); owner {
+		case app:
 			mine = append(mine, c)
-		} else {
+		case "":
+		default:
 			theirs = append(theirs, c)
 		}
 	}
@@ -335,7 +340,7 @@ func checkLegacyVolume(ctx context.Context, r remote.Runner, app, legacy, curren
 	case len(theirs) > 0:
 		return nil // another app's data under a name that happens to read like this app's
 	default:
-		return fmt.Errorf("volume %s exists under the old naming scheme, no container uses it, and %s does not exist yet; "+
+		return fmt.Errorf("volume %s exists under the old naming scheme, no container of a boks app uses it, and %s does not exist yet; "+
 			"whose data it holds cannot be told, so deploying now could start on an empty volume. "+
 			"If it is this app's, move it, then deploy again:\n%s\n"+
 			"If it is not, create the new volume empty, then deploy again:\n  docker volume create %s",
@@ -417,7 +422,7 @@ func (h held) plan(cfg *config.Config) (map[string]string, error) {
 // settle leaves the proxy with exactly the services the config describes, under their own names,
 // once traffic has reached the new container and before anything is deleted. A port carried by a
 // service of another name is renamed: removed, then deployed under its own name onto the container
-// that has just passed this very health check, so its host goes unrouted for one health request.
+// that has just passed this very health check, so its host goes unrouted for one call to the proxy.
 // A rename never takes a name that still carries another port: renamed in a chain (x→y, y→z), y
 // waits until z has moved off it; names that only swap places stay as they are, with a warning,
 // rather than lose a host. Services this app owns but no longer describes are removed, or they
@@ -468,12 +473,13 @@ func rename(ctx context.Context, r remote.Runner, log io.Writer, svc proxy.Servi
 	if err := proxy.Remove(ctx, r, was); err != nil {
 		return err
 	}
+	// Neither deploy waits for a health check. The target has just passed one under the old name,
+	// and waiting again would only leave the host unrouted for as long as the check takes, or lose
+	// the route to one flaky answer; kamal-proxy keeps checking and holds traffic while it fails.
+	svc.Force = true
 	if _, err := r.Run(ctx, proxy.DeployArgs(svc)...); err != nil {
-		// The old name comes back without waiting for a health check: it is the one thing that
-		// keeps the host routed, and a target that just failed one must not cost the host its
-		// route — kamal-proxy resumes sending traffic once the target recovers.
 		back := svc
-		back.Name, back.Force = was, true
+		back.Name = was
 		best(context.WithoutCancel(ctx), r, log, proxy.DeployArgs(back)...)
 		return fmt.Errorf("renaming route %s to %s: %w", was, svc.Name, err)
 	}
@@ -481,10 +487,16 @@ func rename(ctx context.Context, r remote.Runner, log io.Writer, svc proxy.Servi
 }
 
 // ownRoutes reads the routes of an app that no longer publishes a port. A server without the
-// proxy has none, and asking it would only fail.
-func ownRoutes(ctx context.Context, r remote.Runner, cfg *config.Config, mine []string) (held, error) {
-	if ok, err := proxy.Exists(ctx, r); err != nil || !ok {
+// proxy has none. A proxy that is there but not running cannot be asked, and an app without routes
+// does not need it: the deploy goes on, and says what it could not check.
+func ownRoutes(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, mine []string) (held, error) {
+	state, err := proxy.State(ctx, r)
+	if err != nil || state == "" {
 		return held{}, err
+	}
+	if state != "running" {
+		fmt.Fprintf(log, "warning: the proxy is %s, so routes this app may still have there were not checked; deploy again once it runs\n", state)
+		return held{}, nil
 	}
 	return readRoutes(ctx, r, cfg, mine)
 }

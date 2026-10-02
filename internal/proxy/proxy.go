@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kopandante/boks/internal/remote"
 )
@@ -77,10 +78,9 @@ func Services(ctx context.Context, r remote.Runner) (map[string]Listed, []string
 	return services, names, nil
 }
 
-// Exists reports whether the proxy container is on this server at all, running or not.
-func Exists(ctx context.Context, r remote.Runner) (bool, error) {
-	state, err := containerState(ctx, r)
-	return state != "", err
+// State is the proxy container's Docker state — `running`, `exited`, … — or "" when there is none.
+func State(ctx context.Context, r remote.Runner) (string, error) {
+	return containerState(ctx, r)
 }
 
 func containerState(ctx context.Context, r remote.Runner) (string, error) {
@@ -141,8 +141,32 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image st
 		fmt.Fprintf(log, "proxy: container is %s, starting it\n", state)
 		_, err = r.Run(ctx, "docker", "start", Container)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return awaitAnswer(ctx, r)
 }
+
+// awaitAnswer waits for a proxy that was just started to open its command socket: the deploy
+// asks it for its services right away, and a container that is up is not yet a proxy that answers.
+func awaitAnswer(ctx context.Context, r remote.Runner) error {
+	var err error
+	for range answerTries {
+		if _, err = r.Run(ctx, "docker", "exec", Container, "kamal-proxy", "list"); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(answerPoll):
+		}
+	}
+	return fmt.Errorf("the proxy was started but does not answer: %w", err)
+}
+
+const answerTries = 40
+
+var answerPoll = 250 * time.Millisecond
 
 // EnsureNetwork creates the shared Docker network unless it already exists. Idempotent. Every app
 // container is started on it, so an app that never boots the proxy (one without routes) needs it

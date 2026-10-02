@@ -434,7 +434,7 @@ func TestRunRefusesALegacyVolumeNobodyUses(t *testing.T) {
 	f := newFake()
 	f.out[legacyLeft] = "demo-data"
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
-	if err == nil || !strings.Contains(err.Error(), "no container uses it") {
+	if err == nil || !strings.Contains(err.Error(), "no container of a boks app uses it") {
 		t.Fatalf("want a refusal for a volume nobody uses, got %v", err)
 	}
 	for _, way := range []string{"-v demo-data:/from -v demo.data:/to", "create the new volume empty"} {
@@ -447,17 +447,44 @@ func TestRunRefusesALegacyVolumeNobodyUses(t *testing.T) {
 	}
 }
 
-// App `de` with volume `mo-data` called its volume `demo-data` too. Mounted only by its
-// containers, it is not this app's data, and this app starts on its own new volume.
+// App `a` with volume `b-c` and app `a-b` with volume `c` both called theirs `a-b-c`. Mounted
+// only by `a-b`'s container, it is not `a`'s data, and `a` starts on its own new volume.
 func TestRunLeavesAnotherAppsLegacyVolumeAlone(t *testing.T) {
 	f := newFake()
-	f.out[legacyLeft] = "demo-data"
-	f.out[legacyUse] = "de-v1-1\tde\n"
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+	f.out["docker volume ls --quiet --filter name=^a-b-c$"] = "a-b-c"
+	f.out["docker ps -a --filter volume=a-b-c"] = "a-b-v1-1\ta-b\n"
+	cfg := parse(t, "app: a\nimage: ghcr.io/x/a\nservers: [lab]\nvolumes: [b-c:/data]\n"+
+		"ports:\n  - {name: web, port: 3000, host: a.example.com}\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
-	if !f.has("docker run -d --name demo-v2-1700000000") {
-		t.Errorf("the deploy must go ahead: %v", f.calls)
+	if run := f.at("docker run -d --name a-v2-1700000000"); run < 0 || !strings.Contains(f.calls[run], "-v a.b-c:/data") {
+		t.Errorf("the deploy must go ahead on a's own new volume: %v", f.calls)
+	}
+}
+
+// A container without the boks label — a `docker run -v` left behind by hand — is nobody's app
+// and says nothing about whose data the volume holds.
+func TestRunTreatsAnUnlabeledContainerAsNobody(t *testing.T) {
+	f := newFake()
+	f.out[legacyLeft] = "demo-data"
+	f.out[legacyUse] = "eager_turing\t\n"
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "no container of a boks app uses it") {
+		t.Fatalf("want the refusal for a volume no app uses, got %v", err)
+	}
+}
+
+// The question of who mounts the old volume failing is not an answer either.
+func TestRunRefusesWhenTheOwnerCheckFails(t *testing.T) {
+	f := newFake()
+	f.out[legacyLeft] = "demo-data"
+	f.fail[legacyUse] = errors.New("ssh: connection reset")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if f.has("docker pull") || f.has("docker network") || f.has("docker run -d") {
+		t.Errorf("nothing may happen: %v", f.calls)
 	}
 }
 
@@ -767,6 +794,20 @@ func TestRoutelessKeepsTheOldCopyWhenARouteStays(t *testing.T) {
 	}
 	if f.has("docker rm bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f bot-v2") {
 		t.Errorf("the old copy is kept stopped and the new one stays: %v", f.calls)
+	}
+}
+
+// A proxy that is there but stopped cannot be asked, and an app without routes does not need it:
+// the deploy goes on rather than wait for a proxy it does not use.
+func TestRoutelessDeploysWhileTheProxyIsStopped(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "exited"
+	f.fail[proxyList] = errors.New("container is not running")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if f.has(proxyList) || f.has("docker start boks-proxy") {
+		t.Errorf("a stopped proxy is neither asked nor started: %v", f.calls)
 	}
 }
 
