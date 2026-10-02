@@ -285,41 +285,62 @@ func waitHealthy(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 }
 
 // checkLegacyVolumes refuses a deploy that would start the app on a fresh, empty volume because
-// its data still sits under the previous naming scheme. Ownership is read from the containers, not
-// from the name: the old name is the ambiguous one (`a-b` with volume `c` and `a` with volume `b-c`
-// both called it `a-b-c`), so a volume counts as this app's only when one of its containers
-// mounts it. Copying is the operator's call, not something boks should do behind their back, so
-// this says what to run instead — stopping the app first, or the copy would miss whatever it
-// writes until the deploy retires it.
+// its data may still sit under the previous naming scheme. Ownership is read from the containers,
+// not from the name: the old name is the ambiguous one (`a-b` with volume `c` and `a` with volume
+// `b-c` both called it `a-b-c`). Mounted by a container of this app, it is this app's data;
+// mounted only by another app's, it is theirs; mounted by none — the volume was dropped from the
+// config once and its container retired — nobody can tell, so the operator decides. Copying is
+// the operator's call, not something boks should do behind their back, so this says what to run
+// instead — stopping the app first, or the copy would miss whatever it writes until the deploy
+// retires it.
 func checkLegacyVolumes(ctx context.Context, r remote.Runner, cfg *config.Config) error {
 	for _, v := range cfg.Volumes {
 		name, _, _ := strings.Cut(v, ":")
-		legacy, current := cfg.App+"-"+name, cfg.App+proxy.NameSep+name
-		out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "volume="+legacy,
-			"--filter", "label=boks.app="+cfg.App, "--format", "{{.Names}}")
-		if err != nil {
-			return fmt.Errorf("checking whether %s still holds this app's data: %w", legacy, err)
+		if err := checkLegacyVolume(ctx, r, cfg.App, cfg.App+"-"+name, cfg.App+proxy.NameSep+name); err != nil {
+			return err
 		}
-		users := strings.Fields(out)
-		if len(users) == 0 {
-			continue
-		}
-		moved, err := volumeExists(ctx, r, current)
-		if err != nil {
-			return fmt.Errorf("checking for volume %s: %w", current, err)
-		}
-		if moved {
-			continue
-		}
-		return fmt.Errorf("volume %s holds this app's data under the old naming scheme (mounted by %s) and %s does not exist yet; "+
-			"deploying now would start on an empty volume. Stop the app, move the data, then deploy again "+
-			"(the app is down from the stop until that deploy finishes):\n"+
-			"  docker stop %s\n"+
-			"  docker volume create %s\n"+
-			"  docker run --rm -v %s:/from -v %s:/to alpine sh -c 'cp -a /from/. /to/'",
-			legacy, strings.Join(users, ", "), current, strings.Join(users, " "), current, legacy, current)
 	}
 	return nil
+}
+
+func checkLegacyVolume(ctx context.Context, r remote.Runner, app, legacy, current string) error {
+	// The data has been moved, or the new volume was made on purpose.
+	if moved, err := volumeExists(ctx, r, current); err != nil || moved {
+		return err
+	}
+	if left, err := volumeExists(ctx, r, legacy); err != nil || !left {
+		return err
+	}
+	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "volume="+legacy,
+		"--format", "{{.Names}}\t{{.Label \"boks.app\"}}")
+	if err != nil {
+		return fmt.Errorf("checking which containers use %s: %w", legacy, err)
+	}
+	var mine, theirs []string
+	for _, line := range strings.Fields(strings.ReplaceAll(out, "\t", "|")) {
+		if c, owner, _ := strings.Cut(line, "|"); owner == app {
+			mine = append(mine, c)
+		} else {
+			theirs = append(theirs, c)
+		}
+	}
+	move := fmt.Sprintf("  docker volume create %s\n"+
+		"  docker run --rm -v %s:/from -v %s:/to alpine sh -c 'cp -a /from/. /to/'", current, legacy, current)
+	switch {
+	case len(mine) > 0:
+		return fmt.Errorf("volume %s holds this app's data under the old naming scheme (mounted by %s) and %s does not exist yet; "+
+			"deploying now would start on an empty volume. Stop the app, move the data, then deploy again "+
+			"(the app is down from the stop until that deploy finishes):\n  docker stop %s\n%s",
+			legacy, strings.Join(mine, ", "), current, strings.Join(mine, " "), move)
+	case len(theirs) > 0:
+		return nil // another app's data under a name that happens to read like this app's
+	default:
+		return fmt.Errorf("volume %s exists under the old naming scheme, no container uses it, and %s does not exist yet; "+
+			"whose data it holds cannot be told, so deploying now could start on an empty volume. "+
+			"If it is this app's, move it, then deploy again:\n%s\n"+
+			"If it is not, create the new volume empty, then deploy again:\n  docker volume create %s",
+			legacy, current, move, current)
+	}
 }
 
 func volumeExists(ctx context.Context, r remote.Runner, name string) (bool, error) {
@@ -327,7 +348,10 @@ func volumeExists(ctx context.Context, r remote.Runner, name string) (bool, erro
 	// it would match any character and report a volume that is not there.
 	out, err := r.Run(ctx, "docker", "volume", "ls", "--quiet", "--filter",
 		"name=^"+regexp.QuoteMeta(name)+"$")
-	return strings.TrimSpace(out) != "", err
+	if err != nil {
+		return false, fmt.Errorf("checking for volume %s: %w", name, err)
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 // held is this app's share of what kamal-proxy holds: the services it owns, by name, in a stable

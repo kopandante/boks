@@ -88,3 +88,45 @@ func TestBootRestartsStoppedProxy(t *testing.T) {
 		t.Errorf("expected docker start, got %v", f.calls)
 	}
 }
+
+type said string
+
+func (s said) Run(context.Context, ...string) (string, error)          { return string(s), nil }
+func (s said) Pipe(context.Context, []byte, ...string) (string, error) { return string(s), nil }
+
+// What kamal-proxy v0.10.0 prints for `list --json`, verbatim in shape: the deploy decides who
+// owns a service and which host it holds from these two fields, so their names are pinned here
+// rather than taken from the decoder's own struct tags.
+func TestServicesReadsKamalProxysList(t *testing.T) {
+	out := said(`{
+  "demo-web": {
+    "hosts": ["demo.example.com"],
+    "path_prefixes": ["/"],
+    "tls": true,
+    "targets": ["demo-v1-1700000000:3000"],
+    "read_targets": [],
+    "state": "running",
+    "rollout": {"enabled": false, "percentage": 0, "allowlist": [], "targets": [], "read_targets": []}
+  },
+  "bot.api": {
+    "hosts": ["api.example.com"],
+    "path_prefixes": ["/"],
+    "tls": false,
+    "targets": ["bot-v2-1700000001:8080"],
+    "read_targets": [],
+    "state": "running",
+    "rollout": {"enabled": false, "percentage": 0, "allowlist": [], "targets": [], "read_targets": []}
+  }
+}`)
+	services, names, err := Services(context.Background(), out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(names, " ") != "bot.api demo-web" {
+		t.Errorf("names %v", names)
+	}
+	web := services["demo-web"]
+	if strings.Join(web.Hosts, ",") != "demo.example.com" || strings.Join(web.Targets, ",") != "demo-v1-1700000000:3000" {
+		t.Errorf("demo-web read as %+v", web)
+	}
+}

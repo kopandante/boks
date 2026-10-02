@@ -105,7 +105,8 @@ func TestRunHappyPath(t *testing.T) {
 	}
 	want := []string{
 		"mkdir /tmp/boks-demo.lock",
-		"docker ps -a --filter volume=demo-data --filter label=boks.app=demo --format {{.Names}}",
+		`docker volume ls --quiet --filter name=^demo\.data$`,
+		"docker volume ls --quiet --filter name=^demo-data$",
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
 		"docker pull ghcr.io/x/y:v2",
@@ -382,9 +383,10 @@ func (f *fake) at(prefix string) int {
 }
 
 const (
-	deployVia = "docker exec boks-proxy kamal-proxy deploy "
-	removeVia = "docker exec boks-proxy kamal-proxy remove "
-	legacyUse = "docker ps -a --filter volume=demo-data --filter label=boks.app=demo"
+	deployVia  = "docker exec boks-proxy kamal-proxy deploy "
+	removeVia  = "docker exec boks-proxy kamal-proxy remove "
+	legacyLeft = "docker volume ls --quiet --filter name=^demo-data$"
+	legacyUse  = "docker ps -a --filter volume=demo-data"
 )
 
 // Renaming the volume would hand the app an empty one and lose the data silently, so the deploy
@@ -392,7 +394,8 @@ const (
 // would miss what it writes until the deploy retires it.
 func TestRunRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
 	f := newFake()
-	f.out[legacyUse] = "demo-v1-1\n"
+	f.out[legacyLeft] = "demo-data"
+	f.out[legacyUse] = "demo-v1-1\tdemo\n"
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "old naming scheme") {
 		t.Fatalf("want a refusal naming the old volume, got %v", err)
@@ -414,8 +417,42 @@ func TestRunRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
 // so the dot has to be escaped: unescaped, this lookup would not be the one that answers.
 func TestRunProceedsOnceTheVolumeWasMoved(t *testing.T) {
 	f := newFake()
-	f.out[legacyUse] = "demo-v1-1\n"
+	f.out[legacyLeft] = "demo-data"
+	f.out[legacyUse] = "demo-v1-1\tdemo\n"
 	f.out[`docker volume ls --quiet --filter name=^demo\.data$`] = "demo.data"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("docker run -d --name demo-v2-1700000000") {
+		t.Errorf("the deploy must go ahead: %v", f.calls)
+	}
+}
+
+// A volume the config once dropped has no container left to say whose it is — the old name is
+// the ambiguous one. The deploy stops and offers both ways on, rather than start on an empty one.
+func TestRunRefusesALegacyVolumeNobodyUses(t *testing.T) {
+	f := newFake()
+	f.out[legacyLeft] = "demo-data"
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "no container uses it") {
+		t.Fatalf("want a refusal for a volume nobody uses, got %v", err)
+	}
+	for _, way := range []string{"-v demo-data:/from -v demo.data:/to", "create the new volume empty"} {
+		if !strings.Contains(err.Error(), way) {
+			t.Errorf("the refusal must offer %q: %v", way, err)
+		}
+	}
+	if f.has("docker pull") || f.has("docker run -d --name demo-") {
+		t.Errorf("nothing may happen: %v", f.calls)
+	}
+}
+
+// App `de` with volume `mo-data` called its volume `demo-data` too. Mounted only by its
+// containers, it is not this app's data, and this app starts on its own new volume.
+func TestRunLeavesAnotherAppsLegacyVolumeAlone(t *testing.T) {
+	f := newFake()
+	f.out[legacyLeft] = "demo-data"
+	f.out[legacyUse] = "de-v1-1\tde\n"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +464,7 @@ func TestRunProceedsOnceTheVolumeWasMoved(t *testing.T) {
 // A check that cannot run is not a check that passed: the app would start on an empty volume.
 func TestRunRefusesWhenTheVolumeCheckFails(t *testing.T) {
 	f := newFake()
-	f.fail["docker ps -a --filter volume="] = errors.New("ssh: connection reset")
+	f.fail["docker volume ls"] = errors.New("ssh: connection reset")
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
@@ -684,7 +721,8 @@ func TestRoutelessReadsTheProxyBeforeStoppingTheOldCopy(t *testing.T) {
 // The legacy-volume refusal holds on the path without routes too.
 func TestRoutelessRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
 	f := routelessFake("healthy")
-	f.out["docker ps -a --filter volume=bot-data --filter label=boks.app=bot"] = "bot-v1-1\n"
+	f.out["docker volume ls --quiet --filter name=^bot-data$"] = "bot-data"
+	f.out["docker ps -a --filter volume=bot-data"] = "bot-v1-1\tbot\n"
 	cfg := parse(t, noPorts+"volumes: [data:/data]\n")
 	err := Run(context.Background(), f, io.Discard, cfg, "v2", quick())
 	if err == nil || !strings.Contains(err.Error(), "old naming scheme") {
