@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -77,15 +80,51 @@ func Load(path string) (*Config, error) {
 }
 
 func Parse(data []byte) (*Config, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	// Strict about unknown keys, because the alternative is silence: a misspelled `volums:` used
+	// to leave the app running with no volumes and say nothing. It matters more once two versions
+	// of boks exist — an old binary would otherwise accept a config written for the new format and
+	// drop every field it does not know.
+	dec.KnownFields(true)
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := dec.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("the file is empty")
+		}
 		return nil, err
+	}
+	// Anything past the first document would be read by nobody, so refuse the file rather than
+	// apply half of it. An empty document holds nothing that could go unread: a trailing `---`
+	// (with or without a comment after it) parsed on earlier versions and still does.
+	for {
+		var doc yaml.Node
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("YAML document after the first: %w", err)
+		}
+		if !isEmptyDocument(&doc) {
+			return nil, errors.New("more than one YAML document: boks reads one app per file")
+		}
 	}
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// isEmptyDocument reports whether a decoded YAML document carries no value: nothing at all, or
+// a bare null (what `---` with nothing after it decodes to).
+func isEmptyDocument(doc *yaml.Node) bool {
+	for _, n := range doc.Content {
+		if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!null" {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Config) applyDefaults() {
