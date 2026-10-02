@@ -64,11 +64,8 @@ func RunArgs(network, image string) []string {
 
 // Boot makes sure the network exists and the proxy container is running. Idempotent.
 func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image string) error {
-	if _, err := r.Run(ctx, "docker", "network", "inspect", network); err != nil {
-		fmt.Fprintf(log, "proxy: creating network %s\n", network)
-		if _, err := r.Run(ctx, "docker", "network", "create", network); err != nil {
-			return err
-		}
+	if err := EnsureNetwork(ctx, r, log, network); err != nil {
+		return err
 	}
 	state, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+Container+"$", "--format", "{{.State}}")
 	if err != nil {
@@ -84,6 +81,18 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image st
 		fmt.Fprintf(log, "proxy: container is %s, starting it\n", state)
 		_, err = r.Run(ctx, "docker", "start", Container)
 	}
+	return err
+}
+
+// EnsureNetwork creates the shared Docker network unless it already exists. Idempotent. Every app
+// container is started on it, so an app that never boots the proxy (one without routes) needs it
+// on its own.
+func EnsureNetwork(ctx context.Context, r remote.Runner, log io.Writer, network string) error {
+	if _, err := r.Run(ctx, "docker", "network", "inspect", network); err == nil {
+		return nil
+	}
+	fmt.Fprintf(log, "creating network %s\n", network)
+	_, err := r.Run(ctx, "docker", "network", "create", network)
 	return err
 }
 

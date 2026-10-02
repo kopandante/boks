@@ -223,9 +223,8 @@ func (c *Config) LegoPath() string {
 }
 
 func (c *Config) validateLists() error {
-	if len(c.Ports) == 0 {
-		return fmt.Errorf("ports: at least one is required")
-	}
+	// No ports is a real shape, not an oversight: a bot or a background worker publishes nothing
+	// and is judged by the image's own HEALTHCHECK instead of by a route.
 	seenName, seenHost := map[string]bool{}, map[string]bool{}
 	for _, p := range c.Ports {
 		if err := p.validate(); err != nil {

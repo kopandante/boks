@@ -20,6 +20,8 @@ type Options struct {
 	Pull bool
 	Env  []byte
 	Now  func() time.Time
+	// Poll is how often the health of a routeless app is checked; zero means once a second.
+	Poll time.Duration
 }
 
 var unsafe = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
@@ -42,6 +44,9 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
+	if len(cfg.Ports) == 0 {
+		return runRouteless(ctx, r, log, cfg, tag, o)
+	}
 	if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
 		return err
 	}
@@ -77,6 +82,168 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
 	return nil
+}
+
+// runRouteless deploys an app that publishes nothing — a bot, a worker. Two differences from the
+// routed path, both forced by the absence of a route. There is no traffic to switch, so the proxy
+// is not booted at all; and overlapping the two versions would mean two live copies draining the
+// same queue, so the old container is stopped BEFORE the new one starts and brought back if the
+// new one never becomes healthy. Only the copies that were actually running are stopped and
+// brought back: a container left stopped by an earlier deploy must stay stopped, or a failed
+// deploy would end with two copies where there was one.
+func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, tag string, o Options) error {
+	// The proxy is what normally creates the network every app container joins; without it the
+	// network has to be made here, or the first deploy on a fresh server cannot start at all.
+	if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
+		return err
+	}
+	ref := cfg.Image + ":" + tag
+	if err := pull(ctx, r, log, ref, o.Pull); err != nil {
+		return err
+	}
+	// Whether the image declares a HEALTHCHECK is known before anything is touched. A deploy that
+	// is bound to be refused must not first take the running copy down.
+	if declaresNoHealthcheck(ctx, r, ref) {
+		return noHealthcheck(cfg)
+	}
+	old, err := containers(ctx, r, cfg.App)
+	if err != nil {
+		return err
+	}
+	live, err := running(ctx, r, cfg.App)
+	if err != nil {
+		return err
+	}
+	// The failure path below force-removes the container by name, so that name must not already
+	// belong to an earlier copy: two deploys of one tag within a second would otherwise remove the
+	// very copy that was meant to come back.
+	name := ContainerName(cfg.App, tag, o.Now())
+	for _, c := range names(old) {
+		if c == name {
+			return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
+		}
+	}
+	var stopped []string
+	for _, c := range live {
+		fmt.Fprintf(log, "stop %s\n", c)
+		// The stop is the guarantee that two copies never run at once, not cleanup: if it fails,
+		// the new copy must not start. `docker start` of a container that is still running is a
+		// no-op, so the one that failed to stop is safe to include in the revival.
+		stopped = append(stopped, c)
+		if _, err := r.Run(ctx, "docker", "stop", c); err != nil {
+			revive(ctx, r, log, stopped)
+			return fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
+		}
+	}
+	err = start(ctx, r, log, cfg, name, tag, o.Env)
+	if err == nil {
+		err = waitHealthy(ctx, r, log, cfg, name, o.Poll)
+	}
+	if err != nil {
+		// A failed `docker run` may still have created the container, and a failed stop may have
+		// left it running. The old copy comes back only once the new one is verifiably gone;
+		// otherwise both would run at once, which is the one outcome this path exists to prevent.
+		if !discard(ctx, r, log, name) {
+			return fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
+				err, name, stopped)
+		}
+		revive(ctx, r, log, stopped)
+		return err
+	}
+	retire(ctx, r, log, names(old))
+	prune(ctx, r, log, cfg, tag)
+	return nil
+}
+
+// discard stops and removes a container and reports whether it is verifiably gone. The stop comes
+// first so the copy shuts down gracefully; `rm -f` makes sure it goes even if the stop did not.
+func discard(ctx context.Context, r remote.Runner, log io.Writer, name string) bool {
+	fmt.Fprintf(log, "remove %s\n", name)
+	best(ctx, r, log, "docker", "stop", name)
+	best(ctx, r, log, "docker", "rm", "-f", name)
+	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+	return err == nil && strings.TrimSpace(out) == ""
+}
+
+// declaresNoHealthcheck reports whether the image is known to declare no HEALTHCHECK (none at all,
+// or `HEALTHCHECK NONE`). An image that cannot be inspected — `rollback` to a tag that is not on
+// the server yet, which `docker run` will fetch — is not known to lack one; the running container
+// is asked instead.
+func declaresNoHealthcheck(ctx context.Context, r remote.Runner, ref string) bool {
+	out, err := r.Run(ctx, "docker", "image", "inspect", "--format",
+		"{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}}", ref)
+	if err != nil {
+		return false
+	}
+	out = strings.TrimSpace(out)
+	return out == "" || out == "null" || out == "[]" || out == `["NONE"]`
+}
+
+func noHealthcheck(cfg *config.Config) error {
+	return fmt.Errorf("%s has no HEALTHCHECK: an app without routes is judged by its own "+
+		"health check, so add one to the image or publish a port", cfg.Image)
+}
+
+// running lists the containers of this app that are up right now.
+func running(ctx context.Context, r remote.Runner, app string) ([]string, error) {
+	out, err := r.Run(ctx, "docker", "ps", "--filter", "label=boks.app="+app, "--format", "{{.Names}}")
+	if err != nil {
+		return nil, err
+	}
+	var live []string
+	for _, line := range strings.Split(out, "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			live = append(live, name)
+		}
+	}
+	return live, nil
+}
+
+// revive restarts the containers that were stopped to make room for a deploy that then failed.
+func revive(ctx context.Context, r remote.Runner, log io.Writer, stopped []string) {
+	for _, c := range stopped {
+		fmt.Fprintf(log, "restart %s (the new version did not come up)\n", c)
+		best(ctx, r, log, "docker", "start", c)
+	}
+}
+
+// healthFormat asks for the health of a container and says `none` when the image declares no
+// HEALTHCHECK — the two cases have to be told apart, because without a route health is the only
+// evidence that a deploy worked.
+const healthFormat = "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}"
+
+func waitHealthy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string, poll time.Duration) error {
+	if poll <= 0 {
+		poll = time.Second
+	}
+	timeout, err := time.ParseDuration(cfg.DeployTimeout)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(log, "waiting for %s to report healthy\n", name)
+	deadline := time.Now().Add(timeout)
+	for {
+		state, err := r.Run(ctx, "docker", "inspect", "--format", healthFormat, name)
+		if err != nil {
+			return err
+		}
+		switch state {
+		case "healthy":
+			return nil
+		case "none":
+			return noHealthcheck(cfg)
+		case "unhealthy":
+			return fmt.Errorf("%s reported unhealthy", name)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not become healthy within %s (last state %q)", name, cfg.DeployTimeout, state)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
 }
 
 func lock(ctx context.Context, r remote.Runner, app string) error {
@@ -144,6 +311,11 @@ func names(cs []container) []string {
 // health check the old container passed too, and JSON keeps that exact instead of inventing a
 // format that is only partly faithful.
 func portLabel(ports []config.Port) string {
+	// An app without routes has no ports at all, and `null` in the label would read as a missing
+	// label rather than as an empty list — write the empty list.
+	if len(ports) == 0 {
+		return "[]"
+	}
 	b, err := json.Marshal(ports)
 	if err != nil {
 		return ""
