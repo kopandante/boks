@@ -181,12 +181,12 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
+		proxyProbe,
 		"docker stop bot-v1-1",
 		"docker run -d --name bot-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
-		proxyProbe,
 		"docker stop bot-v1-1",
 		"docker rm bot-v1-1",
 		"docker images ghcr.io/x/bot --format {{.Tag}} {{.ID}}",
@@ -600,6 +600,88 @@ func TestRunRevertsARenamedPortToItsRecordedPort(t *testing.T) {
 	}
 	if !f.has(deployVia + "demo.site --target demo-v1-1:4000") {
 		t.Errorf("the route must go back through demo.site to the port the old container listens on: %v", f.calls)
+	}
+}
+
+const chainPorts = `
+app: demo
+image: ghcr.io/x/y
+servers: [lab]
+ports:
+  - {name: y, port: 3000, host: one.example.com}
+  - {name: z, port: 3001, host: two.example.com}
+`
+
+// Ports renamed in a chain (x→y, y→z): y may take its own name only after z has moved off it, or
+// deploying demo.y would take two.example.com away from z.
+func TestRunRenamesAChainInOrder(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.x": {Hosts: []string{"one.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+		"demo.y": {Hosts: []string{"two.example.com"}, Targets: []string{"demo-v1-1:3001"}},
+	})
+	if err := Run(context.Background(), f, io.Discard, parse(t, chainPorts), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	zMoved, yRemoved := f.at(deployVia+"demo.z --target demo-v2-1700000000:3001"), f.at(removeVia+"demo.y")
+	yRenamed := f.at(deployVia + "demo.y --target demo-v2-1700000000:3000 --host one.example.com")
+	if zMoved < 0 || yRemoved < 0 || yRenamed < 0 || yRemoved > zMoved || zMoved > yRenamed {
+		t.Errorf("want demo.y → demo.z first, then demo.x → demo.y: %v", f.calls)
+	}
+	removes := 0
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, removeVia) {
+			removes++
+		}
+	}
+	if removes != 2 {
+		t.Errorf("only the two renamed services may be removed, once each: %v", f.calls)
+	}
+}
+
+// Names that swap places cannot be renamed without one host losing its route; they stay as they
+// are and nothing that carries traffic is removed.
+func TestRunKeepsSwappedNamesRatherThanLoseAHost(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.z": {Hosts: []string{"one.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+		"demo.y": {Hosts: []string{"two.example.com"}, Targets: []string{"demo-v1-1:3001"}},
+	})
+	if err := Run(context.Background(), f, io.Discard, parse(t, chainPorts), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.has(removeVia) {
+		t.Errorf("a service that carries a port must not be removed: %v", f.calls)
+	}
+	if !f.has(deployVia+"demo.z --target demo-v2-1700000000:3000 --host one.example.com") ||
+		!f.has(deployVia+"demo.y --target demo-v2-1700000000:3001 --host two.example.com") {
+		t.Errorf("both hosts must reach the new container through the services that hold them: %v", f.calls)
+	}
+}
+
+// An app without routes reads the proxy before it stops anything: a proxy that cannot answer
+// fails the deploy while the old copy is still running.
+func TestRoutelessReadsTheProxyBeforeStoppingTheOldCopy(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.fail[proxyList] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+		t.Fatal("want an error")
+	}
+	if f.has("docker stop") || f.has("docker run -d") {
+		t.Errorf("nothing may be stopped or started: %v", f.calls)
+	}
+}
+
+// The legacy-volume refusal holds on the path without routes too.
+func TestRoutelessRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter volume=bot-data --filter label=boks.app=bot"] = "bot-v1-1\n"
+	cfg := parse(t, noPorts+"volumes: [data:/data]\n")
+	err := Run(context.Background(), f, io.Discard, cfg, "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "old naming scheme") {
+		t.Fatalf("want a refusal naming the old volume, got %v", err)
+	}
+	if f.has("docker pull") || f.has("docker stop") || f.has("docker run -d") {
+		t.Errorf("nothing may happen before the data is moved: %v", f.calls)
 	}
 }
 

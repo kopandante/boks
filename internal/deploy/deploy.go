@@ -101,12 +101,12 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	return nil
 }
 
-// keptOld reports a deploy whose new version is up but whose stale routes could not be cleared.
-// The previous containers are not retired: a route that is still there then reaches a container
-// that still exists, rather than one this deploy deleted.
+// keptOld reports a deploy whose new version is up but whose routes could not be brought in line
+// with the config. The previous containers are not retired: a stale route that is still there then
+// reaches a container that still exists, rather than one this deploy deleted.
 func keptOld(err error, old []container) error {
-	return fmt.Errorf("the new version is up, but the proxy still holds routes the config no longer describes: %w\n"+
-		"the previous containers %v were kept, so those routes do not point at removed containers; deploy again once the proxy answers",
+	return fmt.Errorf("the new version is up, but bringing the proxy's routes in line with the config failed: %w\n"+
+		"the previous containers %v were kept rather than leave a route pointing at a removed one; check `boks proxy list` and deploy again",
 		err, names(old))
 }
 
@@ -140,6 +140,13 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		return err
 	}
 	live, err := running(ctx, r, cfg.App)
+	if err != nil {
+		return err
+	}
+	// Removing every port does not remove the routes the app had: they would keep answering, with
+	// a 502, from the container retire is about to delete. They are read before anything is
+	// stopped, so a proxy that cannot answer fails the deploy while nothing has changed yet.
+	stale, err := ownRoutes(ctx, r, cfg, names(old))
 	if err != nil {
 		return err
 	}
@@ -179,9 +186,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		revive(ctx, r, log, stopped)
 		return err
 	}
-	// Removing every port does not remove the routes the app had: they would keep answering, with
-	// a 502, from the container retire is about to delete.
-	if err := dropRoutes(ctx, r, log, cfg, names(old)); err != nil {
+	if err := removeUnwanted(ctx, r, log, stale, nil); err != nil {
 		return keptOld(err, old)
 	}
 	retire(ctx, r, log, names(old))
@@ -390,43 +395,72 @@ func (h held) plan(cfg *config.Config) (map[string]string, error) {
 // once traffic has reached the new container and before anything is deleted. A port carried by a
 // service of another name is renamed: removed, then deployed under its own name onto the container
 // that has just passed this very health check, so its host goes unrouted for one health request.
-// Services this app owns but no longer describes are removed, or they would keep pointing at the
-// container retire is about to delete.
+// A rename never takes a name that still carries another port: renamed in a chain (x→y, y→z), y
+// waits until z has moved off it; names that only swap places stay as they are, with a warning,
+// rather than lose a host. Services this app owns but no longer describes are removed, or they
+// would keep pointing at the container retire is about to delete.
 func settle(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, target string, plan map[string]string, h held) error {
+	type move struct {
+		svc  proxy.Service
+		was  string
+		port string
+	}
 	wanted := map[string]bool{}
+	busy := map[string]bool{} // services still carrying a port's traffic under a name not their own
+	var pending []move
 	for _, p := range cfg.Ports {
 		svc := service(cfg, target, p)
 		wanted[svc.Name] = true
-		was := plan[p.Name]
-		if was == svc.Name {
-			continue
+		if was := plan[p.Name]; was != svc.Name {
+			busy[was] = true
+			pending = append(pending, move{svc, was, p.Name})
 		}
-		fmt.Fprintf(log, "rename route %s → %s\n", was, svc.Name)
-		if err := proxy.Remove(ctx, r, was); err != nil {
-			return err
+	}
+	for progress := true; progress; {
+		progress = false
+		var left []move
+		for _, m := range pending {
+			if busy[m.svc.Name] {
+				left = append(left, m)
+				continue
+			}
+			if err := rename(ctx, r, log, m.svc, m.was); err != nil {
+				return err
+			}
+			delete(busy, m.was)
+			wanted[m.was] = true // already gone, not an orphan
+			progress = true
 		}
-		if _, err := r.Run(ctx, proxy.DeployArgs(svc)...); err != nil {
-			back := svc
-			back.Name = was
-			best(context.WithoutCancel(ctx), r, log, proxy.DeployArgs(back)...)
-			return fmt.Errorf("renaming route %s to %s: %w", was, svc.Name, err)
-		}
-		wanted[was] = true // already gone, not an orphan
+		pending = left
+	}
+	// What is left is a cycle, and every service in it is some port's own name, so none is removed.
+	for _, m := range pending {
+		fmt.Fprintf(log, "warning: port %s keeps its route under %s: %s still carries another port\n", m.port, m.was, m.svc.Name)
 	}
 	return removeUnwanted(ctx, r, log, h, wanted)
 }
 
-// dropRoutes removes every route of an app that no longer publishes a port. A server without the
-// proxy has no routes to drop, and asking it would only fail.
-func dropRoutes(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, mine []string) error {
+func rename(ctx context.Context, r remote.Runner, log io.Writer, svc proxy.Service, was string) error {
+	fmt.Fprintf(log, "rename route %s → %s\n", was, svc.Name)
+	if err := proxy.Remove(ctx, r, was); err != nil {
+		return err
+	}
+	if _, err := r.Run(ctx, proxy.DeployArgs(svc)...); err != nil {
+		back := svc
+		back.Name = was
+		best(context.WithoutCancel(ctx), r, log, proxy.DeployArgs(back)...)
+		return fmt.Errorf("renaming route %s to %s: %w", was, svc.Name, err)
+	}
+	return nil
+}
+
+// ownRoutes reads the routes of an app that no longer publishes a port. A server without the
+// proxy has none, and asking it would only fail.
+func ownRoutes(ctx context.Context, r remote.Runner, cfg *config.Config, mine []string) (held, error) {
 	if ok, err := proxy.Exists(ctx, r); err != nil || !ok {
-		return err
+		return held{}, err
 	}
-	h, err := readRoutes(ctx, r, cfg, mine)
-	if err != nil {
-		return err
-	}
-	return removeUnwanted(ctx, r, log, h, nil)
+	return readRoutes(ctx, r, cfg, mine)
 }
 
 func removeUnwanted(ctx context.Context, r remote.Runner, log io.Writer, h held, wanted map[string]bool) error {
