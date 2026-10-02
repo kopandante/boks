@@ -52,6 +52,7 @@ func TestParseIsStrict(t *testing.T) {
 		minimal + "volums: [data:/x]\n":  "volums",
 		minimal + "---\n" + minimal:      "more than one",
 		minimal + "---\nfoo: 1\n":        "more than one",
+		minimal + "---\nfoo\n":           "more than one",
 		minimal + "---\n---\n" + minimal: "more than one",
 		minimal + "---\n: [\n":           "after the first",
 		"":                               "empty",
