@@ -570,11 +570,16 @@ func TestRunTakesOverTheRouteOfAnEarlierNamingScheme(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
+	// The switch waits for the new container's health; the rename does not wait again, for a
+	// target that has just passed that very check.
 	order := []int{
-		f.at(deployVia + "demo-web --target demo-v2-1700000000:3000"),
+		f.at(deployVia + "demo-web --target demo-v2-1700000000:3000 --host demo.example.com --tls --health-check-path /up --deploy-timeout 60s"),
 		f.at(removeVia + "demo-web"),
-		f.at(deployVia + "demo.web --target demo-v2-1700000000:3000 --host demo.example.com"),
+		f.at(deployVia + "demo.web --target demo-v2-1700000000:3000 --host demo.example.com --tls --health-check-path /up --deploy-timeout 60s --force"),
 		f.at("docker stop demo-v1-1"),
+	}
+	if f.has(deployVia + "demo-web --target demo-v2-1700000000:3000 --host demo.example.com --tls --health-check-path /up --deploy-timeout 60s --force") {
+		t.Errorf("the switch itself must wait for the health check: %v", f.calls)
 	}
 	for i, at := range order {
 		if at < 0 || (i > 0 && at < order[i-1]) {
@@ -808,6 +813,10 @@ func TestRoutelessDeploysWhileTheProxyIsStopped(t *testing.T) {
 	}
 	if f.has(proxyList) || f.has("docker start boks-proxy") {
 		t.Errorf("a stopped proxy is neither asked nor started: %v", f.calls)
+	}
+	// The old copy is the only proof that a route named by an earlier boks is this app's.
+	if f.has("docker rm bot-v1-1") {
+		t.Errorf("the old copy must be kept until its routes can be checked: %v", f.calls)
 	}
 }
 

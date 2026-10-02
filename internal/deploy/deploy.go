@@ -146,7 +146,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	// Removing every port does not remove the routes the app had: they would keep answering, with
 	// a 502, from the container retire is about to delete. They are read before anything is
 	// stopped, so a proxy that cannot answer fails the deploy while nothing has changed yet.
-	stale, err := ownRoutes(ctx, r, log, cfg, names(old))
+	stale, checked, err := ownRoutes(ctx, r, cfg, names(old))
 	if err != nil {
 		return err
 	}
@@ -188,6 +188,13 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	}
 	if err := removeExcept(ctx, r, log, stale, nil); err != nil {
 		return keptOld(err, old)
+	}
+	// A route named by an earlier boks is known to be this app's only by its targets, and retire
+	// would delete them: the copies stay, stopped, until a deploy can ask the proxy.
+	if !checked {
+		fmt.Fprintf(log, "warning: the proxy is not running, so this app's old routes there were not checked; "+
+			"%v are kept stopped until a deploy can check them\n", names(old))
+		return nil
 	}
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
@@ -422,7 +429,8 @@ func (h held) plan(cfg *config.Config) (map[string]string, error) {
 // settle leaves the proxy with exactly the services the config describes, under their own names,
 // once traffic has reached the new container and before anything is deleted. A port carried by a
 // service of another name is renamed: removed, then deployed under its own name onto the container
-// that has just passed this very health check, so its host goes unrouted for one call to the proxy.
+// that has just passed this very health check, so its host goes unrouted for one call to the proxy
+// and kamal-proxy's first check of the target.
 // A rename never takes a name that still carries another port: renamed in a chain (x→y, y→z), y
 // waits until z has moved off it; names that only swap places stay as they are, with a warning,
 // rather than lose a host. Services this app owns but no longer describes are removed, or they
@@ -475,7 +483,8 @@ func rename(ctx context.Context, r remote.Runner, log io.Writer, svc proxy.Servi
 	}
 	// Neither deploy waits for a health check. The target has just passed one under the old name,
 	// and waiting again would only leave the host unrouted for as long as the check takes, or lose
-	// the route to one flaky answer; kamal-proxy keeps checking and holds traffic while it fails.
+	// the route to one flaky answer. kamal-proxy checks the target right away and answers 503 until
+	// that check passes.
 	svc.Force = true
 	if _, err := r.Run(ctx, proxy.DeployArgs(svc)...); err != nil {
 		back := svc
@@ -486,19 +495,19 @@ func rename(ctx context.Context, r remote.Runner, log io.Writer, svc proxy.Servi
 	return nil
 }
 
-// ownRoutes reads the routes of an app that no longer publishes a port. A server without the
-// proxy has none. A proxy that is there but not running cannot be asked, and an app without routes
-// does not need it: the deploy goes on, and says what it could not check.
-func ownRoutes(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, mine []string) (held, error) {
+// ownRoutes reads the routes of an app that no longer publishes a port, and reports whether they
+// could be checked at all. A server without the proxy has none. A proxy that is there but not
+// running cannot be asked, and an app without routes does not need it, so the deploy goes on.
+func ownRoutes(ctx context.Context, r remote.Runner, cfg *config.Config, mine []string) (held, bool, error) {
 	state, err := proxy.State(ctx, r)
 	if err != nil || state == "" {
-		return held{}, err
+		return held{}, err == nil, err
 	}
 	if state != "running" {
-		fmt.Fprintf(log, "warning: the proxy is %s, so routes this app may still have there were not checked; deploy again once it runs\n", state)
-		return held{}, nil
+		return held{}, false, nil
 	}
-	return readRoutes(ctx, r, cfg, mine)
+	h, err := readRoutes(ctx, r, cfg, mine)
+	return h, err == nil, err
 }
 
 func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, keep map[string]bool) error {

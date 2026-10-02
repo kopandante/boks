@@ -150,10 +150,14 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image st
 // awaitAnswer waits for a proxy that was just started to open its command socket: the deploy
 // asks it for its services right away, and a container that is up is not yet a proxy that answers.
 func awaitAnswer(ctx context.Context, r remote.Runner) error {
-	var err error
-	for range answerTries {
-		if _, err = r.Run(ctx, "docker", "exec", Container, "kamal-proxy", "list"); err == nil {
+	deadline := time.Now().Add(answerWait)
+	for {
+		_, err := r.Run(ctx, "docker", "exec", Container, "kamal-proxy", "list")
+		if err == nil {
 			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the proxy was started but did not answer within %s: %w", answerWait, err)
 		}
 		select {
 		case <-ctx.Done():
@@ -161,12 +165,9 @@ func awaitAnswer(ctx context.Context, r remote.Runner) error {
 		case <-time.After(answerPoll):
 		}
 	}
-	return fmt.Errorf("the proxy was started but does not answer: %w", err)
 }
 
-const answerTries = 40
-
-var answerPoll = 250 * time.Millisecond
+var answerWait, answerPoll = 10 * time.Second, 250 * time.Millisecond
 
 // EnsureNetwork creates the shared Docker network unless it already exists. Idempotent. Every app
 // container is started on it, so an app that never boots the proxy (one without routes) needs it

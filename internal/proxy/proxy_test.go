@@ -108,8 +108,9 @@ func TestBootWaitsForAJustStartedProxyToAnswer(t *testing.T) {
 	if asked != 4 {
 		t.Errorf("want three silent tries and one answer, asked %d times: %v", asked, f.calls)
 	}
-	never := &fake{state: "exited", silent: answerTries}
-	if err := Boot(context.Background(), never, io.Discard, "boks", "img"); err == nil || !strings.Contains(err.Error(), "does not answer") {
+	answerWait = time.Millisecond
+	never := &fake{state: "exited", silent: 1 << 30}
+	if err := Boot(context.Background(), never, io.Discard, "boks", "img"); err == nil || !strings.Contains(err.Error(), "did not answer") {
 		t.Errorf("a proxy that never answers must fail Boot, got %v", err)
 	}
 }
