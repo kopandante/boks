@@ -137,6 +137,7 @@ func routelessFake(health string) *fake {
 	f := newFake()
 	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t\n"
 	f.out["docker ps --filter label=boks.app=bot"] = "bot-v1-1\n"
+	f.out["docker image inspect"] = `["CMD-SHELL","redis-cli ping"]`
 	f.out["docker inspect --format"] = health
 	return f
 }
@@ -168,6 +169,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"mkdir /tmp/boks-bot.lock",
 		"docker network inspect boks",
 		"docker pull ghcr.io/x/bot:v2",
+		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
 		"docker stop bot-v1-1",
@@ -194,6 +196,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 func TestRoutelessCreatesTheNetworkOnAFreshServer(t *testing.T) {
 	f := newFake()
 	f.fail["docker network inspect"] = errors.New("network boks not found")
+	f.out["docker image inspect"] = `["CMD-SHELL","true"]`
 	f.out["docker inspect --format"] = "healthy"
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v1", quick()); err != nil {
 		t.Fatal(err)
@@ -216,15 +219,48 @@ func TestRoutelessCreatesTheNetworkOnAFreshServer(t *testing.T) {
 }
 
 // Without a route, the image's own HEALTHCHECK is the only evidence a deploy worked. An image that
-// declares none gets a refusal, not a deploy that reports success and proves nothing.
+// declares none gets a refusal, not a deploy that reports success and proves nothing — and since
+// that is known from the image alone, the running copy is not taken down for a deploy that cannot
+// succeed.
 func TestRoutelessRefusesAnImageWithoutHealthcheck(t *testing.T) {
+	for _, declared := range []string{"", `["NONE"]`} {
+		f := routelessFake("healthy")
+		f.out["docker image inspect"] = declared
+		err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
+		if err == nil || !strings.Contains(err.Error(), "HEALTHCHECK") {
+			t.Fatalf("%q: want a refusal naming HEALTHCHECK, got %v", declared, err)
+		}
+		if f.has("docker stop") || f.has("docker run") {
+			t.Errorf("%q: the running copy must not be touched: %v", declared, f.calls)
+		}
+	}
+}
+
+// An image that cannot be inspected up front (a rollback to a tag `docker run` will fetch) is
+// judged by the running container instead, and still refused when it has no health check.
+func TestRoutelessRefusesAContainerWithoutHealthcheck(t *testing.T) {
 	f := routelessFake("none")
+	f.fail["docker image inspect"] = errors.New("No such image")
 	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
 	if err == nil || !strings.Contains(err.Error(), "HEALTHCHECK") {
 		t.Fatalf("want a refusal naming HEALTHCHECK, got %v", err)
 	}
-	if !f.has("docker rm bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
+	if !f.has("docker rm -f bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
 		t.Errorf("the new copy must go and the old one must come back: %v", f.calls)
+	}
+}
+
+// If the failed new copy cannot be confirmed gone, bringing the old one back could leave two
+// copies running at once: the old one stays stopped and the error says so.
+func TestRoutelessKeepsTheOldCopyStoppedWhenTheNewOneWillNotGo(t *testing.T) {
+	f := routelessFake("unhealthy")
+	f.out["docker ps -a --filter name=^bot-v2-1700000000$"] = "bot-v2-1700000000\n"
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "could not be confirmed removed") {
+		t.Fatalf("want an error naming the leftover copy, got %v", err)
+	}
+	if f.has("docker start bot-v1-1") {
+		t.Errorf("the old copy must not come back beside a new one that may still run: %v", f.calls)
 	}
 }
 
@@ -234,7 +270,7 @@ func TestRoutelessBringsTheOldCopyBackWhenTheNewOneIsUnhealthy(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unhealthy") {
 		t.Fatalf("want an unhealthy error, got %v", err)
 	}
-	if !f.has("docker stop bot-v2-1700000000") || !f.has("docker rm bot-v2-1700000000") {
+	if !f.has("docker stop bot-v2-1700000000") || !f.has("docker rm -f bot-v2-1700000000") {
 		t.Errorf("the unhealthy new copy must be stopped and removed: %v", f.calls)
 	}
 	if !f.has("docker start bot-v1-1") {
@@ -255,7 +291,7 @@ func TestRoutelessGivesUpAtTheDeployTimeout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not become healthy within 20ms") {
 		t.Fatalf("want a timeout, got %v", err)
 	}
-	if !f.has("docker rm bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
+	if !f.has("docker rm -f bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
 		t.Errorf("the new copy must go and the old one must come back: %v", f.calls)
 	}
 }

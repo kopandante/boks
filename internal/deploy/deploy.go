@@ -97,8 +97,14 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
 		return err
 	}
-	if err := pull(ctx, r, log, cfg.Image+":"+tag, o.Pull); err != nil {
+	ref := cfg.Image + ":" + tag
+	if err := pull(ctx, r, log, ref, o.Pull); err != nil {
 		return err
+	}
+	// Whether the image declares a HEALTHCHECK is known before anything is touched. A deploy that
+	// is bound to be refused must not first take the running copy down.
+	if declaresNoHealthcheck(ctx, r, ref) {
+		return noHealthcheck(cfg)
 	}
 	old, err := containers(ctx, r, cfg.App)
 	if err != nil {
@@ -121,19 +127,53 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		}
 	}
 	name := ContainerName(cfg.App, tag, o.Now())
-	if err := start(ctx, r, log, cfg, name, tag, o.Env); err != nil {
-		revive(ctx, r, log, stopped)
-		return err
+	err = start(ctx, r, log, cfg, name, tag, o.Env)
+	if err == nil {
+		err = waitHealthy(ctx, r, log, cfg, name, o.Poll)
 	}
-	if err := waitHealthy(ctx, r, log, cfg, name, o.Poll); err != nil {
-		best(ctx, r, log, "docker", "stop", name)
-		best(ctx, r, log, "docker", "rm", name)
+	if err != nil {
+		// A failed `docker run` may still have created the container, and a failed stop may have
+		// left it running. The old copy comes back only once the new one is verifiably gone;
+		// otherwise both would run at once, which is the one outcome this path exists to prevent.
+		if !discard(ctx, r, log, name) {
+			return fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
+				err, name, stopped)
+		}
 		revive(ctx, r, log, stopped)
 		return err
 	}
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
 	return nil
+}
+
+// discard stops and removes a container and reports whether it is verifiably gone. The stop comes
+// first so the copy shuts down gracefully; `rm -f` makes sure it goes even if the stop did not.
+func discard(ctx context.Context, r remote.Runner, log io.Writer, name string) bool {
+	fmt.Fprintf(log, "remove %s\n", name)
+	best(ctx, r, log, "docker", "stop", name)
+	best(ctx, r, log, "docker", "rm", "-f", name)
+	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+	return err == nil && strings.TrimSpace(out) == ""
+}
+
+// declaresNoHealthcheck reports whether the image is known to declare no HEALTHCHECK (none at all,
+// or `HEALTHCHECK NONE`). An image that cannot be inspected — `rollback` to a tag that is not on
+// the server yet, which `docker run` will fetch — is not known to lack one; the running container
+// is asked instead.
+func declaresNoHealthcheck(ctx context.Context, r remote.Runner, ref string) bool {
+	out, err := r.Run(ctx, "docker", "image", "inspect", "--format",
+		"{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}}", ref)
+	if err != nil {
+		return false
+	}
+	out = strings.TrimSpace(out)
+	return out == "" || out == "null" || out == "[]" || out == `["NONE"]`
+}
+
+func noHealthcheck(cfg *config.Config) error {
+	return fmt.Errorf("%s has no HEALTHCHECK: an app without routes is judged by its own "+
+		"health check, so add one to the image or publish a port", cfg.Image)
 }
 
 // running lists the containers of this app that are up right now.
@@ -183,8 +223,7 @@ func waitHealthy(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 		case "healthy":
 			return nil
 		case "none":
-			return fmt.Errorf("%s has no HEALTHCHECK: an app without routes is judged by its own "+
-				"health check, so add one to the image or publish a port", cfg.Image)
+			return noHealthcheck(cfg)
 		case "unhealthy":
 			return fmt.Errorf("%s reported unhealthy", name)
 		}
