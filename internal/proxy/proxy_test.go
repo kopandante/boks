@@ -125,6 +125,31 @@ func TestBootRestartsStoppedProxy(t *testing.T) {
 	}
 }
 
+// late is a proxy that answers, but only after delay, and does not notice cancellation.
+type late struct{ delay time.Duration }
+
+func (l late) Run(_ context.Context, args ...string) (string, error) {
+	switch cmd := strings.Join(args, " "); {
+	case strings.HasPrefix(cmd, "docker ps -a"):
+		return "exited", nil
+	case cmd == answer:
+		time.Sleep(l.delay)
+	}
+	return "", nil
+}
+
+func (l late) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
+	return l.Run(ctx, args...)
+}
+
+// The wait is bounded as a whole: an answer that comes after the bound is not one.
+func TestBootRejectsAnAnswerAfterTheBound(t *testing.T) {
+	answerWait, answerPoll = 5*time.Millisecond, time.Millisecond
+	if err := Boot(context.Background(), late{delay: 50 * time.Millisecond}, io.Discard, "boks", "img"); err == nil {
+		t.Fatal("an answer after the bound must fail Boot")
+	}
+}
+
 type said string
 
 func (s said) Run(context.Context, ...string) (string, error)          { return string(s), nil }

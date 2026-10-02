@@ -4,6 +4,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -150,18 +151,18 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image st
 // awaitAnswer waits for a proxy that was just started to open its command socket: the deploy
 // asks it for its services right away, and a container that is up is not yet a proxy that answers.
 func awaitAnswer(ctx context.Context, r remote.Runner) error {
-	deadline := time.Now().Add(answerWait)
+	// The bound covers the calls themselves, not only the pauses between them: a call that hangs
+	// past it is cancelled.
+	ctx, cancel := context.WithTimeout(ctx, answerWait)
+	defer cancel()
 	for {
 		_, err := r.Run(ctx, "docker", "exec", Container, "kamal-proxy", "list")
-		if err == nil {
+		if err == nil && ctx.Err() == nil {
 			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("the proxy was started but did not answer within %s: %w", answerWait, err)
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("the proxy was started but did not answer within %s: %w", answerWait, errors.Join(err, ctx.Err()))
 		case <-time.After(answerPoll):
 		}
 	}

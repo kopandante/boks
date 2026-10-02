@@ -820,6 +820,23 @@ func TestRoutelessDeploysWhileTheProxyIsStopped(t *testing.T) {
 	}
 }
 
+// A copy started without routes was never a route's target, so a stopped proxy is no reason to
+// keep it: a bot on such a server must not pile up one stopped copy per deploy.
+func TestRoutelessRetiresCopiesThatNeverHadRoutesWhileTheProxyIsStopped(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t[]\nbot-v0-1\t\n"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "exited"
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("docker rm bot-v1-1") {
+		t.Errorf("a copy started without routes goes as usual: %v", f.calls)
+	}
+	if f.has("docker rm bot-v0-1") {
+		t.Errorf("a copy without the label may be a route's target and stays: %v", f.calls)
+	}
+}
+
 // An app whose ports were all removed still has the routes it had; left alone they answer with a
 // 502 from a container this deploy removes. They go after the new copy is healthy and before the
 // old one is retired — without booting or routing through the proxy.

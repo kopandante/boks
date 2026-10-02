@@ -189,16 +189,35 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	if err := removeExcept(ctx, r, log, stale, nil); err != nil {
 		return keptOld(err, old)
 	}
-	// A route named by an earlier boks is known to be this app's only by its targets, and retire
-	// would delete them: the copies stay, stopped, until a deploy can ask the proxy.
+	// A route named by an earlier boks is known to be this app's only by its targets, so while the
+	// proxy cannot be asked, the copies that may be such a target stay, stopped, until a deploy can
+	// check. A copy started without routes never was one and goes as usual.
+	gone := names(old)
 	if !checked {
-		fmt.Fprintf(log, "warning: the proxy is not running, so this app's old routes there were not checked; "+
-			"%v are kept stopped until a deploy can check them\n", names(old))
-		return nil
+		gone = nil
+		var kept []string
+		for _, c := range old {
+			if c.startedWithoutRoutes() {
+				gone = append(gone, c.name)
+			} else {
+				kept = append(kept, c.name)
+			}
+		}
+		if len(kept) > 0 {
+			fmt.Fprintf(log, "warning: the proxy is not running, so this app's old routes there were not checked; "+
+				"%v are kept stopped until a deploy can check them\n", kept)
+		}
 	}
-	retire(ctx, r, log, names(old))
+	retire(ctx, r, log, gone)
 	prune(ctx, r, log, cfg, tag)
 	return nil
+}
+
+// startedWithoutRoutes reports a copy whose label records an empty list of ports — one started on
+// the routeless path, which no route was ever deployed onto. A copy without the label (started by
+// an older boks) may have been one.
+func (c container) startedWithoutRoutes() bool {
+	return c.ports != nil && len(c.ports) == 0
 }
 
 // discard stops and removes a container and reports whether it is verifiably gone. The stop comes
