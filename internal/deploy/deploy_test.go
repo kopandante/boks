@@ -105,9 +105,9 @@ func TestRunHappyPath(t *testing.T) {
 	}
 	want := []string{
 		"mkdir /tmp/boks-demo.lock",
+		"docker ps -a --filter volume=demo-data --filter label=boks.app=demo --format {{.Names}}",
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
-		"docker ps -a --filter volume=demo-data --filter label=boks.app=demo --format {{.Names}}",
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		proxyList,
@@ -405,8 +405,8 @@ func TestRunRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
 	if strings.Index(err.Error(), "docker stop") > strings.Index(err.Error(), "cp -a") {
 		t.Errorf("the app has to stop before the copy: %v", err)
 	}
-	if f.has("docker pull") || f.has("docker run -d --name demo-") {
-		t.Errorf("nothing may happen before the data is moved: %v", f.calls)
+	if f.has("docker pull") || f.has("docker run -d --name demo-") || f.has("docker network") || f.has(proxyProbe) {
+		t.Errorf("nothing may happen before the data is moved, the proxy included: %v", f.calls)
 	}
 }
 
@@ -528,14 +528,9 @@ func TestRunRestoresARouteWhoseRenameFailed(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	var onto []int
-	for i, c := range f.calls {
-		if strings.HasPrefix(c, deployVia+"demo.site --target demo-v2-1700000000:3000") {
-			onto = append(onto, i)
-		}
-	}
-	if len(onto) != 2 || onto[1] < f.at(deployVia+"demo.web") {
-		t.Errorf("the old name must be put back after the failed rename: %v", f.calls)
+	restored := f.at(deployVia + "demo.site --target demo-v2-1700000000:3000 --host demo.example.com --tls --health-check-path /up --deploy-timeout 60s --force")
+	if restored < 0 || restored < f.at(deployVia+"demo.web") {
+		t.Errorf("the old name must be put back after the failed rename, without waiting for a health check: %v", f.calls)
 	}
 	if f.has("docker stop demo-v1-1") || f.has("docker rm demo-v1-1") {
 		t.Errorf("the old container must be kept: %v", f.calls)
@@ -701,6 +696,24 @@ func TestRunRevertsARenameChainByHost(t *testing.T) {
 	}
 	if !f.has(deployVia+"demo.x --target demo-v1-1:3000 --host one.example.com") || f.has(deployVia+"demo.x --target demo-v1-1:3001") {
 		t.Errorf("one.example.com must go back to the old x port: %v", f.calls)
+	}
+}
+
+// A route of a removed port that cannot be dropped keeps the old copy: retiring it would leave
+// the route pointing at a removed container. The new copy stays up, the old one is not revived.
+func TestRoutelessKeepsTheOldCopyWhenARouteStays(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out[proxyList] = listed(t, map[string]proxy.Listed{
+		"bot.web": {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:3000"}},
+	})
+	f.fail[removeVia] = errors.New("boom")
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "bot-v1-1") {
+		t.Fatalf("want an error naming the kept container, got %v", err)
+	}
+	if f.has("docker rm bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f bot-v2") {
+		t.Errorf("the old copy is kept stopped and the new one stays: %v", f.calls)
 	}
 }
 

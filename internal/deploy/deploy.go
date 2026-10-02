@@ -45,6 +45,11 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
+	// Before anything on the server changes, the proxy included: a deploy that has to be refused
+	// for its data must leave the server as it found it.
+	if err := checkLegacyVolumes(ctx, r, cfg); err != nil {
+		return err
+	}
 	if len(cfg.Ports) == 0 {
 		return runRouteless(ctx, r, log, cfg, tag, o)
 	}
@@ -56,9 +61,6 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if covered(cfg) && !cert.Installed(ctx, r, cfg) {
 		crt, _ := cert.ServerPaths(cfg.Cert)
 		return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
-	}
-	if err := checkLegacyVolumes(ctx, r, cfg); err != nil {
-		return err
 	}
 	if err := pull(ctx, r, log, cfg.Image+":"+tag, o.Pull); err != nil {
 		return err
@@ -118,9 +120,6 @@ func keptOld(err error, old []container) error {
 // brought back: a container left stopped by an earlier deploy must stay stopped, or a failed
 // deploy would end with two copies where there was one.
 func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, tag string, o Options) error {
-	if err := checkLegacyVolumes(ctx, r, cfg); err != nil {
-		return err
-	}
 	// The proxy is what normally creates the network every app container joins; without it the
 	// network has to be made here, or the first deploy on a fresh server cannot start at all.
 	if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
@@ -446,8 +445,11 @@ func rename(ctx context.Context, r remote.Runner, log io.Writer, svc proxy.Servi
 		return err
 	}
 	if _, err := r.Run(ctx, proxy.DeployArgs(svc)...); err != nil {
+		// The old name comes back without waiting for a health check: it is the one thing that
+		// keeps the host routed, and a target that just failed one must not cost the host its
+		// route — kamal-proxy resumes sending traffic once the target recovers.
 		back := svc
-		back.Name = was
+		back.Name, back.Force = was, true
 		best(context.WithoutCancel(ctx), r, log, proxy.DeployArgs(back)...)
 		return fmt.Errorf("renaming route %s to %s: %w", was, svc.Name, err)
 	}

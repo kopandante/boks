@@ -32,6 +32,7 @@ type Service struct {
 	HealthPath string
 	HealthPort int
 	Timeout    string
+	Force      bool // install without waiting for the target's health check
 }
 
 // NameSep joins an app and one of its ports into a service name, and the app with a volume name.
@@ -108,6 +109,9 @@ func DeployArgs(s Service) []string {
 	}
 	if s.Timeout != "" {
 		a = append(a, "--deploy-timeout", s.Timeout)
+	}
+	if s.Force {
+		a = append(a, "--force")
 	}
 	return a
 }
