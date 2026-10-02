@@ -6,3 +6,6 @@
 # repository root would miss `examples/<app>/.lego/`, which is where a per-app config puts it.
 .lego/
 lego/
+
+# рабочие файлы сессий и выводы внешних ревьюеров -- не часть репозитория
+tmp/
