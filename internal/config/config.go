@@ -94,19 +94,37 @@ func Parse(data []byte) (*Config, error) {
 		return nil, err
 	}
 	// Anything past the first document would be read by nobody, so refuse the file rather than
-	// apply half of it.
-	switch err := dec.Decode(new(Config)); {
-	case errors.Is(err, io.EOF):
-	case err == nil:
-		return nil, errors.New("more than one YAML document: boks reads one app per file")
-	default:
-		return nil, fmt.Errorf("second YAML document: %w", err)
+	// apply half of it. An empty document holds nothing that could go unread: a trailing `---`
+	// (with or without a comment after it) parsed on earlier versions and still does.
+	for {
+		var doc yaml.Node
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("YAML document after the first: %w", err)
+		}
+		if !isEmptyDocument(&doc) {
+			return nil, errors.New("more than one YAML document: boks reads one app per file")
+		}
 	}
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// isEmptyDocument reports whether a decoded YAML document carries no value: nothing at all, or
+// a bare null (what `---` with nothing after it decodes to).
+func isEmptyDocument(doc *yaml.Node) bool {
+	for _, n := range doc.Content {
+		if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!null" {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Config) applyDefaults() {
