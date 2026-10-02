@@ -21,8 +21,12 @@ type fake struct {
 }
 
 func newFake() *fake {
-	return &fake{uploads: map[string]string{}, out: map[string]string{}, fail: map[string]error{}}
+	f := &fake{uploads: map[string]string{}, out: map[string]string{}, fail: map[string]error{}}
+	f.out[proxyList] = "{}" // what kamal-proxy prints when it holds no services
+	return f
 }
+
+const proxyList = "docker exec boks-proxy kamal-proxy list --json"
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
@@ -103,16 +107,16 @@ func TestRunHappyPath(t *testing.T) {
 		"mkdir /tmp/boks-demo.lock",
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
-		"docker volume ls --quiet --filter name=^demo-data$",
+		"docker ps -a --filter volume=demo-data --filter label=boks.app=demo --format {{.Names}}",
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}",
+		proxyList,
 		"docker run -d --name demo-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
 			"--env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
 		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --tls --health-check-path /up --deploy-timeout 60s",
-		"docker exec boks-proxy kamal-proxy list --json",
 		"docker stop demo-v1-1",
 		"docker rm demo-v1-1",
 		"docker images ghcr.io/x/y --format {{.Tag}} {{.ID}}",
@@ -150,15 +154,18 @@ func quick() Options {
 	return o
 }
 
-// touchesProxy reports any call that boots, starts or asks the proxy.
+// touchesProxy reports any call that boots, starts or routes through the proxy. Asking whether
+// the proxy container exists is not one: an app that lost its ports has routes to drop.
 func touchesProxy(f *fake) bool {
 	for _, c := range f.calls {
-		if strings.Contains(c, proxy.Container) {
+		if strings.Contains(c, proxy.Container) && c != proxyProbe {
 			return true
 		}
 	}
 	return false
 }
+
+const proxyProbe = "docker ps -a --filter name=^boks-proxy$ --format {{.State}}"
 
 // An app with no routes is replaced in place: the proxy is never touched and the old container is
 // stopped BEFORE the new one starts, so two copies never drain the same queue at once.
@@ -179,6 +186,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
+		proxyProbe,
 		"docker stop bot-v1-1",
 		"docker rm bot-v1-1",
 		"docker images ghcr.io/x/bot --format {{.Tag}} {{.ID}}",
@@ -363,35 +371,260 @@ func TestRoutelessRevivesOnlyWhatWasRunning(t *testing.T) {
 	}
 }
 
+// at returns the position of the first call starting with prefix, or -1.
+func (f *fake) at(prefix string) int {
+	for i, c := range f.calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+const (
+	deployVia = "docker exec boks-proxy kamal-proxy deploy "
+	removeVia = "docker exec boks-proxy kamal-proxy remove "
+	legacyUse = "docker ps -a --filter volume=demo-data --filter label=boks.app=demo"
+)
+
 // Renaming the volume would hand the app an empty one and lose the data silently, so the deploy
-// stops and says how to move it.
+// stops before anything happens and says how to move it — stopping the app first, or the copy
+// would miss what it writes until the deploy retires it.
 func TestRunRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
 	f := newFake()
-	f.out["docker volume ls --quiet --filter name=^demo-data$"] = "demo-data"
+	f.out[legacyUse] = "demo-v1-1\n"
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "old naming scheme") {
 		t.Fatalf("want a refusal naming the old volume, got %v", err)
 	}
-	if f.has("docker run -d --name demo-") {
-		t.Errorf("the app must not start before the data is moved: %v", f.calls)
+	for _, step := range []string{"docker stop demo-v1-1", "docker volume create demo.data", "-v demo-data:/from -v demo.data:/to"} {
+		if !strings.Contains(err.Error(), step) {
+			t.Errorf("the refusal must say %q: %v", step, err)
+		}
+	}
+	if strings.Index(err.Error(), "docker stop") > strings.Index(err.Error(), "cp -a") {
+		t.Errorf("the app has to stop before the copy: %v", err)
+	}
+	if f.has("docker pull") || f.has("docker run -d --name demo-") {
+		t.Errorf("nothing may happen before the data is moved: %v", f.calls)
 	}
 }
 
-// A port renamed in the config leaves its old service behind; it has to go, or it keeps pointing
-// at the container this deploy is about to remove.
-func TestRunRemovesRoutesTheConfigNoLongerDescribes(t *testing.T) {
+// Once the data has been moved the deploy goes ahead. The volume filter is a regular expression,
+// so the dot has to be escaped: unescaped, this lookup would not be the one that answers.
+func TestRunProceedsOnceTheVolumeWasMoved(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker exec boks-proxy kamal-proxy list --json"] =
-		`{"demo.web":{},"demo.legacy":{},"other.web":{}}`
+	f.out[legacyUse] = "demo-v1-1\n"
+	f.out[`docker volume ls --quiet --filter name=^demo\.data$`] = "demo.data"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
-	if !f.has("docker exec boks-proxy kamal-proxy remove demo.legacy") {
-		t.Errorf("stale route must be removed: %v", f.calls)
+	if !f.has("docker run -d --name demo-v2-1700000000") {
+		t.Errorf("the deploy must go ahead: %v", f.calls)
 	}
-	if f.has("kamal-proxy remove demo.web") || f.has("kamal-proxy remove other.web") {
-		t.Errorf("only this app's undescribed routes may go: %v", f.calls)
+}
+
+// A check that cannot run is not a check that passed: the app would start on an empty volume.
+func TestRunRefusesWhenTheVolumeCheckFails(t *testing.T) {
+	f := newFake()
+	f.fail["docker ps -a --filter volume="] = errors.New("ssh: connection reset")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if f.has("docker run -d --name demo-") {
+		t.Errorf("the app must not start: %v", f.calls)
+	}
+}
+
+// listed is one service as `kamal-proxy list --json` reports it.
+func listed(t *testing.T, services map[string]proxy.Listed) string {
+	t.Helper()
+	b, err := json.Marshal(services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// routedFake is a server where demo-v1-1 is the running copy of the app and the proxy holds the
+// given services.
+func routedFake(t *testing.T, services map[string]proxy.Listed) *fake {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t\n"
+	f.out[proxyList] = listed(t, services)
+	return f
+}
+
+// A port moved to another host leaves its old service behind; it has to go before the old
+// container does, or it keeps pointing at a container this deploy removed. Services of other
+// apps — by name or by target — stay.
+func TestRunRemovesRoutesTheConfigNoLongerDescribes(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.web":    {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+		"other.web":   {Hosts: []string{"other.example.com"}, Targets: []string{"other-v1-1:80"}},
+		"demo-web":    {Hosts: []string{"x.example.com"}, Targets: []string{"demo-web-v1-1:80"}},
+		"idle":        {Hosts: []string{"idle.example.com"}},
+	})
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	removed, retired := f.at(removeVia+"demo.legacy"), f.at("docker rm demo-v1-1")
+	if removed < 0 || retired < 0 || removed > retired {
+		t.Errorf("the stale route must go before the old container: %v", f.calls)
+	}
+	for _, keep := range []string{"demo.web", "other.web", "demo-web", "idle"} {
+		if f.has(removeVia + keep) {
+			t.Errorf("%s is not a stale route of this app: %v", keep, f.calls)
+		}
+	}
+}
+
+// A service named by an earlier boks (`demo-web`) holds the host, and kamal-proxy gives a host to
+// one service at a time: deploying `demo.web` next to it would be refused. The new container goes
+// onto the old service, which is then renamed, and only then is the old container retired.
+func TestRunTakesOverTheRouteOfAnEarlierNamingScheme(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo-web": {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+	})
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	order := []int{
+		f.at(deployVia + "demo-web --target demo-v2-1700000000:3000"),
+		f.at(removeVia + "demo-web"),
+		f.at(deployVia + "demo.web --target demo-v2-1700000000:3000 --host demo.example.com"),
+		f.at("docker stop demo-v1-1"),
+	}
+	for i, at := range order {
+		if at < 0 || (i > 0 && at < order[i-1]) {
+			t.Fatalf("want switch onto demo-web, rename to demo.web, then retire; calls:\n%s", strings.Join(f.calls, "\n"))
+		}
+	}
+}
+
+// The same holds for a port renamed in the config while its host stays.
+func TestRunRenamesAPortThatKeepsItsHost(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.site": {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+	})
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.at(deployVia+"demo.web") < 0 || f.at(deployVia+"demo.site") > f.at(removeVia+"demo.site") ||
+		f.at(removeVia+"demo.site") > f.at(deployVia+"demo.web") {
+		t.Errorf("want switch onto demo.site, then rename to demo.web: %v", f.calls)
+	}
+}
+
+// A rename that fails half way puts the old name back on the new container, and the old
+// container is kept: the command says so instead of reporting success.
+func TestRunRestoresARouteWhoseRenameFailed(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.site": {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+	})
+	f.fail[deployVia+"demo.web"] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	var onto []int
+	for i, c := range f.calls {
+		if strings.HasPrefix(c, deployVia+"demo.site --target demo-v2-1700000000:3000") {
+			onto = append(onto, i)
+		}
+	}
+	if len(onto) != 2 || onto[1] < f.at(deployVia+"demo.web") {
+		t.Errorf("the old name must be put back after the failed rename: %v", f.calls)
+	}
+	if f.has("docker stop demo-v1-1") || f.has("docker rm demo-v1-1") {
+		t.Errorf("the old container must be kept: %v", f.calls)
+	}
+}
+
+// A stale route that cannot be removed leaves the deploy unfinished: retiring the old container
+// would leave that route pointing at nothing, which is the failure this exists to prevent.
+func TestRunKeepsTheOldContainerWhenAStaleRouteStays(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+	})
+	f.fail[removeVia] = errors.New("boom")
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "demo-v1-1") {
+		t.Fatalf("want an error naming the kept container, got %v", err)
+	}
+	if f.has("docker stop demo-v1-1") || f.has("docker rm demo-v1-1") {
+		t.Errorf("the old container must be kept: %v", f.calls)
+	}
+}
+
+// What the proxy holds decides which service carries each port, so a deploy that cannot read it
+// does not start.
+func TestRunDoesNotStartWithoutTheProxyList(t *testing.T) {
+	f := routedFake(t, nil)
+	f.fail[proxyList] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if f.has("docker run -d --name demo-") {
+		t.Errorf("nothing may start: %v", f.calls)
+	}
+}
+
+// Port `web` was renamed to `site` and a new port took the name `web`: the new port's own service
+// carries the other port's host, and deploying it would take that host away. Refused before
+// anything starts.
+func TestRunRefusesTwoPortsThroughOneService(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.web": {Hosts: []string{"actions.example.com"}, Targets: []string{"demo-v1-1:3001"}},
+	})
+	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if f.has("docker run -d --name demo-") {
+		t.Errorf("nothing may start: %v", f.calls)
+	}
+}
+
+// A port carried by its predecessor's service was recorded under the predecessor's name, and
+// that record is what a revert aims at.
+func TestRunRevertsARenamedPortToItsRecordedPort(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.site": {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:4000"}},
+	})
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
+		ports(t, config.Port{Name: "site", Port: 4000, Host: "demo.example.com"}) + "\n"
+	f.fail[deployVia+"demo.actions"] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
+		t.Fatal("want an error")
+	}
+	if !f.has(deployVia + "demo.site --target demo-v1-1:4000") {
+		t.Errorf("the route must go back through demo.site to the port the old container listens on: %v", f.calls)
+	}
+}
+
+// An app whose ports were all removed still has the routes it had; left alone they answer with a
+// 502 from a container this deploy removes. They go after the new copy is healthy and before the
+// old one is retired — without booting or routing through the proxy.
+func TestRoutelessDropsTheRoutesOfRemovedPorts(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out[proxyList] = listed(t, map[string]proxy.Listed{
+		"bot.web":   {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:3000"}},
+		"bot-api":   {Hosts: []string{"api.example.com"}, Targets: []string{"bot-v1-1:3001"}},
+		"other.web": {Hosts: []string{"other.example.com"}, Targets: []string{"other-v1-1:80"}},
+	})
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	healthy, retired := f.at("docker inspect --format"), f.at("docker rm bot-v1-1")
+	for _, gone := range []string{"bot.web", "bot-api"} {
+		if at := f.at(removeVia + gone); at < healthy || at > retired {
+			t.Errorf("%s must go after the new copy is healthy and before the old one is retired: %v", gone, f.calls)
+		}
+	}
+	if f.has(removeVia+"other.web") || f.has(deployVia) || f.has("docker start boks-proxy") {
+		t.Errorf("only this app's routes may go, and the proxy is not routed through: %v", f.calls)
 	}
 }
 

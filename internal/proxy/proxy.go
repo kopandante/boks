@@ -44,28 +44,46 @@ func ServiceName(app, port string) string {
 	return app + NameSep + port
 }
 
-// Owns reports whether a proxy service belongs to this app.
+// Owns reports whether a proxy service carries this app's name. Services named by boks before the
+// dot (`app-port`) do not, and are recognised by their targets instead (see Listed.Targets).
 func Owns(app, service string) bool {
 	return strings.HasPrefix(service, app+NameSep)
 }
 
-// Names lists the services kamal-proxy currently holds. The JSON form is an object keyed by
-// service name, so the keys are the answer.
-func Names(ctx context.Context, r remote.Runner) ([]string, error) {
+// Listed is what kamal-proxy reports about one service: the hosts it holds and the
+// `container:port` targets it sends them to.
+type Listed struct {
+	Hosts   []string `json:"hosts"`
+	Targets []string `json:"targets"`
+}
+
+// Services returns the services kamal-proxy currently holds, keyed by name, with the names sorted
+// alongside so callers act on them in a stable order.
+func Services(ctx context.Context, r remote.Runner) (map[string]Listed, []string, error) {
 	out, err := r.Run(ctx, "docker", "exec", Container, "kamal-proxy", "list", "--json")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var services map[string]json.RawMessage
+	var services map[string]Listed
 	if err := json.Unmarshal([]byte(out), &services); err != nil {
-		return nil, fmt.Errorf("reading the proxy service list: %w", err)
+		return nil, nil, fmt.Errorf("reading the proxy service list: %w", err)
 	}
 	names := make([]string, 0, len(services))
 	for name := range services {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names, nil
+	return services, names, nil
+}
+
+// Exists reports whether the proxy container is on this server at all, running or not.
+func Exists(ctx context.Context, r remote.Runner) (bool, error) {
+	state, err := containerState(ctx, r)
+	return state != "", err
+}
+
+func containerState(ctx context.Context, r remote.Runner) (string, error) {
+	return r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+Container+"$", "--format", "{{.State}}")
 }
 
 func Remove(ctx context.Context, r remote.Runner, service string) error {
@@ -105,7 +123,7 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image st
 	if err := EnsureNetwork(ctx, r, log, network); err != nil {
 		return err
 	}
-	state, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+Container+"$", "--format", "{{.State}}")
+	state, err := containerState(ctx, r)
 	if err != nil {
 		return err
 	}

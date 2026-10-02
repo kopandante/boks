@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -66,13 +67,23 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err != nil {
 		return err
 	}
+	// Which service carries each port depends on what the proxy holds right now, so it is read
+	// before anything starts: a deploy that cannot tell must not begin.
+	held, err := readRoutes(ctx, r, cfg, names(old))
+	if err != nil {
+		return err
+	}
+	plan, err := held.plan(cfg)
+	if err != nil {
+		return err
+	}
 	name := ContainerName(cfg.App, tag, o.Now())
 	if err := start(ctx, r, log, cfg, name, tag, o.Env); err != nil {
 		return err
 	}
-	switched, err := switchProxy(ctx, r, log, cfg, name)
+	switched, err := switchProxy(ctx, r, log, cfg, name, plan)
 	if err != nil {
-		revert(ctx, r, log, cfg, switched, old)
+		revert(ctx, r, log, cfg, plan, switched, old)
 		return fmt.Errorf("%w\nnew container %s is left running for inspection; see the revert/warning lines above for where traffic goes now", err, name)
 	}
 	// Routing a host at a certificate path makes the proxy read that file, so the deploy is a
@@ -82,14 +93,21 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 			fmt.Fprintf(log, "warning: could not record the loaded certificate: %v\n", err)
 		}
 	}
-	// After the routes are live and before anything is deleted: a stale service would otherwise
-	// keep pointing at the container retire is about to remove.
-	if err := removeOrphanRoutes(ctx, r, log, cfg); err != nil {
-		fmt.Fprintf(log, "warning: could not remove stale routes: %v\n", err)
+	if err := settle(ctx, r, log, cfg, name, plan, held); err != nil {
+		return keptOld(err, old)
 	}
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
 	return nil
+}
+
+// keptOld reports a deploy whose new version is up but whose stale routes could not be cleared.
+// The previous containers are not retired: a route that is still there then reaches a container
+// that still exists, rather than one this deploy deleted.
+func keptOld(err error, old []container) error {
+	return fmt.Errorf("the new version is up, but the proxy still holds routes the config no longer describes: %w\n"+
+		"the previous containers %v were kept, so those routes do not point at removed containers; deploy again once the proxy answers",
+		err, names(old))
 }
 
 // runRouteless deploys an app that publishes nothing — a bot, a worker. Two differences from the
@@ -160,6 +178,11 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		}
 		revive(ctx, r, log, stopped)
 		return err
+	}
+	// Removing every port does not remove the routes the app had: they would keep answering, with
+	// a 502, from the container retire is about to delete.
+	if err := dropRoutes(ctx, r, log, cfg, names(old)); err != nil {
+		return keptOld(err, old)
 	}
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
@@ -258,50 +281,161 @@ func waitHealthy(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 }
 
 // checkLegacyVolumes refuses a deploy that would start the app on a fresh, empty volume because
-// the data still sits under the previous naming scheme. Copying is the operator's call, not
-// something boks should do behind their back, so this says what to run instead.
+// its data still sits under the previous naming scheme. Ownership is read from the containers, not
+// from the name: the old name is the ambiguous one (`a-b` with volume `c` and `a` with volume `b-c`
+// both called it `a-b-c`), so a volume counts as this app's only when one of its containers
+// mounts it. Copying is the operator's call, not something boks should do behind their back, so
+// this says what to run instead — stopping the app first, or the copy would miss whatever it
+// writes until the deploy retires it.
 func checkLegacyVolumes(ctx context.Context, r remote.Runner, cfg *config.Config) error {
 	for _, v := range cfg.Volumes {
 		name, _, _ := strings.Cut(v, ":")
 		legacy, current := cfg.App+"-"+name, cfg.App+proxy.NameSep+name
-		if !volumeExists(ctx, r, legacy) || volumeExists(ctx, r, current) {
+		out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "volume="+legacy,
+			"--filter", "label=boks.app="+cfg.App, "--format", "{{.Names}}")
+		if err != nil {
+			return fmt.Errorf("checking whether %s still holds this app's data: %w", legacy, err)
+		}
+		users := strings.Fields(out)
+		if len(users) == 0 {
 			continue
 		}
-		return fmt.Errorf("volume %q holds this app's data under the old naming scheme and %q does not exist yet; "+
-			"deploying now would start on an empty volume. Move the data first:\n"+
+		moved, err := volumeExists(ctx, r, current)
+		if err != nil {
+			return fmt.Errorf("checking for volume %s: %w", current, err)
+		}
+		if moved {
+			continue
+		}
+		return fmt.Errorf("volume %s holds this app's data under the old naming scheme (mounted by %s) and %s does not exist yet; "+
+			"deploying now would start on an empty volume. Stop the app, move the data, then deploy again "+
+			"(the app is down from the stop until that deploy finishes):\n"+
+			"  docker stop %s\n"+
 			"  docker volume create %s\n"+
 			"  docker run --rm -v %s:/from -v %s:/to alpine sh -c 'cp -a /from/. /to/'",
-			legacy, current, current, legacy, current)
+			legacy, strings.Join(users, ", "), current, strings.Join(users, " "), current, legacy, current)
 	}
 	return nil
 }
 
-func volumeExists(ctx context.Context, r remote.Runner, name string) bool {
+func volumeExists(ctx context.Context, r remote.Runner, name string) (bool, error) {
 	// The filter is a regular expression, so the dot of the current scheme has to be escaped: bare
 	// it would match any character and report a volume that is not there.
 	out, err := r.Run(ctx, "docker", "volume", "ls", "--quiet", "--filter",
 		"name=^"+regexp.QuoteMeta(name)+"$")
-	return err == nil && strings.TrimSpace(out) != ""
+	return strings.TrimSpace(out) != "", err
 }
 
-// removeOrphanRoutes drops the proxy services this app owns that its config no longer describes.
-// Without it a renamed port leaves a service pointing at a container retire is about to remove,
-// and the deploy still reports success.
-func removeOrphanRoutes(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
-	names, err := proxy.Names(ctx, r)
+// held is this app's share of what kamal-proxy holds: the services it owns, by name, in a stable
+// order. A service is the app's when it carries the `<app>.` prefix, or — named by boks before the
+// dot, as `<app>-<port>` — when every container it targets is one of this app's. The old name
+// alone cannot say whose it is; the targets can.
+type held struct {
+	services map[string]proxy.Listed
+	names    []string
+}
+
+func readRoutes(ctx context.Context, r remote.Runner, cfg *config.Config, mine []string) (held, error) {
+	all, names, err := proxy.Services(ctx, r)
+	if err != nil {
+		return held{}, fmt.Errorf("reading the proxy's services: %w", err)
+	}
+	h := held{services: map[string]proxy.Listed{}}
+	for _, n := range names {
+		if s := all[n]; proxy.Owns(cfg.App, n) || targetsOnly(s.Targets, mine) {
+			h.services[n] = s
+			h.names = append(h.names, n)
+		}
+	}
+	return h, nil
+}
+
+func targetsOnly(targets, mine []string) bool {
+	for _, t := range targets {
+		c, _, _ := strings.Cut(t, ":")
+		if !slices.Contains(mine, c) {
+			return false
+		}
+	}
+	return len(targets) > 0
+}
+
+// plan names the service that carries each port through the switch. kamal-proxy gives a host to
+// one service at a time and refuses a second, so when a service of this app already holds the
+// port's host — the port was renamed, or an earlier boks named it `<app>-<port>` — the new
+// container is deployed onto that service, and settle renames it once traffic has moved.
+func (h held) plan(cfg *config.Config) (map[string]string, error) {
+	plan := make(map[string]string, len(cfg.Ports))
+	carries := map[string]string{}
+	for _, p := range cfg.Ports {
+		svc := proxy.ServiceName(cfg.App, p.Name)
+		for _, n := range h.names {
+			if slices.Contains(h.services[n].Hosts, p.Host) {
+				svc = n
+				break
+			}
+		}
+		// A port whose own name is held by the renamed predecessor of another port would take that
+		// service, and that port's host with it.
+		if q, ok := carries[svc]; ok {
+			return nil, fmt.Errorf("ports %s and %s would both go through proxy service %s: deploy once without one of them, then add it back", q, p.Name, svc)
+		}
+		carries[svc] = p.Name
+		plan[p.Name] = svc
+	}
+	return plan, nil
+}
+
+// settle leaves the proxy with exactly the services the config describes, under their own names,
+// once traffic has reached the new container and before anything is deleted. A port carried by a
+// service of another name is renamed: removed, then deployed under its own name onto the container
+// that has just passed this very health check, so its host goes unrouted for one health request.
+// Services this app owns but no longer describes are removed, or they would keep pointing at the
+// container retire is about to delete.
+func settle(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, target string, plan map[string]string, h held) error {
+	wanted := map[string]bool{}
+	for _, p := range cfg.Ports {
+		svc := service(cfg, target, p)
+		wanted[svc.Name] = true
+		was := plan[p.Name]
+		if was == svc.Name {
+			continue
+		}
+		fmt.Fprintf(log, "rename route %s → %s\n", was, svc.Name)
+		if err := proxy.Remove(ctx, r, was); err != nil {
+			return err
+		}
+		if _, err := r.Run(ctx, proxy.DeployArgs(svc)...); err != nil {
+			back := svc
+			back.Name = was
+			best(context.WithoutCancel(ctx), r, log, proxy.DeployArgs(back)...)
+			return fmt.Errorf("renaming route %s to %s: %w", was, svc.Name, err)
+		}
+		wanted[was] = true // already gone, not an orphan
+	}
+	return removeUnwanted(ctx, r, log, h, wanted)
+}
+
+// dropRoutes removes every route of an app that no longer publishes a port. A server without the
+// proxy has no routes to drop, and asking it would only fail.
+func dropRoutes(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, mine []string) error {
+	if ok, err := proxy.Exists(ctx, r); err != nil || !ok {
+		return err
+	}
+	h, err := readRoutes(ctx, r, cfg, mine)
 	if err != nil {
 		return err
 	}
-	wanted := make(map[string]bool, len(cfg.Ports))
-	for _, p := range cfg.Ports {
-		wanted[proxy.ServiceName(cfg.App, p.Name)] = true
-	}
-	for _, name := range names {
-		if !proxy.Owns(cfg.App, name) || wanted[name] {
+	return removeUnwanted(ctx, r, log, h, nil)
+}
+
+func removeUnwanted(ctx context.Context, r remote.Runner, log io.Writer, h held, wanted map[string]bool) error {
+	for _, n := range h.names {
+		if wanted[n] {
 			continue
 		}
-		fmt.Fprintf(log, "remove stale route %s\n", name)
-		if err := proxy.Remove(ctx, r, name); err != nil {
+		fmt.Fprintf(log, "remove stale route %s\n", n)
+		if err := proxy.Remove(ctx, r, n); err != nil {
 			return err
 		}
 	}
@@ -451,10 +585,11 @@ func service(cfg *config.Config, target string, p config.Port) proxy.Service {
 
 // switchProxy points every route at the new container, one port at a time, and returns the
 // ports whose routes had already moved when an error stopped it.
-func switchProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string) ([]config.Port, error) {
+func switchProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string, plan map[string]string) ([]config.Port, error) {
 	var done []config.Port
 	for _, p := range cfg.Ports {
 		svc := service(cfg, name, p)
+		svc.Name = plan[p.Name]
 		fmt.Fprintf(log, "proxy %s → %s (%s)\n", svc.Name, svc.Target, p.Host)
 		if _, err := r.Run(ctx, proxy.DeployArgs(svc)...); err != nil {
 			return done, err
@@ -469,7 +604,7 @@ func switchProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 // comes from the OLD container's own label: if the config changed a port between deploys, the
 // old container still listens where it was started, and aiming at the new number would make the
 // proxy's health check fail and leave the route on the broken new container.
-func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, switched []config.Port, old []container) {
+func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, plan map[string]string, switched []config.Port, old []container) {
 	if len(switched) == 0 {
 		return
 	}
@@ -485,7 +620,12 @@ func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	prev := old[0]
 	for _, p := range switched {
 		target := p
-		if recorded, ok := prev.ports[p.Name]; ok {
+		// A port carried by its predecessor's service was recorded under the predecessor's name.
+		recorded, ok := prev.ports[p.Name]
+		if !ok {
+			recorded, ok = prev.ports[formerPort(cfg.App, plan[p.Name])]
+		}
+		if ok {
 			recorded.Host = p.Host // the domain belongs to the route, not to the container
 			target = recorded
 		} else {
@@ -493,9 +633,19 @@ func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 				prev.name, p.Name, p.Port)
 		}
 		svc := service(cfg, prev.name, target)
+		svc.Name = plan[p.Name]
 		fmt.Fprintf(log, "revert %s → %s\n", svc.Name, svc.Target)
 		best(ctx, r, log, proxy.DeployArgs(svc)...)
 	}
+}
+
+// formerPort is the port a service of this app was named after, under either naming scheme.
+func formerPort(app, service string) string {
+	if port, ok := strings.CutPrefix(service, app+proxy.NameSep); ok {
+		return port
+	}
+	port, _ := strings.CutPrefix(service, app+"-")
+	return port
 }
 
 // retire stops and removes previous containers. Failures are reported, not fatal: the new
