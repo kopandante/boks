@@ -88,8 +88,15 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 // routed path, both forced by the absence of a route. There is no traffic to switch, so the proxy
 // is not booted at all; and overlapping the two versions would mean two live copies draining the
 // same queue, so the old container is stopped BEFORE the new one starts and brought back if the
-// new one never becomes healthy.
+// new one never becomes healthy. Only the copies that were actually running are stopped and
+// brought back: a container left stopped by an earlier deploy must stay stopped, or a failed
+// deploy would end with two copies where there was one.
 func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, tag string, o Options) error {
+	// The proxy is what normally creates the network every app container joins; without it the
+	// network has to be made here, or the first deploy on a fresh server cannot start at all.
+	if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
+		return err
+	}
 	if err := pull(ctx, r, log, cfg.Image+":"+tag, o.Pull); err != nil {
 		return err
 	}
@@ -97,19 +104,31 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	if err != nil {
 		return err
 	}
-	for _, c := range names(old) {
+	live, err := running(ctx, r, cfg.App)
+	if err != nil {
+		return err
+	}
+	var stopped []string
+	for _, c := range live {
 		fmt.Fprintf(log, "stop %s\n", c)
-		best(ctx, r, log, "docker", "stop", c)
+		// The stop is the guarantee that two copies never run at once, not cleanup: if it fails,
+		// the new copy must not start. `docker start` of a container that is still running is a
+		// no-op, so the one that failed to stop is safe to include in the revival.
+		stopped = append(stopped, c)
+		if _, err := r.Run(ctx, "docker", "stop", c); err != nil {
+			revive(ctx, r, log, stopped)
+			return fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
+		}
 	}
 	name := ContainerName(cfg.App, tag, o.Now())
 	if err := start(ctx, r, log, cfg, name, tag, o.Env); err != nil {
-		revive(ctx, r, log, old)
+		revive(ctx, r, log, stopped)
 		return err
 	}
 	if err := waitHealthy(ctx, r, log, cfg, name, o.Poll); err != nil {
 		best(ctx, r, log, "docker", "stop", name)
 		best(ctx, r, log, "docker", "rm", name)
-		revive(ctx, r, log, old)
+		revive(ctx, r, log, stopped)
 		return err
 	}
 	retire(ctx, r, log, names(old))
@@ -117,9 +136,24 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	return nil
 }
 
+// running lists the containers of this app that are up right now.
+func running(ctx context.Context, r remote.Runner, app string) ([]string, error) {
+	out, err := r.Run(ctx, "docker", "ps", "--filter", "label=boks.app="+app, "--format", "{{.Names}}")
+	if err != nil {
+		return nil, err
+	}
+	var live []string
+	for _, line := range strings.Split(out, "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			live = append(live, name)
+		}
+	}
+	return live, nil
+}
+
 // revive restarts the containers that were stopped to make room for a deploy that then failed.
-func revive(ctx context.Context, r remote.Runner, log io.Writer, old []container) {
-	for _, c := range names(old) {
+func revive(ctx context.Context, r remote.Runner, log io.Writer, stopped []string) {
+	for _, c := range stopped {
 		fmt.Fprintf(log, "restart %s (the new version did not come up)\n", c)
 		best(ctx, r, log, "docker", "start", c)
 	}
