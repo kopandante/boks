@@ -114,6 +114,15 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	if err != nil {
 		return err
 	}
+	// The failure path below force-removes the container by name, so that name must not already
+	// belong to an earlier copy: two deploys of one tag within a second would otherwise remove the
+	// very copy that was meant to come back.
+	name := ContainerName(cfg.App, tag, o.Now())
+	for _, c := range names(old) {
+		if c == name {
+			return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
+		}
+	}
 	var stopped []string
 	for _, c := range live {
 		fmt.Fprintf(log, "stop %s\n", c)
@@ -126,7 +135,6 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 			return fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
 		}
 	}
-	name := ContainerName(cfg.App, tag, o.Now())
 	err = start(ctx, r, log, cfg, name, tag, o.Env)
 	if err == nil {
 		err = waitHealthy(ctx, r, log, cfg, name, o.Poll)

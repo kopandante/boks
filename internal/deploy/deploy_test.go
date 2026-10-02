@@ -308,6 +308,21 @@ func TestRoutelessBringsTheOldCopyBackWhenTheNewOneCannotStart(t *testing.T) {
 	}
 }
 
+// Container names carry Unix seconds. A second deploy of the same tag within that second must not
+// start, because its failure cleanup would force-remove the earlier copy by the shared name.
+func TestRoutelessRefusesANameThatAlreadyExists(t *testing.T) {
+	f := routelessFake("unhealthy")
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v2-1700000000\t\n"
+	f.out["docker ps --filter label=boks.app=bot"] = "bot-v2-1700000000\n"
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("want a name-collision refusal, got %v", err)
+	}
+	if f.has("docker stop") || f.has("docker rm") || f.has("docker run") {
+		t.Errorf("nothing may be touched: %v", f.calls)
+	}
+}
+
 // The stop is what keeps two copies from running at once. If it fails, the new copy must not start.
 func TestRoutelessDoesNotStartWhenTheOldCopyWouldNotStop(t *testing.T) {
 	f := routelessFake("healthy")
