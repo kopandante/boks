@@ -52,11 +52,11 @@ type Snapshot struct {
 // be invisible: a deploy that died between switching routes and retiring the old container.
 type Entry struct {
 	Op         string    `json:"op"`
-	Action     string    `json:"action"`
+	Action     string    `json:"action,omitempty"`
 	From       string    `json:"from,omitempty"`
-	To         string    `json:"to"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at,omitempty"`
+	To         string    `json:"to,omitempty"`
+	StartedAt  time.Time `json:"started_at,omitzero"`
+	FinishedAt time.Time `json:"finished_at,omitzero"`
 	Result     string    `json:"result,omitempty"`
 }
 
@@ -141,7 +141,9 @@ func Current(ctx context.Context, r remote.Runner, app string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
-// Previous is the release before the current one, which is what a rollback aims at.
+// Previous is the release before the current one, which is what a rollback aims at. A snapshot
+// newer than current (a deploy that saved it and was cut before moving current) is not "before" it;
+// with no recorded current there is no previous either.
 func Previous(ctx context.Context, r remote.Runner, app string) (string, error) {
 	ids, err := IDs(ctx, r, app)
 	if err != nil {
@@ -151,9 +153,9 @@ func Previous(ctx context.Context, r remote.Runner, app string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	for i := len(ids) - 1; i >= 0; i-- {
-		if ids[i] != current {
-			return ids[i], nil
+	for i, id := range ids {
+		if id == current && i > 0 {
+			return ids[i-1], nil
 		}
 	}
 	return "", nil

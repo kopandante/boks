@@ -603,8 +603,12 @@ func finish(ctx context.Context, r remote.Runner, log io.Writer, app, op, result
 // journal closes last, so an interruption always leaves more evidence rather than less. Any of the
 // three failing is an error, because the caller retires the previous containers only after it.
 func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, op string, env []byte, now time.Time) error {
+	digest, err := digestOf(ctx, r, cfg.Image, tag)
+	if err != nil {
+		return err
+	}
 	snapshot := release.Snapshot{
-		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digestOf(ctx, r, cfg.Image, tag),
+		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
 		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Network: cfg.Network,
 		EnvPath: envFile(cfg.App, name, env), CreatedAt: now,
 	}
@@ -628,15 +632,33 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 
 // digestOf pins what was actually pulled: a tag can be overwritten, a digest cannot, so a rollback
 // aiming at this snapshot gets the same image rather than whatever the tag means by then.
-func digestOf(ctx context.Context, r remote.Runner, image, tag string) string {
-	out, err := r.Run(ctx, "docker", "inspect", "--format", "{{index .RepoDigests 0}}", image+":"+tag)
+// An image that came from no registry has no digest, which is an answer; a failed inspect is not,
+// and fails the recording rather than leave a snapshot that silently lost its image identity.
+func digestOf(ctx context.Context, r remote.Runner, image, tag string) (string, error) {
+	out, err := r.Run(ctx, "docker", "inspect", "--type", "image", "--format", "{{json .RepoDigests}}", image+":"+tag)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("read the digest of %s:%s: %w", image, tag, err)
 	}
-	if _, digest, ok := strings.Cut(strings.TrimSpace(out), "@"); ok {
-		return digest
+	var refs []string
+	if err := json.Unmarshal([]byte(out), &refs); err != nil {
+		return "", fmt.Errorf("read the digest of %s:%s: %w", image, tag, err)
 	}
-	return ""
+	// An image pulled under several names has a digest per repository; this app's is the one a
+	// rollback can pull again.
+	digest := ""
+	for _, ref := range refs {
+		repo, d, ok := strings.Cut(ref, "@")
+		if !ok {
+			continue
+		}
+		if repo == image {
+			return d, nil
+		}
+		if digest == "" {
+			digest = d
+		}
+	}
+	return digest, nil
 }
 
 // envFile is the environment file a release is started with, or "" when it has no environment and

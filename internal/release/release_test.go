@@ -200,3 +200,29 @@ func TestSaveWritesTheFormatVersion(t *testing.T) {
 		t.Errorf("a snapshot must say which format it is: %s", f.writes[".boks/demo/releases/demo-v1-1.json"])
 	}
 }
+
+// A snapshot newer than current is a deploy that saved it and was cut before moving current; it is
+// not the release before current.
+func TestPreviousIsTheOneBeforeCurrent(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-100.json\ndemo-v2-200.json\ndemo-v3-300.json\n"
+	for current, want := range map[string]string{"demo-v2-200": "demo-v1-100", "demo-v1-100": "", "": "", "demo-gone-50": ""} {
+		f.out["sh -c cat '.boks/demo/current'"] = current + "\n"
+		if got, err := Previous(context.Background(), f, "demo"); err != nil || got != want {
+			t.Errorf("current %q: want %q, got %q (%v)", current, want, got, err)
+		}
+	}
+}
+
+// An open line carries no finish time and a closing line no start: the field's absence is the
+// information, so the zero time must not be written.
+func TestJournalLinesCarryOnlyWhatHappened(t *testing.T) {
+	f := newFake()
+	op, _ := Begin(context.Background(), f, "demo", "deploy", "", "new", time.Unix(1700000000, 0))
+	_ = Finish(context.Background(), f, "demo", op, "ok", time.Unix(1700000001, 0))
+	lines := strings.Split(strings.TrimSpace(f.appends[".boks/demo/journal.jsonl"]), "\n")
+	if len(lines) != 2 || strings.Contains(lines[0], "finished_at") || strings.Contains(lines[1], "started_at") ||
+		strings.Contains(lines[1], `"to"`) {
+		t.Errorf("want no zero fields, got %q", lines)
+	}
+}

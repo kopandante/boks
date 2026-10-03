@@ -83,3 +83,28 @@ func TestAppendFailureNamesThePath(t *testing.T) {
 		t.Errorf("want an error naming the path, got %v", err)
 	}
 }
+
+// cut delivers only half of what it is given, the way a connection that drops mid-transfer does:
+// the remote end sees a plain end of input.
+type cut struct{ local }
+
+func (c cut) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	return c.local.Pipe(ctx, content[:len(content)/2], args...)
+}
+
+func TestUploadAtomicKeepsTheOldFileWhenTheTransferIsCut(t *testing.T) {
+	l := local{t.TempDir()}
+	if err := UploadAtomic(context.Background(), l, []byte("demo-v1-100\n"), "current"); err != nil {
+		t.Fatal(err)
+	}
+	err := UploadAtomic(context.Background(), cut{l}, []byte("demo-v2-200\n"), "current")
+	if err == nil || !strings.Contains(err.Error(), "current") {
+		t.Fatalf("want an error naming the file, got %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(l.dir, "current")); string(got) != "demo-v1-100\n" {
+		t.Errorf("a cut transfer must leave the old file whole, got %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(l.dir, "current.tmp")); !os.IsNotExist(err) {
+		t.Errorf("the partial temporary file must be removed: %v", err)
+	}
+}

@@ -32,11 +32,21 @@ type write struct {
 	path, content string
 }
 
-// writeAt is the position of the first write to path whose content contains substr, or -1.
+// writeAt is the number of commands run before the first write to path whose content contains
+// substr, or -1.
 func (f *fake) writeAt(path, substr string) int {
-	for _, w := range f.writes {
+	if i := f.writeIndex(path, substr); i >= 0 {
+		return f.writes[i].at
+	}
+	return -1
+}
+
+// writeIndex is the position of that write among the writes, or -1: consecutive writes have the
+// same writeAt, so their order is told by this.
+func (f *fake) writeIndex(path, substr string) int {
+	for i, w := range f.writes {
 		if w.path == path && strings.Contains(w.content, substr) {
-			return w.at
+			return i
 		}
 	}
 	return -1
@@ -70,10 +80,14 @@ func (f *fake) wrote(path, content string, appended bool) error {
 func newFake() *fake {
 	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{}}
 	f.out[proxyList] = "{}" // what kamal-proxy prints when it holds no services
+	f.out[digests] = "[]"   // an image that came from no registry; tests that need a digest override it
 	return f
 }
 
-const proxyList = "docker exec boks-proxy kamal-proxy list --json"
+const (
+	proxyList = "docker exec boks-proxy kamal-proxy list --json"
+	digests   = "docker inspect --type image"
+)
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
@@ -175,7 +189,7 @@ func TestRunHappyPath(t *testing.T) {
 			"--env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
 		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --tls --health-check-path /up --deploy-timeout 60s",
-		"docker inspect --format {{index .RepoDigests 0}} ghcr.io/x/y:v2",
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
 		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
 		"docker stop demo-v1-1",
 		"docker rm demo-v1-1",
@@ -251,7 +265,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
-		"docker inspect --format {{index .RepoDigests 0}} ghcr.io/x/bot:v2",
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
 		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
 		"docker stop bot-v1-1",
 		"docker rm bot-v1-1",
@@ -1148,7 +1162,7 @@ func TestContainerNameSanitizes(t *testing.T) {
 func TestDeployRecordsWhatItRan(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker inspect --format {{index .RepoDigests 0}}"] = "ghcr.io/x/y@sha256:abc"
+	f.out[digests] = `["mirror.example.com/x/y@sha256:other","ghcr.io/x/y@sha256:abc"]`
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -1250,18 +1264,44 @@ func TestDeployRecordsBeforeItRetires(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
-	snap := f.writeAt(".boks/demo/releases/demo-v2-1700000000.json", "")
-	current := f.writeAt(".boks/demo/current", "")
-	closed := f.writeAt(journal, `"result":"ok"`)
-	retired := f.callAt("docker rm demo-v1-1")
-	if snap < 0 || current < snap || closed < current || retired < closed {
-		t.Errorf("want snapshot <= current <= closed <= retire, got %d %d %d %d", snap, current, closed, retired)
+	snap := f.writeIndex(".boks/demo/releases/demo-v2-1700000000.json", "")
+	current := f.writeIndex(".boks/demo/current", "")
+	closed := f.writeIndex(journal, `"result":"ok"`)
+	if snap < 0 || current <= snap || closed <= current {
+		t.Errorf("want snapshot, then current, then the closing line; got %d %d %d", snap, current, closed)
+	}
+	if retired := f.callAt("docker rm demo-v1-1"); retired < 0 || retired < f.writeAt(journal, `"result":"ok"`) {
+		t.Errorf("the previous container goes only after the release is recorded: %v", f.calls)
 	}
 }
 
 // If the release cannot be written down, the previous containers are the only trace of what ran
 // before it, so they stay and the deploy reports the failure.
 func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
+	t.Run("digest", func(t *testing.T) {
+		f := routedFake(t, nil)
+		f.fail[digests] = errors.New("connection reset")
+		err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+		if err == nil || !strings.Contains(err.Error(), "could not record") || f.has("docker rm demo-v1-1") {
+			t.Fatalf("a snapshot without its digest is not a record: %v %v", err, f.calls)
+		}
+	})
+	t.Run("routeless", func(t *testing.T) {
+		f := routelessFake("healthy")
+		f.pipeFail = func(path, _ string) error {
+			if path == ".boks/bot/current" {
+				return errors.New("disk full")
+			}
+			return nil
+		}
+		err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
+		if err == nil || !strings.Contains(err.Error(), "could not record") || !strings.Contains(err.Error(), "bot-v1-1") {
+			t.Fatalf("want an error naming the kept copy, got %v", err)
+		}
+		if f.has("docker rm bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f bot-v2") {
+			t.Errorf("the old copy stays stopped and the new one runs: %v", f.calls)
+		}
+	})
 	for name, fails := range map[string]func(path, content string) bool{
 		"snapshot": func(path, _ string) bool { return strings.Contains(path, "/releases/") },
 		"current":  func(path, _ string) bool { return path == ".boks/demo/current" },
