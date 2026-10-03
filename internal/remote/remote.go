@@ -44,9 +44,13 @@ func UploadAtomic(ctx context.Context, r Runner, content []byte, remotePath stri
 }
 
 // Append adds a line to a file, creating it if needed. Used for the operation journal, where the
-// order of entries is the information.
+// order of entries is the information. An earlier append cut short (a full disk) can leave the file
+// ending mid-line; the new content then starts on a line of its own instead of being glued to that
+// fragment, which would make a reader skip both.
 func Append(ctx context.Context, r Runner, content []byte, remotePath string) error {
-	script := "umask 077 && mkdir -p " + Quote(path.Dir(remotePath)) + " && cat >> " + Quote(remotePath)
+	q := Quote(remotePath)
+	script := "umask 077 && mkdir -p " + Quote(path.Dir(remotePath)) +
+		" && { if [ -s " + q + " ] && [ -n \"$(tail -c 1 " + q + ")\" ]; then echo >> " + q + "; fi; } && cat >> " + q
 	if _, err := r.Pipe(ctx, content, "sh", "-c", script); err != nil {
 		return fmt.Errorf("append %s: %w", remotePath, err)
 	}

@@ -129,3 +129,74 @@ func TestBeginWritesAnOpenEntry(t *testing.T) {
 		t.Errorf("want an open entry, got %q", line)
 	}
 }
+
+// The tag comes before the time in a release name, so sorting names as text orders them by tag.
+// With git short SHAs the release just deployed can sort first; it must still be the one kept.
+func TestPruneGoesByAgeNotByTag(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-0a1b2c3-400.json\ndemo-c1d2e3f-100.json\ndemo-d4e5f6a-200.json\ndemo-e7f8a9b-300.json\n"
+	if err := Prune(context.Background(), f, "demo", 3); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".boks/demo/releases/demo-c1d2e3f-100.json", ".boks/demo/demo-c1d2e3f-100.env"}
+	if strings.Join(f.removed, " ") != strings.Join(want, " ") {
+		t.Errorf("want only the oldest release and its env removed, got %v", f.removed)
+	}
+}
+
+func TestIDsAreOldestFirstAcrossTags(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v10-300.json\ndemo-v9-200.json\ndemo-v9-100.json\ndemo-v10-300.json.tmp\n"
+	ids, err := IDs(context.Background(), f, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(ids, " ") != "demo-v9-100 demo-v9-200 demo-v10-300" {
+		t.Errorf("want oldest first and no temporary files, got %v", ids)
+	}
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v10-300\n"
+	if prev, _ := Previous(context.Background(), f, "demo"); prev != "demo-v9-200" {
+		t.Errorf("the release before v10 is the newer v9, got %q", prev)
+	}
+}
+
+func TestPruneKeepsEverythingWithinKeep(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
+	if err := Prune(context.Background(), f, "demo", 2); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("nothing beyond keep, nothing removed: %v", f.removed)
+	}
+}
+
+// Several open entries happen when a run is cut and the next one is cut too; the newest is the one
+// that describes the server now.
+func TestUnfinishedPicksTheNewestOpenEntry(t *testing.T) {
+	f := newFake()
+	f.out["sh -c cat '.boks/demo/journal.jsonl'"] = strings.Join([]string{
+		`{"op":"2","action":"deploy","to":"b","started_at":"2026-09-15T11:00:00Z"}`,
+		`{"op":"1","action":"deploy","to":"a","started_at":"2026-09-15T10:00:00Z"}`,
+		`{"op":"3","action":"deploy","to":"c","started_at":"2026-09-15T12:00:00Z"}`,
+		`{"op":"3","result":"abandoned","finished_at":"2026-09-15T13:00:00Z"}`,
+		`{"op":"4","action":"deploy","to":"d","sta`,
+	}, "\n")
+	open, err := Unfinished(context.Background(), f, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if open == nil || open.To != "b" {
+		t.Fatalf("want the newest open entry b, got %+v", open)
+	}
+}
+
+func TestSaveWritesTheFormatVersion(t *testing.T) {
+	f := newFake()
+	if err := Save(context.Background(), f, Snapshot{ID: "demo-v1-1", App: "demo"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.writes[".boks/demo/releases/demo-v1-1.json"], `"version": 1`) {
+		t.Errorf("a snapshot must say which format it is: %s", f.writes[".boks/demo/releases/demo-v1-1.json"])
+	}
+}

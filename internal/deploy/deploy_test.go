@@ -20,6 +20,51 @@ type fake struct {
 	appends map[string]string
 	out     map[string]string
 	fail    map[string]error
+	// writes is every upload and append in order, each with the number of commands run before it,
+	// so a test can tell whether the journal was written before or after a given command.
+	writes []write
+	// pipeFail, when set, decides whether the write of content to path fails.
+	pipeFail func(path, content string) error
+}
+
+type write struct {
+	at            int
+	path, content string
+}
+
+// writeAt is the position of the first write to path whose content contains substr, or -1.
+func (f *fake) writeAt(path, substr string) int {
+	for _, w := range f.writes {
+		if w.path == path && strings.Contains(w.content, substr) {
+			return w.at
+		}
+	}
+	return -1
+}
+
+// callAt is the position of the first command starting with prefix, or -1.
+func (f *fake) callAt(prefix string) int {
+	for i, c := range f.calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (f *fake) wrote(path, content string, appended bool) error {
+	if f.pipeFail != nil {
+		if err := f.pipeFail(path, content); err != nil {
+			return err
+		}
+	}
+	f.writes = append(f.writes, write{at: len(f.calls), path: path, content: content})
+	if appended {
+		f.appends[path] += content
+	} else {
+		f.uploads[path] = content
+	}
+	return nil
 }
 
 func newFake() *fake {
@@ -54,16 +99,13 @@ func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string
 		// the destination is the last quoted token.
 		if _, tail, ok := strings.Cut(args[2], " && mv "); ok {
 			_, dest, _ := strings.Cut(tail, "' '")
-			f.uploads[strings.Trim(dest, "'")] = string(content)
-			return "", nil
+			return "", f.wrote(strings.Trim(dest, "'"), string(content), false)
 		}
 		if _, path, ok := strings.Cut(args[2], "cat > "); ok {
-			f.uploads[strings.Trim(path, "'")] = string(content)
-			return "", nil
+			return "", f.wrote(strings.Trim(path, "'"), string(content), false)
 		}
 		if _, path, ok := strings.Cut(args[2], "cat >> "); ok {
-			f.appends[strings.Trim(path, "'")] += string(content)
-			return "", nil
+			return "", f.wrote(strings.Trim(path, "'"), string(content), true)
 		}
 	}
 	return f.Run(ctx, args...)
@@ -1118,8 +1160,8 @@ func TestDeployRecordsWhatItRan(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &snap); err != nil {
 		t.Fatal(err)
 	}
-	if snap.Digest != "sha256:abc" || snap.Tag != "v2" || len(snap.Ports) != 1 ||
-		len(snap.Volumes) != 1 || snap.EnvPath != ".boks/demo/demo-v2-1700000000.env" {
+	if snap.Version != release.FormatVersion || snap.Digest != "sha256:abc" || snap.Tag != "v2" || len(snap.Ports) != 1 ||
+		len(snap.Volumes) != 1 || !snap.TLS || snap.EnvPath != ".boks/demo/demo-v2-1700000000.env" {
 		t.Errorf("snapshot does not describe the release: %+v", snap)
 	}
 	if f.uploads[".boks/demo/current"] != "demo-v2-1700000000\n" {
@@ -1144,6 +1186,11 @@ func TestDeployWarnsAboutAnOperationThatNeverFinished(t *testing.T) {
 	if !strings.Contains(log.String(), "never finished") {
 		t.Errorf("the interrupted deploy must be reported: %q", log.String())
 	}
+	// Reported once: the entry is closed, or every later deploy would report it again.
+	if !strings.Contains(f.appends[".boks/demo/journal.jsonl"], `{"op":"1",`) ||
+		!strings.Contains(f.appends[".boks/demo/journal.jsonl"], `"result":"abandoned"}`) {
+		t.Errorf("the abandoned entry must be closed: %q", f.appends[".boks/demo/journal.jsonl"])
+	}
 }
 
 func TestFailedSwitchClosesTheJournalEntry(t *testing.T) {
@@ -1155,5 +1202,214 @@ func TestFailedSwitchClosesTheJournalEntry(t *testing.T) {
 	}
 	if !strings.Contains(f.appends[".boks/demo/journal.jsonl"], `"result":"failed"`) {
 		t.Errorf("a failed deploy must be recorded as failed: %q", f.appends[".boks/demo/journal.jsonl"])
+	}
+}
+
+const journal = ".boks/demo/journal.jsonl"
+
+// journalOpen reports a journal with an opened operation and no closing line for it.
+func journalOpen(f *fake, path string) bool {
+	j := f.appends[path]
+	return strings.Contains(j, `"action":"deploy"`) && !strings.Contains(j, `"result"`)
+}
+
+func TestFailedStartClosesTheJournalEntry(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.fail["docker run"] = errors.New("no such image")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(f.appends[journal], `"result":"failed"`) {
+		t.Errorf("a failed start must be recorded as failed: %q", f.appends[journal])
+	}
+}
+
+// A deploy whose routes could not be brought in line is not finished: the entry stays open, and
+// nothing claims the new version is the current release.
+func TestSettleFailureLeavesTheJournalOpen(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+	})
+	f.fail[removeVia] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if !journalOpen(f, journal) {
+		t.Errorf("the entry must stay open: %q", f.appends[journal])
+	}
+	if _, ok := f.uploads[".boks/demo/current"]; ok {
+		t.Errorf("current must not move: %v", f.uploads)
+	}
+}
+
+// The release is written down before the previous containers go, and in the order that leaves more
+// evidence when cut short: snapshot, then current, then the closing line.
+func TestDeployRecordsBeforeItRetires(t *testing.T) {
+	f := routedFake(t, nil)
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	snap := f.writeAt(".boks/demo/releases/demo-v2-1700000000.json", "")
+	current := f.writeAt(".boks/demo/current", "")
+	closed := f.writeAt(journal, `"result":"ok"`)
+	retired := f.callAt("docker rm demo-v1-1")
+	if snap < 0 || current < snap || closed < current || retired < closed {
+		t.Errorf("want snapshot <= current <= closed <= retire, got %d %d %d %d", snap, current, closed, retired)
+	}
+}
+
+// If the release cannot be written down, the previous containers are the only trace of what ran
+// before it, so they stay and the deploy reports the failure.
+func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
+	for name, fails := range map[string]func(path, content string) bool{
+		"snapshot": func(path, _ string) bool { return strings.Contains(path, "/releases/") },
+		"current":  func(path, _ string) bool { return path == ".boks/demo/current" },
+		"journal":  func(path, content string) bool { return path == journal && strings.Contains(content, `"result":"ok"`) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := routedFake(t, nil)
+			f.pipeFail = func(path, content string) error {
+				if fails(path, content) {
+					return errors.New("disk full")
+				}
+				return nil
+			}
+			err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+			if err == nil || !strings.Contains(err.Error(), "could not record") || !strings.Contains(err.Error(), "demo-v1-1") {
+				t.Fatalf("want an error naming the kept container, got %v", err)
+			}
+			if f.has("docker rm demo-v1-1") || f.has("docker stop demo-v1-1") {
+				t.Errorf("the previous container must stay: %v", f.calls)
+			}
+		})
+	}
+}
+
+// A journal that cannot be opened stops the deploy before anything of the app changes.
+func TestDeployDoesNotStartWithoutAJournalEntry(t *testing.T) {
+	for cfg, f := range map[string]*fake{onePort: routedFake(t, nil), noPorts: routelessFake("healthy")} {
+		f.pipeFail = func(path, content string) error {
+			if strings.HasSuffix(path, "journal.jsonl") {
+				return errors.New("read-only file system")
+			}
+			return nil
+		}
+		if err := Run(context.Background(), f, io.Discard, parse(t, cfg), "v2", quick()); err == nil {
+			t.Fatal("want an error")
+		}
+		if f.has("docker run") || f.has("docker stop") || f.has("docker exec boks-proxy kamal-proxy deploy") {
+			t.Errorf("nothing of the app may change: %v", f.calls)
+		}
+	}
+}
+
+// An app without environment gets no env file, so its snapshot must not name one.
+func TestSnapshotNamesNoEnvFileWhenThereIsNone(t *testing.T) {
+	f := routedFake(t, nil)
+	o := fixed
+	o.Env = nil
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/demo-v2-1700000000.json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.EnvPath != "" {
+		t.Errorf("no env file was written, got %q", snap.EnvPath)
+	}
+}
+
+// Hosts covered by a certificate were routed at it; the snapshot keeps which domains those were.
+func TestSnapshotKeepsTheCertificateDomains(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out["docker exec boks-proxy cat /certs/boks/_.example.com.crt"] = "-----BEGIN CERTIFICATE-----"
+	cfg := parse(t, onePort+"cert: {domains: [\"*.example.com\"], dns: cloudflare, email: a@example.com}\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/demo-v2-1700000000.json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.CertDomains) != 1 || snap.CertDomains[0] != "*.example.com" {
+		t.Errorf("want the certificate's domains, got %v", snap.CertDomains)
+	}
+}
+
+const botJournal = ".boks/bot/journal.jsonl"
+
+// Stopping the running copy changes the server, so the entry is open before it.
+func TestRoutelessOpensTheJournalBeforeTheStop(t *testing.T) {
+	f := routelessFake("healthy")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	opened, stopped := f.writeAt(botJournal, `"action":"deploy"`), f.callAt("docker stop bot-v1-1")
+	if opened < 0 || stopped < 0 || opened > stopped {
+		t.Errorf("the entry must be opened before the stop: opened at %d, stop at %d", opened, stopped)
+	}
+	if !strings.Contains(f.appends[botJournal], `"result":"ok"`) || f.uploads[".boks/bot/current"] != "bot-v2-1700000000\n" {
+		t.Errorf("a routeless deploy is recorded too: %q %v", f.appends[botJournal], f.uploads)
+	}
+}
+
+func TestRoutelessFailedStopClosesTheJournalEntry(t *testing.T) {
+	f := routelessFake("healthy")
+	f.fail["docker stop bot-v1-1"] = errors.New("connection reset")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(f.appends[botJournal], `"result":"failed"`) {
+		t.Errorf("a refused stop must be recorded as failed: %q", f.appends[botJournal])
+	}
+}
+
+// The entry closes after the cleanup, so a run cut while the old copy is being brought back stays
+// visibly unfinished.
+func TestRoutelessFailedStartClosesTheJournalAfterTheCleanup(t *testing.T) {
+	for name, f := range map[string]*fake{"unhealthy": routelessFake("unhealthy"), "leftover": routelessFake("unhealthy")} {
+		if name == "leftover" {
+			f.out["docker ps -a --filter name=^bot-v2-1700000000$"] = "bot-v2-1700000000\n"
+		}
+		if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+			t.Fatalf("%s: want an error", name)
+		}
+		closed := f.writeAt(botJournal, `"result":"failed"`)
+		cleaned := f.callAt("docker rm -f bot-v2-1700000000")
+		if name == "unhealthy" {
+			cleaned = f.callAt("docker start bot-v1-1")
+		}
+		if closed < 0 || cleaned < 0 || closed <= cleaned {
+			t.Errorf("%s: the entry must close after the cleanup: closed at %d, cleanup at %d", name, closed, cleaned)
+		}
+	}
+}
+
+func TestRoutelessRouteFailureLeavesTheJournalOpen(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out[proxyList] = listed(t, map[string]proxy.Listed{
+		"bot.web": {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:3000"}},
+	})
+	f.fail[removeVia] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+		t.Fatal("want an error")
+	}
+	if !journalOpen(f, botJournal) {
+		t.Errorf("the entry must stay open: %q", f.appends[botJournal])
+	}
+}
+
+// A refused deploy changed nothing, so it leaves nothing in the journal either.
+func TestRoutelessNameCollisionWritesNoJournal(t *testing.T) {
+	f := routelessFake("unhealthy")
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v2-1700000000\t\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+		t.Fatal("want an error")
+	}
+	if len(f.appends) != 0 {
+		t.Errorf("no journal entry for a refused deploy: %v", f.appends)
 	}
 }
