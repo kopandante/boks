@@ -489,14 +489,21 @@ func TestRunRefusesWhenTheOwnerCheckFails(t *testing.T) {
 }
 
 // A check that cannot run is not a check that passed: the app would start on an empty volume.
+// Each lookup fails on its own, the new name answering first, so neither failure is masked by
+// the other one failing earlier.
 func TestRunRefusesWhenTheVolumeCheckFails(t *testing.T) {
-	f := newFake()
-	f.fail["docker volume ls"] = errors.New("ssh: connection reset")
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
-		t.Fatal("want an error")
-	}
-	if f.has("docker run -d --name demo-") {
-		t.Errorf("the app must not start: %v", f.calls)
+	for _, failing := range []string{
+		"docker volume ls --quiet --filter name=^demo\\.data$",
+		legacyLeft,
+	} {
+		f := newFake()
+		f.fail[failing] = errors.New("ssh: connection reset")
+		if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+			t.Fatalf("%s failing: want an error", failing)
+		}
+		if f.has("docker pull") || f.has("docker network") || f.has("docker run -d") {
+			t.Errorf("%s failing: nothing may happen: %v", failing, f.calls)
+		}
 	}
 }
 
