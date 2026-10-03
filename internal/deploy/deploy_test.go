@@ -413,6 +413,24 @@ func TestRunRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
 	}
 }
 
+// Every volume is checked, not only the first: one that is fine says nothing about the next.
+func TestRunChecksEveryVolumeForDataUnderTheOldName(t *testing.T) {
+	f := newFake()
+	f.out[legacyLeft] = "demo-data"
+	f.out[legacyUse] = "demo-v1-1\tdemo\n"
+	twoVolumes := strings.Replace(onePort, "volumes: [data:/data]", "volumes: [cache:/cache, data:/data]", 1)
+	err := Run(context.Background(), f, io.Discard, parse(t, twoVolumes), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "volume demo-data holds this app's data") {
+		t.Fatalf("want the refusal for the second volume, got %v", err)
+	}
+	if !f.has("docker volume ls --quiet --filter name=^demo-cache$") {
+		t.Errorf("the first volume must have been checked too: %v", f.calls)
+	}
+	if f.has("docker pull") || f.has("docker run -d") || f.has("docker network") {
+		t.Errorf("nothing may happen before the data is moved: %v", f.calls)
+	}
+}
+
 // Once the data has been moved the deploy goes ahead. The volume filter is a regular expression,
 // so the dot has to be escaped: unescaped, this lookup would not be the one that answers.
 func TestRunProceedsOnceTheVolumeWasMoved(t *testing.T) {
