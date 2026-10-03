@@ -731,11 +731,17 @@ func TestRunKeepsSwappedNamesRatherThanLoseAHost(t *testing.T) {
 		"demo.z": {Hosts: []string{"one.example.com"}, Targets: []string{"demo-v1-1:3000"}},
 		"demo.y": {Hosts: []string{"two.example.com"}, Targets: []string{"demo-v1-1:3001"}},
 	})
-	if err := Run(context.Background(), f, io.Discard, parse(t, chainPorts), "v2", fixed); err != nil {
+	var log strings.Builder
+	if err := Run(context.Background(), f, &log, parse(t, chainPorts), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
 	if f.has(removeVia) {
 		t.Errorf("a service that carries a port must not be removed: %v", f.calls)
+	}
+	// The operator is told why the routes keep names the config no longer gives them.
+	if !strings.Contains(log.String(), "warning: port y keeps its route under demo.z") ||
+		!strings.Contains(log.String(), "warning: port z keeps its route under demo.y") {
+		t.Errorf("each swapped port must be reported: %q", log.String())
 	}
 	if !f.has(deployVia+"demo.z --target demo-v2-1700000000:3000 --host one.example.com") ||
 		!f.has(deployVia+"demo.y --target demo-v2-1700000000:3001 --host two.example.com") {
@@ -815,8 +821,12 @@ func TestRoutelessDeploysWhileTheProxyIsStopped(t *testing.T) {
 	f := routelessFake("healthy")
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "exited"
 	f.fail[proxyList] = errors.New("container is not running")
-	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+	var log strings.Builder
+	if err := Run(context.Background(), f, &log, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "warning: the proxy is not running") || !strings.Contains(log.String(), "[bot-v1-1] are kept stopped") {
+		t.Errorf("the operator must be told the routes went unchecked and which copies stay: %q", log.String())
 	}
 	if f.has(proxyList) || f.has("docker start boks-proxy") {
 		t.Errorf("a stopped proxy is neither asked nor started: %v", f.calls)
