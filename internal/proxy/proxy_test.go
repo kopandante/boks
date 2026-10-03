@@ -150,6 +150,39 @@ func TestBootRejectsAnAnswerAfterTheBound(t *testing.T) {
 	}
 }
 
+// hung is a proxy whose answer never comes; only the caller's context ends the call.
+type hung struct{}
+
+func (hung) Run(ctx context.Context, args ...string) (string, error) {
+	switch cmd := strings.Join(args, " "); {
+	case strings.HasPrefix(cmd, "docker ps -a"):
+		return "exited", nil
+	case cmd == answer:
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return "", nil
+}
+
+func (h hung) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
+	return h.Run(ctx, args...)
+}
+
+// The bound reaches the call itself: a call that hangs is cancelled, not waited for.
+func TestBootCancelsACallThatHangs(t *testing.T) {
+	answerWait, answerPoll = 10*time.Millisecond, time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- Boot(context.Background(), hung{}, io.Discard, "boks", "img") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a proxy that never answers must fail Boot")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Boot is still waiting on a call past its bound")
+	}
+}
+
 type said string
 
 func (s said) Run(context.Context, ...string) (string, error)          { return string(s), nil }
