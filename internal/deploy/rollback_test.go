@@ -251,7 +251,7 @@ func TestRollbackToAnExplicitRelease(t *testing.T) {
 	if run >= 0 && !strings.Contains(f.calls[run], "--network boks ") {
 		t.Errorf("want today's network, got %s", f.calls[run])
 	}
-	if !f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1700000000:4000 --host old.example.com") {
+	if !f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1700000000:4000 --host old.example.com --forward-headers=false") {
 		t.Errorf("the route must be the recorded one, port and host: %v", f.calls)
 	}
 	if got := f.uploads[".boks/demo/current"]; got != "demo-v1-1\n" {

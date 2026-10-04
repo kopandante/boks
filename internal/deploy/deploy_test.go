@@ -222,7 +222,7 @@ func TestRunHappyPath(t *testing.T) {
 		// memory check sees it from then on, and the health wait does not hold every other app up.
 		admitGive("demo"),
 		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
-			"--host demo.example.com --tls --health-check-path /up --deploy-timeout 60s",
+			"--host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s",
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
 		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
 		"docker stop demo-v1-1",
@@ -716,12 +716,12 @@ func TestRunTakesOverTheRouteOfAnEarlierNamingScheme(t *testing.T) {
 	// The switch waits for the new container's health; the rename does not wait again, for a
 	// target that has just passed that very check.
 	order := []int{
-		f.at(deployVia + "demo-web --target demo-v2-1700000000:3000 --host demo.example.com --tls --health-check-path /up --deploy-timeout 60s"),
+		f.at(deployVia + "demo-web --target demo-v2-1700000000:3000 --host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s"),
 		f.at(removeVia + "demo-web"),
-		f.at(deployVia + "demo.web --target demo-v2-1700000000:3000 --host demo.example.com --tls --health-check-path /up --deploy-timeout 60s --force"),
+		f.at(deployVia + "demo.web --target demo-v2-1700000000:3000 --host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s --force"),
 		f.at("docker stop demo-v1-1"),
 	}
-	if f.has(deployVia + "demo-web --target demo-v2-1700000000:3000 --host demo.example.com --tls --health-check-path /up --deploy-timeout 60s --force") {
+	if f.has(deployVia + "demo-web --target demo-v2-1700000000:3000 --host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s --force") {
 		t.Errorf("the switch itself must wait for the health check: %v", f.calls)
 	}
 	for i, at := range order {
@@ -755,7 +755,7 @@ func TestRunRestoresARouteWhoseRenameFailed(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	restored := f.at(deployVia + "demo.site --target demo-v2-1700000000:3000 --host demo.example.com --tls --health-check-path /up --deploy-timeout 60s --force")
+	restored := f.at(deployVia + "demo.site --target demo-v2-1700000000:3000 --host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s --force")
 	if restored < 0 || restored < f.at(deployVia+"demo.web") {
 		t.Errorf("the old name must be put back after the failed rename, without waiting for a health check: %v", f.calls)
 	}
@@ -845,7 +845,7 @@ func TestRunRenamesAChainInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	zMoved, yRemoved := f.at(deployVia+"demo.z --target demo-v2-1700000000:3001"), f.at(removeVia+"demo.y")
-	yRenamed := f.at(deployVia + "demo.y --target demo-v2-1700000000:3000 --host one.example.com")
+	yRenamed := f.at(deployVia + "demo.y --target demo-v2-1700000000:3000 --host one.example.com --forward-headers=false")
 	if zMoved < 0 || yRemoved < 0 || yRenamed < 0 || yRemoved > zMoved || zMoved > yRenamed {
 		t.Errorf("want demo.y → demo.z first, then demo.x → demo.y: %v", f.calls)
 	}
@@ -879,8 +879,8 @@ func TestRunKeepsSwappedNamesRatherThanLoseAHost(t *testing.T) {
 		!strings.Contains(log.String(), "warning: port z keeps its route under demo.y") {
 		t.Errorf("each swapped port must be reported: %q", log.String())
 	}
-	if !f.has(deployVia+"demo.z --target demo-v2-1700000000:3000 --host one.example.com") ||
-		!f.has(deployVia+"demo.y --target demo-v2-1700000000:3001 --host two.example.com") {
+	if !f.has(deployVia+"demo.z --target demo-v2-1700000000:3000 --host one.example.com --forward-headers=false") ||
+		!f.has(deployVia+"demo.y --target demo-v2-1700000000:3001 --host two.example.com --forward-headers=false") {
 		t.Errorf("both hosts must reach the new container through the services that hold them: %v", f.calls)
 	}
 }
@@ -928,7 +928,7 @@ func TestRunRevertsARenameChainByHost(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, chainPorts), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	if !f.has(deployVia+"demo.x --target demo-v1-1:3000 --host one.example.com") || f.has(deployVia+"demo.x --target demo-v1-1:3001") {
+	if !f.has(deployVia+"demo.x --target demo-v1-1:3000 --host one.example.com --forward-headers=false") || f.has(deployVia+"demo.x --target demo-v1-1:3001") {
 		t.Errorf("one.example.com must go back to the old x port: %v", f.calls)
 	}
 }
@@ -1064,7 +1064,7 @@ func TestRunRevertsSwitchedRoutesWhenLaterPortFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error")
 	}
-	revert := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	revert := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --forward-headers=false --deploy-timeout 60s"
 	if !f.has(revert) {
 		t.Errorf("web route must be pointed back at the old container, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
@@ -1085,7 +1085,7 @@ func TestRunRevertsToThePortTheOldContainerActuallyListensOn(t *testing.T) {
 		t.Fatal("want error")
 	}
 	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:8080 " +
-		"--host demo.example.com --health-check-path /healthz --deploy-timeout 60s"
+		"--host demo.example.com --forward-headers=false --health-check-path /healthz --deploy-timeout 60s"
 	if !f.has(want) {
 		t.Errorf("revert must use the old container's port and health check, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
@@ -1106,7 +1106,7 @@ func TestRunRevertsWithoutTheLabelUsingTheCurrentConfig(t *testing.T) {
 	if err := Run(context.Background(), f, &log, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
 		t.Fatal("want error")
 	}
-	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --forward-headers=false --deploy-timeout 60s"
 	if !f.has(want) {
 		t.Errorf("route must go back to the old container, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
@@ -1128,7 +1128,7 @@ func TestRunRevertsPortsMissingFromTheLabel(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
 		t.Fatal("want error")
 	}
-	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --deploy-timeout 60s"
+	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --forward-headers=false --deploy-timeout 60s"
 	if !f.has(want) {
 		t.Errorf("an unrecorded port must still be reverted with the config's value, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
