@@ -238,6 +238,8 @@ func TestTheLoginScriptLogsOutWhateverHappens(t *testing.T) {
 		// boks going away closes the connection; nothing else would make a silent pull notice.
 		{name: "connection cut", pull: "hang", act: "cut", status: -1, ran: all},
 		{name: "SIGTERM", pull: "hang", act: "term", status: 143, ran: all},
+		// boks gone while the script waited for the lock: it does not log in once the lock comes.
+		{name: "cut while waiting for the lock", flock: "wait", act: "cut", status: -1},
 		// A user whose docker keeps its config elsewhere has the lock there, beside the credentials.
 		{name: "own docker config", dockerConfig: "conf", status: 0, ran: all},
 	}
@@ -259,8 +261,8 @@ const (
 )
 
 // scriptCase is one outcome of the login script. The stand-ins succeed unless told "fail"; a pull
-// told "hang" sits silent until stopped, and act is what then happens to the script: "cut" closes
-// its connection, "term" signals it.
+// told "hang" sits silent until stopped, a flock told "wait" takes a second, and act is what happens
+// to the script meanwhile: "cut" closes its connection, "term" signals it.
 type scriptCase struct {
 	name                       string
 	flock, login, pull, logout string
@@ -283,6 +285,7 @@ esac
 
 const fakeFlock = `#!/bin/sh
 echo "$*" > "$DIR/flock-args"
+[ "$FLOCK" != wait ] || sleep 1
 [ "$FLOCK" != fail ]
 `
 
@@ -322,9 +325,14 @@ func runScript(t *testing.T, shell string, c scriptCase) {
 	t.Cleanup(func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
 	deadline := time.Now().Add(10 * time.Second)
 	if c.act != "" {
-		for read("pull-pid") == "" {
+		// The moment to act: the pull is running, or, for a lock being waited for, flock is.
+		ready := "pull-pid"
+		if c.flock == "wait" {
+			ready = "flock-args"
+		}
+		for read(ready) == "" {
 			if time.Now().After(deadline) {
-				t.Fatalf("the pull never started; docker ran %q", read("log"))
+				t.Fatalf("%s never appeared; docker ran %q", ready, read("log"))
 			}
 			time.Sleep(20 * time.Millisecond)
 		}

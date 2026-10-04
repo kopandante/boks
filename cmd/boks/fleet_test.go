@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 type recorder struct {
 	server
 	calls []string
+	stdin []string // what each piped command was given, in order
 }
 
 func (r *recorder) Run(ctx context.Context, args ...string) (string, error) {
@@ -22,7 +24,8 @@ func (r *recorder) Run(ctx context.Context, args ...string) (string, error) {
 	return r.server.Run(ctx, args...)
 }
 
-func (r *recorder) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
+func (r *recorder) Pipe(ctx context.Context, stdin []byte, args ...string) (string, error) {
+	r.stdin = append(r.stdin, string(stdin))
 	return r.Run(ctx, args...)
 }
 
@@ -164,5 +167,37 @@ func TestAMissingRegistryTokenReachesNoServer(t *testing.T) {
 	}
 	if len(a.calls)+len(b.calls) != 0 {
 		t.Errorf("no server is reached: %v %v", a.calls, b.calls)
+	}
+}
+
+// The token the environment holds is what deploy and rollback hand to the login on the server:
+// through dispatch, not only through a test that builds the options itself.
+func TestTheRegistryTokenReachesTheLogin(t *testing.T) {
+	const login = "sh -c conf=${DOCKER_CONFIG:-$HOME/.docker}"
+	registry := map[string]string{
+		"docker info --format":             `{"InsecureRegistryCIDRs":["127.0.0.0/8"],"IndexConfigs":{}}`,
+		"getent ahosts":                    "34.1.2.3 STREAM registry.depot.dev",
+		"sh -c out=$(docker image inspect": "absent",
+	}
+	a := botServer("bot-v2-2", "bot-v1-1")
+	for k, v := range registry {
+		a.server[k] = v
+	}
+	a.server["cat .boks/bot/releases/bot-v1-1"] = `{"id":"bot-v1-1","app":"bot","image":"registry.depot.dev/p","tag":"v1","ports":[]}`
+	fleet(t, map[string]*recorder{"a": a}, func() time.Time { return time.Unix(1700000000, 0) })
+	lookup0 := lookupEnv
+	lookupEnv = func(k string) (string, bool) { return "tok", k == "DEPOT_TOKEN" }
+	t.Cleanup(func() { lookupEnv = lookup0 })
+	cfg := parseConfig(t, "app: bot\nimage: registry.depot.dev/p\nservers: [a]\ndeploy_timeout: 2s\n"+
+		"registry: {host: registry.depot.dev, token_env: DEPOT_TOKEN}\n")
+	for _, args := range [][]string{{"deploy", "v2"}, {"rollback"}} {
+		a.calls, a.stdin = nil, nil
+		_ = dispatch(context.Background(), cfg, args, io.Discard) // how the rest of the run goes is not the question
+		if !slices.Contains(a.stdin, "tok") || !a.ran(login) {
+			t.Errorf("%v: the token must reach the login script: %q %v", args, a.stdin, a.calls)
+		}
+		if a.ran("docker pull") {
+			t.Errorf("%v: no pull goes around the login: %v", args, a.calls)
+		}
 	}
 }

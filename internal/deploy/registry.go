@@ -64,6 +64,10 @@ func loginPull(l *Login, ref string) string {
 		"flock -w " + strconv.Itoa(int(registryWait.Seconds())) + " 9 || { echo " +
 		remote.Quote("boks: another pull has held the registry login ("+registryLock+" in the docker config) for over "+
 			registryWait.String()+"; nothing was logged in") + " >&2; exit 1; }\n" +
+		// The lock may have taken minutes, and boks may have gone in the meantime: a run nobody waits
+		// for any more does not log in, nor log out what it never logged in. The same write the
+		// watcher makes, once, before the logout is armed and the token used.
+		"printf . 2>/dev/null || exit 1\n" +
 		"pull= watch=\n" +
 		// A logout that fails leaves the token on the server, which is a failure of the pull even when
 		// the image came: the status says so, unless the pull had already failed and says it first.
