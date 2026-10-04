@@ -115,11 +115,14 @@ func checkMemory(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 	if err != nil || need == 0 {
 		return err
 	}
-	avail, err := memAvailable(ctx, r)
+	// Use first, MemAvailable after it: a container that grows between the two readings is then
+	// counted twice (in what it may still take, measured low, and in MemAvailable, measured after)
+	// rather than not at all.
+	running, err := containerMemory(ctx, r)
 	if err != nil {
 		return fmt.Errorf("preliminary memory check: %w", err)
 	}
-	running, err := containerMemory(ctx, r)
+	avail, err := memAvailable(ctx, r)
 	if err != nil {
 		return fmt.Errorf("preliminary memory check: %w", err)
 	}

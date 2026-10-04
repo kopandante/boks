@@ -241,7 +241,9 @@ func servingStopFirst(ctx context.Context, r remote.Runner, log io.Writer, app, 
 		fmt.Fprintf(log, "warning: could not read how the serving release %s was replaced, so the config decides: %v\n", current, err)
 		return false
 	}
-	return s.Replace == config.ReplaceStopFirst
+	// A version 1 snapshot records no mode, and its shape is what decided it: a release without
+	// ports was always replaced stop-first.
+	return s.Replace == config.ReplaceStopFirst || s.Replace == "" && len(s.Ports) == 0
 }
 
 // replaceOverlap starts the new copy beside the old one and moves the routes to it; the proxy moves
@@ -310,9 +312,16 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	// run at once, which is the one outcome this mode exists to prevent. The entry closes only after
 	// the cleanup, so a run cut during it stays visibly unfinished.
 	if !discard(cleanup, r, log, name) {
-		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
-		return fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
+		left := fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
 			err, name, stopped)
+		if !switching {
+			finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
+			return left
+		}
+		// A route may already point at the copy that could not be removed, so the routes are not where
+		// they were either, and the operation stays open.
+		return fmt.Errorf("%w; routes may still point at %s: once the old copies run again, run `%s` or check `boks proxy list` — "+
+			"the operation stays open in the journal", left, name, l.again)
 	}
 	err = errors.Join(err, revive(cleanup, r, log, stopped))
 	// Until a route switch was attempted, no route changed and the outcome is known.
@@ -878,11 +887,14 @@ func unlock(ctx context.Context, r remote.Runner, log io.Writer, app string) {
 // is left alone.
 func Unlock(ctx context.Context, r remote.Runner, app string) error {
 	freed, admErr := unlockAdmission(ctx, r, app)
+	if admErr != nil {
+		admErr = fmt.Errorf("could not check the admission lock %s: %w", admitLock, admErr)
+	}
 	_, err := r.Run(ctx, "rmdir", lockPath(app))
 	if err != nil && admErr == nil && freed {
 		return nil
 	}
-	return err
+	return errors.Join(err, admErr)
 }
 
 func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabled bool) error {

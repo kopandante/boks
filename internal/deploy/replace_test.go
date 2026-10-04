@@ -419,7 +419,8 @@ func demoReleases(t *testing.T, v1 string) *fake {
 	f.out["docker ps --filter label=boks.app=demo"] = "demo-v2-2\n"
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v2-2\n"
-	f.out["cat .boks/demo/releases/demo-v2-2.json"] = `{"id":"demo-v2-2","previous":"demo-v1-1"}`
+	f.out["cat .boks/demo/releases/demo-v2-2.json"] = `{"version":2,"id":"demo-v2-2","previous":"demo-v1-1","replace":"overlap",
+		"ports":[{"name":"web","port":3000,"host":"demo.example.com","health_path":"/up","health_port":0}]}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = v1
 	return f
 }
@@ -467,5 +468,66 @@ func TestRollbackStopsFirstWhenEitherSideAsks(t *testing.T) {
 		if stopped != c.stopFirst {
 			t.Errorf("%s: want stop-first %v: %v", c.name, c.stopFirst, f.calls)
 		}
+	}
+}
+
+// A version 1 snapshot records no mode, but a release without ports was always replaced stop-first:
+// a worker that gains a port must not run beside its old copy on the first deploy that routes it.
+func TestAServingVersion1WorkerVotesStopFirst(t *testing.T) {
+	f := stopFirstFake(t)
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version":1,"id":"demo-v1-1","ports":[]}`
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.callAt("docker stop demo-v1-1") < 0 || f.callAt("docker stop demo-v1-1") > f.callAt("docker run") {
+		t.Errorf("want the old worker stopped before the new copy starts: %v", f.calls)
+	}
+	g := stopFirstFake(t)
+	g.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	g.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version":1,"id":"demo-v1-1","ports":[{"name":"web","port":3000,"host":"demo.example.com"}]}`
+	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if g.callAt("docker stop demo-v1-1") < g.callAt("docker run") {
+		t.Errorf("a version 1 routed release overlapped, and still does: %v", g.calls)
+	}
+}
+
+// Container use is read before MemAvailable: growth between the two readings is then counted
+// twice rather than not at all.
+func TestTheCheckReadsUseBeforeAvailable(t *testing.T) {
+	f := routedFake(t, nil)
+	f.server(4000, map[string][2]int{"other-v1-1": {512, 10}})
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.callAt(memStats) < 0 || f.callAt(memStats) > f.callAt(memInfo) {
+		t.Errorf("want docker stats before /proc/meminfo: %v", f.calls)
+	}
+}
+
+// An admission lock that could not even be checked is not reported as unlocked.
+func TestUnlockReportsAnAdmissionLockItCouldNotCheck(t *testing.T) {
+	f := newFake()
+	f.fail["sh -c case"] = errors.New("connection reset")
+	if err := Unlock(context.Background(), f, "demo"); err == nil || !strings.Contains(err.Error(), "admission lock") {
+		t.Errorf("want the admission failure reported, got %v", err)
+	}
+}
+
+// When the copy that took a route cannot be confirmed removed, the routes are not where they were:
+// the operation stays open and the error says where they may point.
+func TestStopFirstLeftoverAfterASwitchLeavesTheJournalOpen(t *testing.T) {
+	f := stopFirstFake(t)
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t, webPort, actionsPort) + "\n"
+	f.fail[deployVia+"demo.actions --target "+newCopy] = errors.New("unhealthy")
+	f.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\n"
+	err := Run(context.Background(), f, io.Discard, parse(t, twoPorts+"replace: stop-first\n"), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "routes may still point at "+newCopy) {
+		t.Fatalf("want the routes named, got %v", err)
+	}
+	if !journalOpen(f, journal) {
+		t.Errorf("the entry must stay open: %q", f.appends[journal])
 	}
 }

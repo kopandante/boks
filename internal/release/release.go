@@ -50,8 +50,10 @@ type Snapshot struct {
 	EnvPath     string   `json:"env_path,omitempty"`
 	// Memory is the hard limit the release ran with, in the config's format; empty is none.
 	Memory string `json:"memory,omitempty"`
-	// Replace is the replace mode the release was put in place with — the effective one, so an app
-	// without routes records stop-first. Empty in a version 1 snapshot.
+	// Replace is the replace mode the release itself asks for — its config's, with the shape filled
+	// in, so an app without routes records stop-first. It is not how the release was put in place:
+	// a release deployed over a stop-first one was put in place stop-first and may still record
+	// overlap. Empty in a version 1 snapshot.
 	Replace string `json:"replace,omitempty"`
 	// Previous is the release that was serving when this one was deployed: where a rollback
 	// without an id returns, and what Prune keeps. Empty for a first deploy, and in snapshots
