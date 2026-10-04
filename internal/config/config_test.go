@@ -156,3 +156,68 @@ func TestEnvContentEmpty(t *testing.T) {
 		t.Errorf("want empty, got %q %v", got, err)
 	}
 }
+
+// memory is docker's format narrowed to what cannot be misread, and replace names one of two modes;
+// an app without routes has no handover to overlap, so saying it would is a mistake in the config.
+func TestParseResources(t *testing.T) {
+	const routed = "app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\n"
+	const bot = "app: bot\nimage: x\nservers: [a]\n"
+	rejects := map[string]string{
+		routed + "memory: 512":          "not a memory size", // docker would read bytes
+		routed + "memory: 512mb":        "not a memory size", // a suffix that means different things to different parsers
+		routed + "memory: 1.5g":         "not a memory size", // fractions
+		routed + "memory: -1g":          "not a memory size",
+		routed + "memory: 0m":           "not a memory size",
+		routed + "memory: 5m":           "below docker's minimum",
+		routed + "memory: 99999999999g": "too large",
+		routed + "replace: rolling":     "replace:",
+		bot + "replace: overlap":        "always replaced stop-first",
+	}
+	for in, want := range rejects {
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+	accepts := map[string]int64{"6m": 6 << 20, "512m": 512 << 20, "1g": 1 << 30, "2G": 2 << 30, "65536k": 64 << 20, "8388608b": 8 << 20}
+	for in, bytes := range accepts {
+		cfg, err := Parse([]byte(routed + "memory: " + in))
+		if err != nil {
+			t.Errorf("%s: %v", in, err)
+			continue
+		}
+		if n, _ := MemoryBytes(cfg.Memory); n != bytes {
+			t.Errorf("%s: want %d bytes, got %d", in, bytes, n)
+		}
+	}
+}
+
+func TestReplaceMode(t *testing.T) {
+	cases := map[string]string{
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\n":                      ReplaceOverlap,
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\nreplace: overlap\n":    ReplaceOverlap,
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\nreplace: stop-first\n": ReplaceStopFirst,
+		"app: bot\nimage: x\nservers: [a]\n":                                                             ReplaceStopFirst,
+		"app: bot\nimage: x\nservers: [a]\nreplace: stop-first\n":                                        ReplaceStopFirst,
+	}
+	for in, want := range cases {
+		cfg, err := Parse([]byte(in))
+		if err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		if got := cfg.ReplaceMode(); got != want {
+			t.Errorf("%q: want %s, got %s", in, want, got)
+		}
+	}
+}
+
+// The shipped example is what people copy: it must parse, and Convex on SQLite in it is replaced
+// stop-first.
+func TestTheExampleParses(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "examples", "convex-lab", "boks.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReplaceMode() != ReplaceStopFirst {
+		t.Errorf("convex-lab keeps SQLite on its volume: want stop-first, got %s", cfg.ReplaceMode())
+	}
+}

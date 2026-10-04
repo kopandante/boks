@@ -23,6 +23,7 @@ ports:
     health_port: 3210        # 3211 answers 404 on /, health goes through the API port
     health_path: /version
 tls: true
+replace: stop-first      # Convex keeps its data in SQLite: one writer at a time
 keep: 2
 deploy_timeout: 60s
 cert:

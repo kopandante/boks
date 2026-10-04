@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,9 +22,28 @@ const (
 	DefaultProxyImage    = "basecamp/kamal-proxy:v0.10.0"
 	DefaultKeep          = 3
 	DefaultDeployTimeout = "60s"
+
+	// ReplaceOverlap starts the new copy beside the old one and moves the routes once it is healthy:
+	// no downtime, but for a moment two copies run, on the same volumes.
+	ReplaceOverlap = "overlap"
+	// ReplaceStopFirst stops the old copy before the new one starts, for storage that takes one
+	// writer at a time (SQLite): two copies on one volume could corrupt it. The app is down for the
+	// length of the swap.
+	ReplaceStopFirst = "stop-first"
 )
 
-var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+var (
+	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	// memoryRe is docker's own format narrowed to what cannot be misread: a whole number and a unit.
+	// Docker takes a bare number as bytes, so `memory: 512` would be a 512-byte limit no container
+	// survives; fractions and suffixes like `MB` or `GiB` are left out because they read as one thing
+	// and mean another depending on who parses them.
+	memoryRe = regexp.MustCompile(`^([1-9][0-9]*)([bkmgBKMG])$`)
+)
+
+// minMemory is the smallest limit docker accepts; below it `docker run` refuses, and it is better
+// to hear that from the config than from a half-done deploy.
+const minMemory = 6 << 20
 
 // Port is one published port of the app, routed by kamal-proxy under its own host.
 // The json tags are load-bearing, not decoration: a deploy stores this spec verbatim in the
@@ -63,7 +84,42 @@ type Config struct {
 	TLS           bool              `yaml:"tls"`
 	Keep          int               `yaml:"keep"`
 	DeployTimeout string            `yaml:"deploy_timeout"`
-	Dir           string            `yaml:"-"`
+	// Memory is the container's hard memory limit in docker's format (512m, 1g); empty means none.
+	Memory string `yaml:"memory"`
+	// Replace is how a new version takes over from the old one: ReplaceOverlap or ReplaceStopFirst.
+	// Empty means the default for the app's shape, which ReplaceMode tells.
+	Replace string `yaml:"replace"`
+	Dir     string `yaml:"-"`
+}
+
+// ReplaceMode is how this app's versions take turns. An app without routes has no traffic to hand
+// over, and two copies of a worker would drain one queue twice, so it is always stop-first; an app
+// with routes overlaps unless the config says otherwise.
+func (c *Config) ReplaceMode() string {
+	if len(c.Ports) == 0 || c.Replace == ReplaceStopFirst {
+		return ReplaceStopFirst
+	}
+	return ReplaceOverlap
+}
+
+// MemoryBytes reads a limit written in the format Memory accepts. Empty is no limit, and 0.
+func MemoryBytes(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	m := memoryRe.FindStringSubmatch(s)
+	if m == nil {
+		return 0, fmt.Errorf("%q is not a memory size such as 512m or 1g", s)
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is too large", s)
+	}
+	shift := map[string]uint{"b": 0, "k": 10, "m": 20, "g": 30}[strings.ToLower(m[2])]
+	if n > math.MaxInt64>>shift {
+		return 0, fmt.Errorf("%q is too large", s)
+	}
+	return n << shift, nil
 }
 
 func Load(path string) (*Config, error) {
@@ -158,10 +214,35 @@ func (c *Config) validate() error {
 	if _, err := time.ParseDuration(c.DeployTimeout); err != nil {
 		return fmt.Errorf("deploy_timeout: %q is not a duration such as 60s or 2m", c.DeployTimeout)
 	}
+	if err := c.validateResources(); err != nil {
+		return err
+	}
 	if err := c.Cert.validate(); err != nil {
 		return err
 	}
 	return c.validateLists()
+}
+
+func (c *Config) validateResources() error {
+	n, err := MemoryBytes(c.Memory)
+	if err != nil {
+		return fmt.Errorf("memory: %w", err)
+	}
+	if c.Memory != "" && n < minMemory {
+		return fmt.Errorf("memory: %q is below docker's minimum of 6m", c.Memory)
+	}
+	switch c.Replace {
+	case "", ReplaceStopFirst:
+	case ReplaceOverlap:
+		// Said explicitly, it would promise a handover that cannot happen: without a route there is
+		// no traffic to move, and the old copy is always stopped first.
+		if len(c.Ports) == 0 {
+			return errors.New("replace: overlap needs ports; an app without routes is always replaced stop-first")
+		}
+	default:
+		return fmt.Errorf("replace: %q must be %s or %s", c.Replace, ReplaceOverlap, ReplaceStopFirst)
+	}
+	return nil
 }
 
 func (c *Cert) validate() error {

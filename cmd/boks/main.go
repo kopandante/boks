@@ -27,7 +27,7 @@ const usage = `usage: boks [-f boks.yml] <command>
   releases         releases recorded on each server, newest last
   proxy boot       make sure kamal-proxy is running (idempotent)
   proxy list       routes known to kamal-proxy
-  unlock           clear a stale deploy lock
+  unlock           clear a stale deploy lock, and the server's admission lock if this app left it
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
   cert renew       same, but lego skips the run unless the certificate is due (safe in a cron)
   cert status      subject and expiry of the certificate each server currently serves
