@@ -684,3 +684,61 @@ func TestAdmissionFailsFastWithoutALockInTheWay(t *testing.T) {
 		t.Errorf("must not wait the whole AdmitWait: %s", time.Since(start))
 	}
 }
+
+// Container names are not unique across apps: a container under this run's name that another app
+// labelled is that app's, and a failed start does not remove it.
+func TestAFailedStartLeavesAnotherAppsContainerAlone(t *testing.T) {
+	f := stopFirstFake(t)
+	f.fail["docker run"] = errors.New("Conflict. The container name is already in use")
+	f.out["docker ps -a --filter name=^"+newCopy+"$ --format {{.Names}}\t"] = newCopy + "\tdemo-v2\n"
+	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "already in use") {
+		t.Fatalf("want the start error, got %v", err)
+	}
+	if f.has("docker stop "+newCopy) || f.has("docker rm -f "+newCopy) {
+		t.Errorf("another app's container must be left alone: %v", f.calls)
+	}
+	if !f.has("docker start demo-v1-1") {
+		t.Errorf("this app's old copy comes back: %v", f.calls)
+	}
+}
+
+// An operation that never finished may have left running a release current does not name, so the
+// next replacement stops what runs first rather than trust the recorded mode.
+func TestAnUnfinishedOperationReplacesStopFirst(t *testing.T) {
+	f := stopFirstFake(t)
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = servingOverlap
+	f.out["sh -c cat '.boks/demo/journal.jsonl'"] = `{"op":"1","action":"rollback","to":"demo-v0-1","started_at":"2026-10-01T00:00:00Z"}` + "\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.callAt("docker stop demo-v1-1") < 0 || f.callAt("docker stop demo-v1-1") > f.callAt("docker run") {
+		t.Errorf("want stop-first after an unfinished operation: %v", f.calls)
+	}
+	if !strings.Contains(f.appends[journal], `"result":"abandoned"`) {
+		t.Errorf("the open entry is still closed as abandoned: %q", f.appends[journal])
+	}
+}
+
+// A leftover of this app that cannot be removed is taken back once, then waited for like any lock.
+func TestAnUnremovableLeftoverIsNotRetriedForever(t *testing.T) {
+	f := routedFake(t, nil)
+	f.fail["ln -sn"] = errors.New("File exists")
+	f.out["sh -c readlink /tmp/boks.admit.lock"] = "demo.1699999999000000000"
+	o := fixed
+	o.Poll, o.AdmitWait = time.Millisecond, 20*time.Millisecond
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o)
+	if err == nil || !strings.Contains(err.Error(), "held the admission lock") {
+		t.Fatalf("want the wait to end with the lock named, got %v", err)
+	}
+	tries := 0
+	for _, c := range f.calls {
+		if strings.Contains(c, "'demo.1699999999000000000' ] && rm -f") {
+			tries++
+		}
+	}
+	if tries != 1 {
+		t.Errorf("want one take-back, got %d", tries)
+	}
+}

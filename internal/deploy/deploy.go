@@ -142,6 +142,14 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	stopFirst := cfg.ReplaceMode() == config.ReplaceStopFirst || servingAsks
+	// An operation that never finished may have left running a release that `current` does not
+	// name — one started and serving whose recording failed — and what it asks for is unknown. Stopping
+	// whatever runs is the side that cannot put two writers on one volume.
+	open, _ := release.Unfinished(ctx, r, cfg.App)
+	if open != nil && !stopFirst {
+		fmt.Fprintf(log, "the last %s of %s never finished, so what runs now may not be %q: replacing stop-first\n", open.Action, cfg.App, from)
+		stopFirst = true
+	}
 	var live []string
 	if stopFirst {
 		if live, err = running(ctx, r, cfg.App); err != nil {
@@ -180,7 +188,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := checkMemory(ctx, r, log, cfg, live); err != nil {
 		return fmt.Errorf("%w\nnothing of the app was changed", err)
 	}
-	op, err := beginOperation(ctx, r, log, cfg, l.action, name, from, o.Now())
+	op, err := beginOperation(ctx, r, log, cfg, l.action, name, from, open, o.Now())
 	if err != nil {
 		return err
 	}
@@ -316,7 +324,7 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	// running. The old copy comes back only once the new one is verifiably gone; otherwise both would
 	// run at once, which is the one outcome this mode exists to prevent. The entry closes only after
 	// the cleanup, so a run cut during it stays visibly unfinished.
-	if !discard(cleanup, r, log, name) {
+	if !discard(cleanup, r, log, cfg.App, name) {
 		left := fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
 			err, name, stopped)
 		if !switching {
@@ -370,11 +378,23 @@ func (c container) startedWithoutRoutes() bool {
 
 // discard stops and removes a container and reports whether it is verifiably gone. The stop comes
 // first so the copy shuts down gracefully; `rm -f` makes sure it goes even if the stop did not.
-func discard(ctx context.Context, r remote.Runner, log io.Writer, name string) bool {
+//
+// The name is this run's, but container names are not unique across apps (`a` with tag `b-v1` and
+// `a-b` with tag `v1` share one), so a container under it that another app labelled is that app's:
+// this run's `docker run` lost the name to it and created nothing, and it is left alone.
+func discard(ctx context.Context, r remote.Runner, log io.Writer, app, name string) bool {
+	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}\t{{.Label \"boks.app\"}}")
+	if err != nil {
+		return false
+	}
+	if _, owner, _ := strings.Cut(strings.TrimSpace(out), "\t"); owner != "" && owner != app {
+		fmt.Fprintf(log, "%s belongs to %s, not to this deploy, and is left alone\n", name, owner)
+		return true
+	}
 	fmt.Fprintf(log, "remove %s\n", name)
 	best(ctx, r, log, "docker", "stop", name)
 	best(ctx, r, log, "docker", "rm", "-f", name)
-	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+	out, err = r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
 	return err == nil && strings.TrimSpace(out) == ""
 }
 
@@ -760,11 +780,12 @@ func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, k
 // beginOperation opens the journal entry and, on the way, says whether the previous one was ever
 // closed. A deploy cut between switching routes and recording the release leaves no trace in
 // docker — the journal is the only place that knows.
-// from is the release serving now, which the caller has read.
-func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to, from string, now time.Time) (operation, error) {
+// from is the release serving now and open the operation left unfinished, both read by the caller.
+func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to, from string,
+	open *release.Entry, now time.Time) (operation, error) {
 	// The open entry is closed as abandoned once reported: otherwise every later deploy, however
 	// successful, would report the same interruption again.
-	if open, err := release.Unfinished(ctx, r, cfg.App); err == nil && open != nil {
+	if open != nil {
 		fmt.Fprintf(log, "warning: %s of %s started %s and never finished; this run replaces it\n",
 			open.Action, cfg.App, open.StartedAt.Format(time.RFC3339))
 		finish(ctx, r, log, cfg.App, open.Op, "abandoned", now)

@@ -51,7 +51,7 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		poll = time.Second
 	}
 	deadline := time.Now().Add(wait)
-	waiting, vanished := "", 0
+	waiting, vanished, tookBack := "", 0, false
 	for {
 		_, err := r.Run(ctx, "ln", "-sn", token, admitLock)
 		if err == nil {
@@ -65,9 +65,11 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		owner := ownerApp(strings.TrimSpace(held))
 		// The caller holds this app's deploy lock, so a lock this app holds under another token is
 		// a leftover of an earlier run whose release did not get through: it is taken back.
-		if owner == app {
+		// Once: a leftover that cannot be removed is waited for and named like any other lock.
+		if owner == app && !tookBack {
 			fmt.Fprintf(log, "taking back the admission lock an earlier run of %s left behind\n", app)
 			best(ctx, r, log, "sh", "-c", "[ \"$(readlink "+admitLock+")\" = "+remote.Quote(strings.TrimSpace(held))+" ] && rm -f "+admitLock+" || true")
+			tookBack = true
 			continue
 		}
 		// No lock to wait for, and still `ln` fails: what fails is the server, not a wait, and saying
