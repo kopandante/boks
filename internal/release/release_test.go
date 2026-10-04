@@ -111,7 +111,7 @@ func TestUnfinishedIsNilWhenEverythingClosed(t *testing.T) {
 func TestPruneKeepsTheNewest(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
-	if err := Prune(context.Background(), f, "demo", 2); err != nil {
+	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.removed) != 2 || !strings.Contains(f.removed[0], "demo-v1-1.json") {
@@ -136,7 +136,7 @@ func TestBeginWritesAnOpenEntry(t *testing.T) {
 func TestPruneGoesByAgeNotByTag(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-0a1b2c3-400.json\ndemo-c1d2e3f-100.json\ndemo-d4e5f6a-200.json\ndemo-e7f8a9b-300.json\n"
-	if err := Prune(context.Background(), f, "demo", 3); err != nil {
+	if err := Prune(context.Background(), f, "demo", "", 3); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{".boks/demo/releases/demo-c1d2e3f-100.json", ".boks/demo/demo-c1d2e3f-100.env"}
@@ -165,7 +165,7 @@ func TestIDsAreOldestFirstAcrossTags(t *testing.T) {
 func TestPruneKeepsEverythingWithinKeep(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
-	if err := Prune(context.Background(), f, "demo", 2); err != nil {
+	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.removed) != 0 {
@@ -249,10 +249,9 @@ func TestPreviousIsWhatTheCurrentReleaseWasDeployedOver(t *testing.T) {
 func TestPruneKeepsWhatARollbackReaches(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\ndemo-v4-4.json\n"
-	f.out["sh -c cat '.boks/demo/current'"] = "demo-v4-4\n"
 	f.out["cat .boks/demo/releases/demo-v4-4.json"] = `{"id":"demo-v4-4","previous":"demo-v1-1"}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1"}`
-	if err := Prune(context.Background(), f, "demo", 3); err != nil {
+	if err := Prune(context.Background(), f, "demo", "demo-v4-4", 3); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{".boks/demo/releases/demo-v2-2.json", ".boks/demo/demo-v2-2.env"}

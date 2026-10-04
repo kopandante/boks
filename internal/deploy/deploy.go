@@ -656,10 +656,16 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	if err := serving(ctx, r, cfg.App, name, op.id, now); err != nil {
 		return err
 	}
-	if err := release.Prune(ctx, r, cfg.App, cfg.Keep); err != nil {
+	pruneReleases(ctx, r, log, cfg, name)
+	return nil
+}
+
+// pruneReleases applies keep to the recorded releases once current is id. A failure costs disk,
+// not the operation.
+func pruneReleases(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, id string) {
+	if err := release.Prune(ctx, r, cfg.App, id, cfg.Keep); err != nil {
 		fmt.Fprintf(log, "warning: could not prune old releases: %v\n", err)
 	}
-	return nil
 }
 
 // serving points `current` at release id and closes the operation that put it there, in that order,

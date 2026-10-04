@@ -199,14 +199,10 @@ func predecessor(ctx context.Context, r remote.Runner, app string, ids []string,
 // rollback has happened: after v1, v2, v3, two rollbacks to v1 and a deploy of v4, the newest
 // three are v2, v3 and v4, and pruning by age would delete v1 — the release v4 was deployed over
 // and the one its rollback has to reach. It runs after a deploy succeeds, so the release just
-// recorded is current and always kept.
-func Prune(ctx context.Context, r remote.Runner, app string, keep int) error {
+// recorded is current and always kept; the caller names it, having just written it.
+func Prune(ctx context.Context, r remote.Runner, app, current string, keep int) error {
 	ids, err := IDs(ctx, r, app)
 	if err != nil || len(ids) <= keep {
-		return err
-	}
-	current, err := Current(ctx, r, app)
-	if err != nil {
 		return err
 	}
 	kept := map[string]bool{}

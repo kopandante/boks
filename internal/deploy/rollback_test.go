@@ -270,3 +270,16 @@ func TestRollbackDoesNotMistakeAFailedCheckForAMissingEnv(t *testing.T) {
 		t.Errorf("nothing may change: %v", f.calls)
 	}
 }
+
+// keep applies to the recorded releases after a rollback too, as it did when a rollback was a
+// deploy; the restored release is current, so it is never the one that goes.
+func TestRollbackPrunesReleasesBeyondKeep(t *testing.T) {
+	f := botReleases("healthy")
+	cfg := parse(t, noPorts+"keep: 1\n")
+	if err := Rollback(context.Background(), f, io.Discard, cfg, "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("rm -f .boks/bot/releases/bot-v2-2.json") || f.has("rm -f .boks/bot/releases/bot-v1-1.json") {
+		t.Errorf("want the release left behind pruned and the restored one kept: %v", f.calls)
+	}
+}
