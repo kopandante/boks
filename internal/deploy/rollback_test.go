@@ -20,6 +20,7 @@ func TestRollbackRunsTheRecordedRelease(t *testing.T) {
 		"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1","digest":"sha256:old",
 		"ports":[{"name":"web","port":3000,"host":"demo.example.com","health_path":"/up","health_port":0}],
 		"volumes":["data:/data"],"network":"boks","env_path":".boks/demo/demo-v1-1.env"}`
+	f.out["sh -c test -f"] = "present"
 	if err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +51,6 @@ func TestRollbackRefusesWhenTheReleaseEnvIsGone(t *testing.T) {
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v2-2\n"
 	f.out["cat .boks/demo/releases/demo-v2-2.json"] = `{"id":"demo-v2-2","previous":"demo-v1-1"}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1","env_path":".boks/demo/demo-v1-1.env"}`
-	f.fail["test -f"] = errNotFound
 	err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed)
 	if err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
 		t.Fatalf("want a refusal about the missing environment, got %v", err)
@@ -61,7 +61,7 @@ func TestRollbackRefusesWhenTheReleaseEnvIsGone(t *testing.T) {
 
 	// An app without routes is where it matters most: the running copy would be stopped first.
 	bot := botReleases("healthy")
-	bot.fail["test -f"] = errNotFound
+	delete(bot.out, "sh -c test -f")
 	if err := Rollback(context.Background(), bot, io.Discard, parse(t, noPorts), "", quick()); err == nil {
 		t.Fatal("want a refusal about the missing environment")
 	}
@@ -87,6 +87,7 @@ func botReleases(health string) *fake {
 	f.out["docker ps --filter label=boks.app=bot"] = "bot-v2-2\n"
 	f.out["docker image inspect"] = `["CMD-SHELL","redis-cli ping"]`
 	f.out["docker inspect --format"] = health
+	f.out["sh -c test -f"] = "present"
 	f.out["sh -c ls -1"] = "bot-v1-1.json\nbot-v2-2.json\n"
 	f.out["sh -c cat '.boks/bot/current'"] = "bot-v2-2\n"
 	f.out["cat .boks/bot/releases/bot-v2-2.json"] = `{"id":"bot-v2-2","previous":"bot-v1-1"}`
@@ -180,7 +181,7 @@ func TestRollbackKeepsTheOldCopyWhenCurrentCannotBeMoved(t *testing.T) {
 		return nil
 	}
 	err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick())
-	if err == nil || !strings.Contains(err.Error(), "could not record it") || !strings.Contains(err.Error(), "`boks rollback` again") {
+	if err == nil || !strings.Contains(err.Error(), "could not record it") || !strings.Contains(err.Error(), "`boks rollback bot-v1-1` again") {
 		t.Fatalf("want the unrecorded rollback reported with the rollback to repeat, got %v", err)
 	}
 	if f.has("docker rm bot-v2-2") {
@@ -236,7 +237,7 @@ func TestRollbackToAnExplicitRelease(t *testing.T) {
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v3-3\n"
 	f.out["cat .boks/demo/releases/demo-v3-3.json"] = `{"id":"demo-v3-3","previous":"demo-v2-2"}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1",
-		"digest":"sha256:one","ports":[{"name":"web","port":4000,"host":"old.example.com"}],"volumes":["data:/data"],"network":"boks"}`
+		"digest":"sha256:one","ports":[{"name":"web","port":4000,"host":"old.example.com"}],"volumes":["data:/data"],"network":"legacy"}`
 	cfg := parse(t, strings.Replace(onePort, "volumes: [data:/data]", "volumes: [cache:/cache]", 1))
 	if err := Rollback(context.Background(), f, io.Discard, cfg, "demo-v1-1", fixed); err != nil {
 		t.Fatal(err)
@@ -245,10 +246,27 @@ func TestRollbackToAnExplicitRelease(t *testing.T) {
 	if run < 0 || !strings.HasSuffix(f.calls[run], "-v demo.data:/data ghcr.io/x/y@sha256:one") || strings.Contains(f.calls[run], "cache") {
 		t.Errorf("want release v1 with its own mounts only, got %v", f.calls)
 	}
+	// The network is the server's: the proxy is on today's one, and the routes have to reach it.
+	if run >= 0 && !strings.Contains(f.calls[run], "--network boks ") {
+		t.Errorf("want today's network, got %s", f.calls[run])
+	}
 	if !f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1700000000:4000 --host old.example.com") {
 		t.Errorf("the route must be the recorded one, port and host: %v", f.calls)
 	}
 	if got := f.uploads[".boks/demo/current"]; got != "demo-v1-1\n" {
 		t.Errorf("current must name the release asked for, got %q", got)
+	}
+}
+
+// A connection that drops while asking is not an answer that the file is gone.
+func TestRollbackDoesNotMistakeAFailedCheckForAMissingEnv(t *testing.T) {
+	f := botReleases("healthy")
+	f.fail["sh -c test -f"] = errors.New("connection reset")
+	err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick())
+	if err == nil || strings.Contains(err.Error(), "cannot be reproduced") || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("want the connection failure reported as such, got %v", err)
+	}
+	if f.has("docker") {
+		t.Errorf("nothing may change: %v", f.calls)
 	}
 }

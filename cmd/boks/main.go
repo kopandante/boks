@@ -117,7 +117,7 @@ func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.
 	if err != nil {
 		return err
 	}
-	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Pull: true, Env: env})
+	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Env: env})
 }
 
 func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config) error {

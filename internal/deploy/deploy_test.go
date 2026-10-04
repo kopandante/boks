@@ -135,8 +135,6 @@ func (f *fake) has(prefix string) bool {
 	return false
 }
 
-var errNotFound = errors.New("No such file or directory")
-
 func parse(t *testing.T, yaml string) *config.Config {
 	cfg, err := config.Parse([]byte(yaml))
 	if err != nil {
@@ -165,7 +163,7 @@ ports:
   - {name: actions, port: 3001, host: actions.example.com, health_port: 3000}
 `
 
-var fixed = Options{Pull: true, Env: []byte("SECRET=1\n"), Now: func() time.Time { return time.Unix(1700000000, 0) }}
+var fixed = Options{Env: []byte("SECRET=1\n"), Now: func() time.Time { return time.Unix(1700000000, 0) }}
 
 func TestRunHappyPath(t *testing.T) {
 	f := newFake()
@@ -1137,15 +1135,12 @@ func TestRunDoesNotGuessRevertTargetAmongSeveralOld(t *testing.T) {
 	}
 }
 
-// Pull is an option: a run without it leaves fetching to `docker run`, and no env means no file.
-func TestRunWithoutPullOrEnv(t *testing.T) {
+// No env means no env file.
+func TestRunWithoutEnv(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v1", Options{Now: fixed.Now}); err != nil {
 		t.Fatal(err)
-	}
-	if f.has("docker pull") {
-		t.Errorf("a run without Pull must not pull, calls %v", f.calls)
 	}
 	for _, c := range f.calls {
 		if strings.Contains(c, "--env-file") {

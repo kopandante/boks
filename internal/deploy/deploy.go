@@ -19,9 +19,8 @@ import (
 )
 
 type Options struct {
-	Pull bool
-	Env  []byte
-	Now  func() time.Time
+	Env []byte
+	Now func() time.Time
 	// Poll is how often the health of a routeless app is checked; zero means once a second.
 	Poll time.Duration
 }
@@ -47,7 +46,7 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	}
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
 	return put(ctx, r, log, cfg, launch{
-		action: "deploy", tag: tag, ref: cfg.Image + ":" + tag, pull: o.Pull,
+		action: "deploy", again: "boks deploy " + tag, tag: tag, ref: cfg.Image + ":" + tag, pull: true,
 		start: func(ctx context.Context, name string) error { return start(ctx, r, log, cfg, name, tag, o.Env) },
 		record: func(ctx context.Context, name string, op operation) error {
 			return record(ctx, r, log, cfg, name, tag, op, o.Env, o.Now())
@@ -61,9 +60,12 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 // the certificate and old-volume checks are one machinery, so a fix to it reaches both.
 type launch struct {
 	action string // how the journal names the operation
-	tag    string // the version label, and part of the container's name
-	ref    string // the image docker runs
-	pull   bool
+	// again is the command that repeats exactly this operation, for the advice after a failure:
+	// a plain `boks rollback` run again after `current` moved would go one release further back.
+	again string
+	tag   string // the version label, and part of the container's name
+	ref   string // the image docker runs
+	pull  bool
 	// start runs the container. record writes down that it is now the release serving and closes
 	// the journal entry; the previous containers are retired only once it succeeds.
 	start  func(ctx context.Context, name string) error
@@ -133,10 +135,10 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		}
 	}
 	if err := settle(ctx, r, log, cfg, name, plan, held); err != nil {
-		return keptOld(err, l.action, old)
+		return keptOld(err, l.again, old)
 	}
 	if err := l.record(ctx, name, op); err != nil {
-		return unrecorded(err, l.action, name, old)
+		return unrecorded(err, l.again, name, old)
 	}
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, l.tag)
@@ -146,19 +148,19 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 // unrecorded reports a deploy whose new version is up but could not be written down. Retiring the
 // previous containers would then delete the last trace of what ran before, while the server's
 // memory still names that release as current; they stay until a deploy is recorded.
-func unrecorded(err error, action, name string, old []container) error {
+func unrecorded(err error, again, name string, old []container) error {
 	return fmt.Errorf("the new version %s is up, but boks could not record it: %w\n"+
-		"the previous containers %v were not removed; run the same `boks %s` again to record a release", name, err, names(old), action)
+		"the previous containers %v were not removed; run `%s` again to record a release", name, err, names(old), again)
 }
 
 // keptOld reports a deploy whose new version is up but whose routes could not be brought in line
 // with the config. The previous containers are not retired: a stale route that is still there then
 // reaches a container that still exists, rather than one this deploy deleted.
-func keptOld(err error, action string, old []container) error {
+func keptOld(err error, again string, old []container) error {
 	return fmt.Errorf("the new version is up, but bringing the proxy's routes in line with the config failed: %w\n"+
 		"the previous containers %v were not removed, so no route points at a deleted container — but a route left over may still answer "+
-		"with an error; check `boks proxy list` and run the same `boks %s` again",
-		err, names(old), action)
+		"with an error; check `boks proxy list` and run `%s` again",
+		err, names(old), again)
 }
 
 // runRouteless deploys an app that publishes nothing — a bot, a worker. Two differences from the
@@ -242,7 +244,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		return err
 	}
 	if err := removeExcept(ctx, r, log, stale, nil); err != nil {
-		return keptOld(err, l.action, old)
+		return keptOld(err, l.again, old)
 	}
 	// A route named by an earlier boks is known to be this app's only by its targets, so while the
 	// proxy cannot be asked, the copies that may be such a target stay, stopped, until a deploy can
@@ -264,7 +266,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		}
 	}
 	if err := l.record(ctx, name, op); err != nil {
-		return unrecorded(err, l.action, name, old)
+		return unrecorded(err, l.again, name, old)
 	}
 	retire(ctx, r, log, gone)
 	prune(ctx, r, log, cfg, l.tag)
