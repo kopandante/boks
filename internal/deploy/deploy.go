@@ -82,6 +82,9 @@ type launch struct {
 	tag   string // the version label, and part of the container's name
 	ref   string // the image docker runs
 	pull  bool
+	// stopFirst is a vote for stop-first from outside the release being put in place: today's
+	// config, for a rollback to a release that recorded overlap.
+	stopFirst bool
 	// start runs the container. record writes down that it is now the release serving and closes
 	// the journal entry; the previous containers are retired only once it succeeds.
 	start  func(ctx context.Context, name string) error
@@ -119,7 +122,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		// network has to be made here, or the first deploy on a fresh server cannot start at all.
 		return err
 	}
-	if err := pull(ctx, r, log, l.ref, l.pull); err != nil {
+	if err := pull(ctx, r, log, l.ref, l.pull || missing(ctx, r, l.ref)); err != nil {
 		return err
 	}
 	// Whether the image declares a HEALTHCHECK is known before anything is touched. A deploy that
@@ -134,7 +137,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	// The copies on the server have a say in how they are replaced, and it is read from them, not
 	// from what the journal believes is serving: a release that started and failed to be recorded
 	// still writes its volume. Either side asking for stop-first is enough.
-	stopFirst := cfg.ReplaceMode() == config.ReplaceStopFirst || anyStopFirst(old)
+	stopFirst := cfg.ReplaceMode() == config.ReplaceStopFirst || l.stopFirst || anyStopFirst(old)
 	var live []string
 	if stopFirst {
 		if live, err = running(ctx, r, cfg.App); err != nil {
@@ -352,19 +355,37 @@ func (c container) startedWithoutRoutes() bool {
 // `a-b` with tag `v1` share one), so a container under it that another app labelled is that app's:
 // this run's `docker run` lost the name to it and created nothing, and it is left alone.
 func discard(ctx context.Context, r remote.Runner, log io.Writer, app, name string) bool {
-	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}\t{{.Label \"boks.app\"}}")
+	owner, there, err := nameOwner(ctx, r, name)
 	if err != nil {
 		return false
 	}
-	if _, owner, _ := strings.Cut(strings.TrimSpace(out), "\t"); owner != "" && owner != app {
-		fmt.Fprintf(log, "%s belongs to %s, not to this deploy, and is left alone\n", name, owner)
+	// This run's container always carries this app's label from the moment it exists, so one that
+	// does not was never this run's.
+	if there && owner != app {
+		fmt.Fprintf(log, "%s belongs to %q, not to this deploy, and is left alone\n", name, owner)
 		return true
 	}
 	fmt.Fprintf(log, "remove %s\n", name)
 	best(ctx, r, log, "docker", "stop", name)
 	best(ctx, r, log, "docker", "rm", "-f", name)
-	out, err = r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
-	return err == nil && strings.TrimSpace(out) == ""
+	_, there, err = nameOwner(ctx, r, name)
+	return err == nil && !there
+}
+
+// nameOwner says whether a container is named exactly name and which app labelled it. The name
+// filter is a regular expression and tags keep their dots, so it is quoted, and only the line naming
+// exactly name is read.
+func nameOwner(ctx context.Context, r remote.Runner, name string) (owner string, there bool, err error) {
+	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+regexp.QuoteMeta(name)+"$", "--format", "{{.Names}}\t{{.Label \"boks.app\"}}")
+	if err != nil {
+		return "", false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if n, o, _ := strings.Cut(strings.TrimSpace(line), "\t"); n == name {
+			return strings.TrimSpace(o), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // declaresNoHealthcheck reports whether the image is known to declare no HEALTHCHECK (none at all,
@@ -896,6 +917,14 @@ func Unlock(ctx context.Context, r remote.Runner, app string) error {
 		}
 	}
 	return errors.Join(err, admErr)
+}
+
+// missing reports an image that is not on the server. A rollback runs an image the server is meant
+// to have kept; one that was pruned is fetched before anything is stopped, rather than by `docker
+// run` while a stop-first app is down — or not at all, with the app already down, if the registry is.
+func missing(ctx context.Context, r remote.Runner, ref string) bool {
+	_, err := r.Run(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", ref)
+	return err != nil
 }
 
 func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabled bool) error {

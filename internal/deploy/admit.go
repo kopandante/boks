@@ -68,7 +68,7 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		// Once: a leftover that cannot be removed is waited for and named like any other lock.
 		if owner == app && !tookBack {
 			fmt.Fprintf(log, "taking back the admission lock an earlier run of %s left behind\n", app)
-			best(ctx, r, log, "sh", "-c", "[ \"$(readlink "+admitLock+")\" = "+remote.Quote(strings.TrimSpace(held))+" ] && rm -f "+admitLock+" || true")
+			removeAdmitLock(ctx, r, log, strings.TrimSpace(held))
 			tookBack = true
 			continue
 		}
@@ -114,8 +114,13 @@ func (a *admission) release(ctx context.Context) {
 		return
 	}
 	a.held = false
-	script := "[ \"$(readlink " + admitLock + ")\" = " + remote.Quote(a.token) + " ] && rm -f " + admitLock + " || true"
-	best(context.WithoutCancel(ctx), a.r, a.log, "sh", "-c", script)
+	removeAdmitLock(context.WithoutCancel(ctx), a.r, a.log, a.token)
+}
+
+// removeAdmitLock removes the admission lock if it still holds token, and only then: a lock someone
+// cleared by hand and another run took since is not this run's to remove.
+func removeAdmitLock(ctx context.Context, r remote.Runner, log io.Writer, token string) {
+	best(ctx, r, log, "sh", "-c", "[ \"$(readlink "+admitLock+")\" = "+remote.Quote(token)+" ] && rm -f "+admitLock+" || true")
 }
 
 // unlockAdmission removes the admission lock when app holds it, and reports whether it did.

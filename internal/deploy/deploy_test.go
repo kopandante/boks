@@ -383,7 +383,7 @@ func TestRoutelessRefusesAContainerWithoutHealthcheck(t *testing.T) {
 // copies running at once: the old one stays stopped and the error says so.
 func TestRoutelessKeepsTheOldCopyStoppedWhenTheNewOneWillNotGo(t *testing.T) {
 	f := routelessFake("unhealthy")
-	f.out["docker ps -a --filter name=^bot-v2-1700000000$"] = "bot-v2-1700000000\n"
+	f.out["docker ps -a --filter name=^bot-v2-1700000000$"] = "bot-v2-1700000000\tbot\n"
 	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
 	if err == nil || !strings.Contains(err.Error(), "could not be confirmed removed") {
 		t.Fatalf("want an error naming the leftover copy, got %v", err)
@@ -1471,7 +1471,7 @@ func TestRoutelessFailedStopClosesTheJournalEntry(t *testing.T) {
 func TestRoutelessFailedStartClosesTheJournalAfterTheCleanup(t *testing.T) {
 	for name, f := range map[string]*fake{"unhealthy": routelessFake("unhealthy"), "leftover": routelessFake("unhealthy")} {
 		if name == "leftover" {
-			f.out["docker ps -a --filter name=^bot-v2-1700000000$"] = "bot-v2-1700000000\n"
+			f.out["docker ps -a --filter name=^bot-v2-1700000000$"] = "bot-v2-1700000000\tbot\n"
 		}
 		if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
 			t.Fatalf("%s: want an error", name)

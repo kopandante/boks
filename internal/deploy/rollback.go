@@ -50,14 +50,14 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 	// the config may say that it does now — overlapping on the word of either side alone could put two
 	// writers on one volume. put adds the third voice, the copies running now. A version 1 snapshot
 	// says nothing, and its shape decides.
-	target.Replace = ""
-	if snapshot.Replace == config.ReplaceStopFirst || cfg.ReplaceMode() == config.ReplaceStopFirst {
-		target.Replace = config.ReplaceStopFirst
-	}
+	// The restored copy is labelled with the release's own mode, so the config's vote goes to put
+	// separately rather than into the label.
+	target.Replace = snapshot.Replace
 	// Everything else — stopping an app without routes before its old copy comes back, the route
 	// switch and its revert, the certificate checks — is what a deploy does, by the same code.
 	return put(ctx, r, log, &target, launch{
 		action: "rollback", again: "boks rollback " + id, tag: snapshot.Tag, ref: ref,
+		stopFirst: cfg.ReplaceMode() == config.ReplaceStopFirst,
 		start: func(ctx context.Context, name string) error {
 			return run(ctx, r, log, &target, name, snapshot.Tag, ref, snapshot.EnvPath)
 		},

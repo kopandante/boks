@@ -361,7 +361,7 @@ func TestStopFirstFailedStartClosesTheJournal(t *testing.T) {
 func TestStopFirstKeepsTheOldCopyStoppedWhenTheNewOneWillNotGo(t *testing.T) {
 	f := stopFirstFake(t)
 	f.fail[deployVia+"demo.web --target "+newCopy] = errors.New("unhealthy")
-	f.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\n"
+	f.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\tdemo\n"
 	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "could not be confirmed removed") {
 		t.Fatalf("want the leftover named, got %v", err)
@@ -473,7 +473,7 @@ func TestStopFirstLeftoverAfterASwitchLeavesTheJournalOpen(t *testing.T) {
 	f := stopFirstFake(t)
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t, webPort, actionsPort) + "\n"
 	f.fail[deployVia+"demo.actions --target "+newCopy] = errors.New("unhealthy")
-	f.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\n"
+	f.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\tdemo\n"
 	err := Run(context.Background(), f, io.Discard, parse(t, twoPorts+"replace: stop-first\n"), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "routes may still point at "+newCopy) {
 		t.Fatalf("want the routes named, got %v", err)
@@ -696,5 +696,75 @@ func TestAnUnlabelledCopyIsJudgedByItsShape(t *testing.T) {
 	}
 	if g.callAt("docker stop demo-v1-1") < g.callAt("docker run") {
 		t.Errorf("an unlabelled routed copy overlaps, as it did: %v", g.calls)
+	}
+}
+
+// Tags keep their dots, and the name filter is a regular expression: the dot is quoted, and only the
+// line naming exactly this run's container counts — a lookalike of another app is neither this run's
+// copy nor proof that it is still there.
+func TestDiscardReadsExactlyItsOwnName(t *testing.T) {
+	const query = `docker ps -a --filter name=^bot-v1\.0-1700000000$`
+	f := routelessFake("unhealthy")
+	f.out[query] = "bot-v1-0-1700000000\tbot-v1\nbot-v1.0-1700000000\tbot\n"
+	f.onRun = func(cmd string) {
+		if cmd == "docker rm -f bot-v1.0-1700000000" {
+			f.out[query] = "bot-v1-0-1700000000\tbot-v1\n"
+		}
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v1.0", quick()); err == nil {
+		t.Fatal("want the health failure")
+	}
+	if !f.has("docker rm -f bot-v1.0-1700000000") {
+		t.Errorf("this run's own copy is removed, whatever line it is on: %v", f.calls)
+	}
+	if !f.has(query) {
+		t.Errorf("the dot of the tag must be quoted in the name filter: %v", f.calls)
+	}
+	if !f.has("docker start bot-v1-1") {
+		t.Errorf("a lookalike of another app does not keep the old copy down: %v", f.calls)
+	}
+
+	g := routelessFake("unhealthy")
+	g.out["docker ps -a --filter name=^bot-v2-1700000000$"] = "bot-v2-1700000000\t\n" // made by hand, no label
+	if err := Run(context.Background(), g, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+		t.Fatal("want the health failure")
+	}
+	if g.has("docker rm -f bot-v2-1700000000") {
+		t.Errorf("a container this app never labelled is not removed: %v", g.calls)
+	}
+}
+
+// A rollback whose image was pruned fetches it before anything stops, not while the app is down.
+func TestRollbackFetchesAMissingImageBeforeTheStop(t *testing.T) {
+	f := demoReleases(t, `{`+v1Release+`,"digest":"sha256:old","replace":"stop-first"}`)
+	f.fail["docker image inspect --format {{.Id}}"] = errors.New("No such image")
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	pulled, stopped := f.callAt("docker pull ghcr.io/x/y@sha256:old"), f.callAt("docker stop demo-v2-2")
+	if pulled < 0 || stopped < 0 || pulled > stopped {
+		t.Errorf("want the pull before the stop: %d %d %v", pulled, stopped, f.calls)
+	}
+	g := demoReleases(t, `{`+v1Release+`,"digest":"sha256:old"}`)
+	if err := Rollback(context.Background(), g, io.Discard, parse(t, onePort), "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if g.has("docker pull") {
+		t.Errorf("an image still on the server is not pulled again: %v", g.calls)
+	}
+}
+
+// Today's config asking for stop-first makes the rollback stop first, but the restored copy carries
+// the mode its own release asked for: the config's vote is not baked into the label.
+func TestRollbackLabelsTheReleasesOwnMode(t *testing.T) {
+	f := demoReleases(t, `{`+v1Release+`,"replace":"overlap"}`)
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, stopFirst), "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.callAt("docker stop demo-v2-2") < 0 || f.callAt("docker stop demo-v2-2") > f.callAt("docker run") {
+		t.Errorf("want stop-first: %v", f.calls)
+	}
+	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, "--label boks.replace=overlap") {
+		t.Errorf("want the release's own mode on the label: %s", run)
 	}
 }
