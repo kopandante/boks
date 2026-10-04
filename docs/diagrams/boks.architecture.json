@@ -44,7 +44,7 @@
       "id": "agent",
       "type": "frontend",
       "label": "LLM-агент",
-      "sublabel": "через MCP",
+      "sublabel": "через CLI",
       "pos": [
         40,
         320
@@ -213,7 +213,7 @@
       "id": "agent-api",
       "from": "agent",
       "to": "boksd",
-      "label": "MCP → HTTPS + mTLS",
+      "label": "CLI → HTTPS + mTLS",
       "labelDy": 26,
       "fromSide": "right",
       "toSide": "left",
@@ -257,7 +257,7 @@
       "id": "reload",
       "from": "certs",
       "to": "proxy",
-      "label": "перечитывает только при рестарте",
+      "label": "перечитывает при deploy или рестарте",
       "variant": "security",
       "fromSide": "top",
       "toSide": "bottom"
@@ -302,7 +302,7 @@
       "dot": "rose",
       "title": "Ещё не построено",
       "items": [
-        "boksd, MCP, UI и команда install — решения от 15.09.2026, кода нет",
+        "boksd, UI, --json и команда install — решения от 15.09.2026, кода нет",
         "Продление на сервере требует DNS-токена, который принимают с этого сервера"
       ]
     }
