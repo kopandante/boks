@@ -15,7 +15,7 @@ func TestDeployArgs(t *testing.T) {
 		TLS: true, HealthPath: "/version", HealthPort: 3210, Timeout: "60s",
 	}), " ")
 	want := "docker exec boks-proxy kamal-proxy deploy demo.actions --target demo-v2-1:3211 " +
-		"--host actions.example.com --tls --health-check-path /version --health-check-port 3210 --deploy-timeout 60s"
+		"--host actions.example.com --forward-headers=false --tls --health-check-path /version --health-check-port 3210 --deploy-timeout 60s"
 	if got != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
@@ -26,7 +26,7 @@ func TestDeployArgsWithManualCertificate(t *testing.T) {
 		Name: "a-web", Target: "a-1:80", Host: "a.example.com", TLS: true,
 		CertPath: "/certs/boks/_.example.com.crt", KeyPath: "/certs/boks/_.example.com.key",
 	}), " ")
-	want := "docker exec boks-proxy kamal-proxy deploy a-web --target a-1:80 --host a.example.com --tls " +
+	want := "docker exec boks-proxy kamal-proxy deploy a-web --target a-1:80 --host a.example.com --forward-headers=false --tls " +
 		"--tls-certificate-path /certs/boks/_.example.com.crt --tls-private-key-path /certs/boks/_.example.com.key"
 	if got != want {
 		t.Errorf("got  %s\nwant %s", got, want)
@@ -35,7 +35,7 @@ func TestDeployArgsWithManualCertificate(t *testing.T) {
 
 func TestDeployArgsMinimal(t *testing.T) {
 	got := strings.Join(DeployArgs(Service{Name: "a-web", Target: "a-1:80", Host: "a.example.com"}), " ")
-	if got != "docker exec boks-proxy kamal-proxy deploy a-web --target a-1:80 --host a.example.com" {
+	if got != "docker exec boks-proxy kamal-proxy deploy a-web --target a-1:80 --host a.example.com --forward-headers=false" {
 		t.Errorf("got %s", got)
 	}
 }

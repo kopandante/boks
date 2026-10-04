@@ -93,9 +93,18 @@ func Remove(ctx context.Context, r remote.Runner, service string) error {
 	return err
 }
 
+// NoForwardHeaders makes kamal-proxy overwrite X-Forwarded-For with the connection's address, and
+// X-Forwarded-Proto and -Host with the request's own scheme and host, instead of keeping what the
+// visitor sent. kamal-proxy keeps them by default on a route without TLS, and apps take the first
+// XFF address as the visitor's, so a forged header would slip past bans and IP-bound tokens.
+// Nothing trusted stands in front of boks, so every route gets it, with TLS or without. Every
+// deploy of a route passes the flag anew: kamal-proxy does not carry options over from the route
+// it replaces.
+const NoForwardHeaders = "--forward-headers=false"
+
 func DeployArgs(s Service) []string {
 	a := []string{"docker", "exec", Container, "kamal-proxy", "deploy", s.Name,
-		"--target", s.Target, "--host", s.Host}
+		"--target", s.Target, "--host", s.Host, NoForwardHeaders}
 	if s.TLS {
 		a = append(a, "--tls")
 	}
