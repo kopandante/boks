@@ -572,7 +572,7 @@ func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, k
 }
 
 // beginOperation opens the journal entry and, on the way, says whether the previous one was ever
-// closed. A deploy cut between switching routes and retiring the old container leaves no trace in
+// closed. A deploy cut between switching routes and recording the release leaves no trace in
 // docker — the journal is the only place that knows.
 func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to string, now time.Time) (string, error) {
 	// The open entry is closed as abandoned once reported: otherwise every later deploy, however

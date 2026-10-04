@@ -49,7 +49,7 @@ type Snapshot struct {
 }
 
 // Entry is one line of the operation journal. Started without Finished is the state that used to
-// be invisible: a deploy that died between switching routes and retiring the old container.
+// be invisible: a deploy that died between switching routes and recording the release.
 type Entry struct {
 	Op         string    `json:"op"`
 	Action     string    `json:"action,omitempty"`
@@ -141,7 +141,7 @@ func Current(ctx context.Context, r remote.Runner, app string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
-// Previous is the release before the current one, which is what a rollback aims at. A snapshot
+// Previous is the release recorded just before the current one, in deploy order. A snapshot
 // newer than current (a deploy that saved it and was cut before moving current) is not "before" it;
 // with no recorded current there is no previous either.
 func Previous(ctx context.Context, r remote.Runner, app string) (string, error) {

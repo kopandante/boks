@@ -19,7 +19,7 @@ func (s server) Run(_ context.Context, args ...string) (string, error) {
 			return out, nil
 		}
 	}
-	if args[0] == "cat" {
+	if args[0] == "cat" || s["fail"] != "" && strings.Contains(cmd, s["fail"]) {
 		return "", errors.New("no such file")
 	}
 	return "", nil
@@ -52,5 +52,15 @@ func TestReleasesShowsWhatTheServerRemembers(t *testing.T) {
 	}
 	if !strings.Contains(lines[3], "! deploy started 2026-09-15T12:00:00Z and never finished") {
 		t.Errorf("the open operation must be shown, got %q", lines[3])
+	}
+}
+
+// The journal is the only place an interrupted operation shows; failing to read it is not a clean
+// history.
+func TestReleasesSaysWhenTheJournalCannotBeRead(t *testing.T) {
+	s := server{"fail": "journal.jsonl"}
+	err := releases(context.Background(), s, &strings.Builder{}, &config.Config{App: "demo"})
+	if err == nil || !strings.Contains(err.Error(), "journal") {
+		t.Errorf("want an error about the journal, got %v", err)
 	}
 }

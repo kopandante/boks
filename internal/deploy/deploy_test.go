@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1174,8 +1175,12 @@ func TestDeployRecordsWhatItRan(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &snap); err != nil {
 		t.Fatal(err)
 	}
-	if snap.Version != release.FormatVersion || snap.Digest != "sha256:abc" || snap.Tag != "v2" || len(snap.Ports) != 1 ||
-		len(snap.Volumes) != 1 || !snap.TLS || snap.EnvPath != ".boks/demo/demo-v2-1700000000.env" {
+	cfg := parse(t, onePort)
+	if snap.Version != release.FormatVersion || snap.ID != "demo-v2-1700000000" || snap.App != "demo" ||
+		snap.Image != "ghcr.io/x/y" || snap.Digest != "sha256:abc" || snap.Tag != "v2" ||
+		!reflect.DeepEqual(snap.Ports, cfg.Ports) || !reflect.DeepEqual(snap.Volumes, cfg.Volumes) ||
+		snap.Network != cfg.Network || !snap.TLS || !snap.CreatedAt.Equal(time.Unix(1700000000, 0)) ||
+		snap.EnvPath != ".boks/demo/demo-v2-1700000000.env" {
 		t.Errorf("snapshot does not describe the release: %+v", snap)
 	}
 	if f.uploads[".boks/demo/current"] != "demo-v2-1700000000\n" {
@@ -1451,5 +1456,26 @@ func TestRoutelessNameCollisionWritesNoJournal(t *testing.T) {
 	}
 	if len(f.appends) != 0 {
 		t.Errorf("no journal entry for a refused deploy: %v", f.appends)
+	}
+}
+
+// The opening line names the release being replaced, which is what a later run needs to say what
+// was serving; and a current pointer that cannot be read stops the deploy before it changes anything.
+func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.appends[journal], `"from":"demo-v1-1","to":"demo-v2-1700000000"`) {
+		t.Errorf("want the replaced release in the opening line: %q", f.appends[journal])
+	}
+	f = routedFake(t, nil)
+	f.fail["sh -c cat '.boks/demo/current'"] = errors.New("connection reset")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if f.has("docker run") || len(f.appends) != 0 {
+		t.Errorf("nothing may change: %v %v", f.calls, f.appends)
 	}
 }

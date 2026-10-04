@@ -150,7 +150,13 @@ func releases(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.C
 		}
 		fmt.Fprintf(out, "%s %s  %s  %s  %s\n", mark, id, s.Tag, s.Digest, s.CreatedAt.Format(time.RFC3339))
 	}
-	if open, err := release.Unfinished(ctx, r, cfg.App); err == nil && open != nil {
+	// This is the only place an interrupted operation is visible, so a journal that cannot be read
+	// is said out loud rather than shown as a clean history.
+	open, err := release.Unfinished(ctx, r, cfg.App)
+	if err != nil {
+		return fmt.Errorf("the operation journal could not be read: %w", err)
+	}
+	if open != nil {
 		fmt.Fprintf(out, "  ! %s started %s and never finished\n", open.Action, open.StartedAt.Format(time.RFC3339))
 	}
 	return nil
