@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,36 @@ func Upload(ctx context.Context, r Runner, content []byte, remotePath string) er
 		"umask 077 && mkdir -p "+Quote(path.Dir(remotePath))+" && cat > "+Quote(remotePath))
 	if err != nil {
 		return fmt.Errorf("upload %s: %w", remotePath, err)
+	}
+	return nil
+}
+
+// UploadAtomic writes content so that a reader never sees a partial file: the bytes land in a
+// neighbouring temporary file and are moved into place with rename, which is atomic within a
+// filesystem. A half-written release snapshot would be worse than a missing one — rollback would
+// run something that never existed. The rename also waits for the byte count: a connection that
+// drops mid-transfer ends `cat` with a plain end of input, which it reports as success.
+func UploadAtomic(ctx context.Context, r Runner, content []byte, remotePath string) error {
+	tmp := Quote(remotePath + ".tmp")
+	script := "umask 077 && mkdir -p " + Quote(path.Dir(remotePath)) + " && cat > " + tmp +
+		" && { [ $(($(wc -c < " + tmp + "))) -eq " + strconv.Itoa(len(content)) + " ] || { rm -f " + tmp + "; exit 1; }; }" +
+		" && mv " + tmp + " " + Quote(remotePath)
+	if _, err := r.Pipe(ctx, content, "sh", "-c", script); err != nil {
+		return fmt.Errorf("write %s: %w", remotePath, err)
+	}
+	return nil
+}
+
+// Append adds a line to a file, creating it if needed. Used for the operation journal, where the
+// order of entries is the information. An earlier append cut short (a full disk) can leave the file
+// ending mid-line; the new content then starts on a line of its own instead of being glued to that
+// fragment, which would make a reader skip both.
+func Append(ctx context.Context, r Runner, content []byte, remotePath string) error {
+	q := Quote(remotePath)
+	script := "umask 077 && mkdir -p " + Quote(path.Dir(remotePath)) +
+		" && { if [ -s " + q + " ] && [ -n \"$(tail -c 1 " + q + ")\" ]; then echo >> " + q + "; fi; } && cat >> " + q
+	if _, err := r.Pipe(ctx, content, "sh", "-c", script); err != nil {
+		return fmt.Errorf("append %s: %w", remotePath, err)
 	}
 	return nil
 }

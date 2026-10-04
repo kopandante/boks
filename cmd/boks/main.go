@@ -13,6 +13,7 @@ import (
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/deploy"
 	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -21,6 +22,7 @@ const usage = `usage: boks [-f boks.yml] <command>
   deploy <tag>     pull image:<tag>, start it, switch the proxy, retire the previous version
   rollback <tag>   same as deploy without an explicit pull (docker still fetches a missing image)
   ps               containers and proxy routes of this app on every server
+  releases         releases recorded on each server, newest last
   proxy boot       make sure kamal-proxy is running (idempotent)
   proxy list       routes known to kamal-proxy
   unlock           clear a stale deploy lock
@@ -73,6 +75,8 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return runDeploy(ctx, r, out, cfg, rest[0], cmd == "deploy")
 		})
+	case "releases":
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return releases(ctx, r, out, cfg) })
 	case "ps":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return ps(ctx, r, out, cfg) })
 	case "proxy":
@@ -120,6 +124,41 @@ func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config)
 		return err
 	}
 	fmt.Fprintln(out, routes)
+	return nil
+}
+
+// releases shows what the server remembers, which is the only way to see that a deploy was
+// recorded — and the only place an interrupted operation is visible at all.
+func releases(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config) error {
+	ids, err := release.IDs(ctx, r, cfg.App)
+	if err != nil {
+		return err
+	}
+	current, err := release.Current(ctx, r, cfg.App)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		s, err := release.Load(ctx, r, cfg.App, id)
+		if err != nil {
+			fmt.Fprintf(out, "  %s (unreadable: %v)\n", id, err)
+			continue
+		}
+		mark := " "
+		if id == current {
+			mark = "*"
+		}
+		fmt.Fprintf(out, "%s %s  %s  %s  %s\n", mark, id, s.Tag, s.Digest, s.CreatedAt.Format(time.RFC3339))
+	}
+	// This is the only place an interrupted operation is visible, so a journal that cannot be read
+	// is said out loud rather than shown as a clean history.
+	open, err := release.Unfinished(ctx, r, cfg.App)
+	if err != nil {
+		return fmt.Errorf("the operation journal could not be read: %w", err)
+	}
+	if open != nil {
+		fmt.Fprintf(out, "  ! %s started %s and never finished\n", open.Action, open.StartedAt.Format(time.RFC3339))
+	}
 	return nil
 }
 

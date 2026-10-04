@@ -14,6 +14,7 @@ import (
 	"github.com/kopandante/boks/internal/cert"
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -80,13 +81,22 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	name := ContainerName(cfg.App, tag, o.Now())
+	op, err := beginOperation(ctx, r, log, cfg, "deploy", name, o.Now())
+	if err != nil {
+		return err
+	}
 	if err := start(ctx, r, log, cfg, name, tag, o.Env); err != nil {
+		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 		return err
 	}
 	switched, err := switchProxy(ctx, r, log, cfg, name, plan)
 	if err != nil {
 		revert(ctx, r, log, cfg, plan, switched, old)
-		return fmt.Errorf("%w\nnew container %s is left running for inspection; see the revert/warning lines above for where traffic goes now", err, name)
+		// The entry stays open: a command that failed may still have switched its route on the
+		// proxy (the connection can drop after the proxy acted), so how this ended is not known,
+		// and the journal is what tells the next run that an operation never finished.
+		return fmt.Errorf("%w\nnew container %s is left running for inspection; the route that failed may still have switched to it, "+
+			"so see the revert/warning lines above and `boks proxy list` for where traffic goes now — the operation stays open in the journal", err, name)
 	}
 	// Routing a host at a certificate path makes the proxy read that file, so the deploy is a
 	// load: record it, or `cert status` will keep claiming a reload is owed.
@@ -98,9 +108,20 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := settle(ctx, r, log, cfg, name, plan, held); err != nil {
 		return keptOld(err, old)
 	}
+	if err := record(ctx, r, log, cfg, name, tag, op, o.Env, o.Now()); err != nil {
+		return unrecorded(err, name, old)
+	}
 	retire(ctx, r, log, names(old))
 	prune(ctx, r, log, cfg, tag)
 	return nil
+}
+
+// unrecorded reports a deploy whose new version is up but could not be written down. Retiring the
+// previous containers would then delete the last trace of what ran before, while the server's
+// memory still names that release as current; they stay until a deploy is recorded.
+func unrecorded(err error, name string, old []container) error {
+	return fmt.Errorf("the new version %s is up, but boks could not record it: %w\n"+
+		"the previous containers %v were not removed; deploy again to record a release", name, err, names(old))
 }
 
 // keptOld reports a deploy whose new version is up but whose routes could not be brought in line
@@ -159,6 +180,10 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 			return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
 		}
 	}
+	op, err := beginOperation(ctx, r, log, cfg, "deploy", name, o.Now())
+	if err != nil {
+		return err
+	}
 	var stopped []string
 	for _, c := range live {
 		fmt.Fprintf(log, "stop %s\n", c)
@@ -168,6 +193,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		stopped = append(stopped, c)
 		if _, err := r.Run(ctx, "docker", "stop", c); err != nil {
 			revive(ctx, r, log, stopped)
+			finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 			return fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
 		}
 	}
@@ -179,11 +205,14 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		// A failed `docker run` may still have created the container, and a failed stop may have
 		// left it running. The old copy comes back only once the new one is verifiably gone;
 		// otherwise both would run at once, which is the one outcome this path exists to prevent.
+		// The entry closes only after the cleanup, so a run cut during it stays visibly unfinished.
 		if !discard(ctx, r, log, name) {
+			finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 			return fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
 				err, name, stopped)
 		}
 		revive(ctx, r, log, stopped)
+		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 		return err
 	}
 	if err := removeExcept(ctx, r, log, stale, nil); err != nil {
@@ -207,6 +236,9 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 			fmt.Fprintf(log, "warning: the proxy is not running, so this app's old routes there were not checked; "+
 				"%v are kept stopped until a deploy can check them\n", kept)
 		}
+	}
+	if err := record(ctx, r, log, cfg, name, tag, op, o.Env, o.Now()); err != nil {
+		return unrecorded(err, name, old)
 	}
 	retire(ctx, r, log, gone)
 	prune(ctx, r, log, cfg, tag)
@@ -542,6 +574,105 @@ func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, k
 	return nil
 }
 
+// beginOperation opens the journal entry and, on the way, says whether the previous one was ever
+// closed. A deploy cut between switching routes and recording the release leaves no trace in
+// docker — the journal is the only place that knows.
+func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to string, now time.Time) (string, error) {
+	// The open entry is closed as abandoned once reported: otherwise every later deploy, however
+	// successful, would report the same interruption again.
+	if open, err := release.Unfinished(ctx, r, cfg.App); err == nil && open != nil {
+		fmt.Fprintf(log, "warning: %s of %s started %s and never finished; this run replaces it\n",
+			open.Action, cfg.App, open.StartedAt.Format(time.RFC3339))
+		finish(ctx, r, log, cfg.App, open.Op, "abandoned", now)
+	}
+	from, err := release.Current(ctx, r, cfg.App)
+	if err != nil {
+		return "", err
+	}
+	return release.Begin(ctx, r, cfg.App, action, from, to, now)
+}
+
+func finish(ctx context.Context, r remote.Runner, log io.Writer, app, op, result string, now time.Time) {
+	if op == "" {
+		return
+	}
+	if err := release.Finish(context.WithoutCancel(ctx), r, app, op, result, now); err != nil {
+		fmt.Fprintf(log, "warning: could not close the journal entry: %v\n", err)
+	}
+}
+
+// record writes what this release actually is, points `current` at it and closes the operation.
+// The order is deliberate: the snapshot exists before anything claims to be current, and the
+// journal closes last, so an interruption always leaves more evidence rather than less. Any of the
+// three failing is an error, because the caller retires the previous containers only after it.
+func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, op string, env []byte, now time.Time) error {
+	digest, err := digestOf(ctx, r, cfg.Image, tag)
+	if err != nil {
+		return err
+	}
+	snapshot := release.Snapshot{
+		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
+		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Network: cfg.Network,
+		EnvPath: envFile(cfg.App, name, env), CreatedAt: now,
+	}
+	if cfg.Cert != nil {
+		snapshot.CertDomains = cfg.Cert.Domains
+	}
+	if err := release.Save(ctx, r, snapshot); err != nil {
+		return err
+	}
+	if err := release.SetCurrent(ctx, r, cfg.App, name); err != nil {
+		return fmt.Errorf("mark %s as current: %w", name, err)
+	}
+	if err := release.Finish(context.WithoutCancel(ctx), r, cfg.App, op, "ok", now); err != nil {
+		return fmt.Errorf("close the journal entry: %w", err)
+	}
+	if err := release.Prune(ctx, r, cfg.App, cfg.Keep); err != nil {
+		fmt.Fprintf(log, "warning: could not prune old releases: %v\n", err)
+	}
+	return nil
+}
+
+// digestOf pins what was actually pulled: a tag can be overwritten, a digest cannot, so a rollback
+// aiming at this snapshot gets the same image rather than whatever the tag means by then.
+// An image that came from no registry has no digest, which is an answer; a failed inspect is not,
+// and fails the recording rather than leave a snapshot that silently lost its image identity.
+func digestOf(ctx context.Context, r remote.Runner, image, tag string) (string, error) {
+	out, err := r.Run(ctx, "docker", "inspect", "--type", "image", "--format", "{{json .RepoDigests}}", image+":"+tag)
+	if err != nil {
+		return "", fmt.Errorf("read the digest of %s:%s: %w", image, tag, err)
+	}
+	var refs []string
+	if err := json.Unmarshal([]byte(out), &refs); err != nil {
+		return "", fmt.Errorf("read the digest of %s:%s: %w", image, tag, err)
+	}
+	// An image pulled under several names has a digest per repository; this app's is the one a
+	// rollback can pull again.
+	digest := ""
+	for _, ref := range refs {
+		repo, d, ok := strings.Cut(ref, "@")
+		if !ok {
+			continue
+		}
+		if repo == image {
+			return d, nil
+		}
+		if digest == "" {
+			digest = d
+		}
+	}
+	return digest, nil
+}
+
+// envFile is the environment file a release is started with, or "" when it has no environment and
+// so no file is written: the snapshot must not name a file that never existed.
+func envFile(app, name string, env []byte) string {
+	if len(env) == 0 {
+		return ""
+	}
+	return release.EnvPath(app, name)
+}
+
 func lock(ctx context.Context, r remote.Runner, app string) error {
 	if _, err := r.Run(ctx, "mkdir", lockPath(app)); err != nil {
 		return fmt.Errorf("another deploy of %s seems to be in progress (run `boks unlock` to clear %s)", app, lockPath(app))
@@ -634,9 +765,8 @@ func parsePorts(label string) map[string]config.Port {
 }
 
 func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag string, env []byte) error {
-	envPath := ""
-	if len(env) > 0 {
-		envPath = fmt.Sprintf(".boks/%s/%s.env", cfg.App, name)
+	envPath := envFile(cfg.App, name, env)
+	if envPath != "" {
 		if err := remote.Upload(ctx, r, env, envPath); err != nil {
 			return err
 		}

@@ -5,28 +5,90 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/release"
 )
 
 type fake struct {
 	calls   []string
 	uploads map[string]string
+	appends map[string]string
 	out     map[string]string
 	fail    map[string]error
+	// writes is every upload and append in order, each with the number of commands run before it,
+	// so a test can tell whether the journal was written before or after a given command.
+	writes []write
+	// pipeFail, when set, decides whether the write of content to path fails.
+	pipeFail func(path, content string) error
+}
+
+type write struct {
+	at            int
+	path, content string
+}
+
+// writeAt is the number of commands run before the first write to path whose content contains
+// substr, or -1.
+func (f *fake) writeAt(path, substr string) int {
+	if i := f.writeIndex(path, substr); i >= 0 {
+		return f.writes[i].at
+	}
+	return -1
+}
+
+// writeIndex is the position of that write among the writes, or -1: consecutive writes have the
+// same writeAt, so their order is told by this.
+func (f *fake) writeIndex(path, substr string) int {
+	for i, w := range f.writes {
+		if w.path == path && strings.Contains(w.content, substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+// callAt is the position of the first command starting with prefix, or -1.
+func (f *fake) callAt(prefix string) int {
+	for i, c := range f.calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (f *fake) wrote(path, content string, appended bool) error {
+	if f.pipeFail != nil {
+		if err := f.pipeFail(path, content); err != nil {
+			return err
+		}
+	}
+	f.writes = append(f.writes, write{at: len(f.calls), path: path, content: content})
+	if appended {
+		f.appends[path] += content
+	} else {
+		f.uploads[path] = content
+	}
+	return nil
 }
 
 func newFake() *fake {
-	f := &fake{uploads: map[string]string{}, out: map[string]string{}, fail: map[string]error{}}
+	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{}}
 	f.out[proxyList] = "{}" // what kamal-proxy prints when it holds no services
+	f.out[digests] = "[]"   // an image that came from no registry; tests that need a digest override it
 	return f
 }
 
-const proxyList = "docker exec boks-proxy kamal-proxy list --json"
+const (
+	proxyList = "docker exec boks-proxy kamal-proxy list --json"
+	digests   = "docker inspect --type image"
+)
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
@@ -48,9 +110,17 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 // `sh -c '... cat > <path>'`, so the path is the last quoted token of the script.
 func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
 	if len(args) == 3 && args[0] == "sh" {
+		// An atomic write ends in `mv <tmp> <path>`; a plain one ends in `cat > <path>`. Either way
+		// the destination is the last quoted token.
+		if _, tail, ok := strings.Cut(args[2], " && mv "); ok {
+			_, dest, _ := strings.Cut(tail, "' '")
+			return "", f.wrote(strings.Trim(dest, "'"), string(content), false)
+		}
 		if _, path, ok := strings.Cut(args[2], "cat > "); ok {
-			f.uploads[strings.Trim(path, "'")] = string(content)
-			return "", nil
+			return "", f.wrote(strings.Trim(path, "'"), string(content), false)
+		}
+		if _, path, ok := strings.Cut(args[2], "cat >> "); ok {
+			return "", f.wrote(strings.Trim(path, "'"), string(content), true)
 		}
 	}
 	return f.Run(ctx, args...)
@@ -112,12 +182,16 @@ func TestRunHappyPath(t *testing.T) {
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		proxyList,
+		"sh -c cat '.boks/demo/journal.jsonl' 2>/dev/null || true",
+		"sh -c cat '.boks/demo/current' 2>/dev/null || true",
 		"docker run -d --name demo-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
 			"--env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
 		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --tls --health-check-path /up --deploy-timeout 60s",
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
+		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
 		"docker stop demo-v1-1",
 		"docker rm demo-v1-1",
 		"docker images ghcr.io/x/y --format {{.Tag}} {{.ID}}",
@@ -183,11 +257,17 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
 		proxyProbe,
+		// The journal entry is opened before the first change on the server, and stopping the
+		// running copy is one: a run cut right after the stop must leave a trace.
+		"sh -c cat '.boks/bot/journal.jsonl' 2>/dev/null || true",
+		"sh -c cat '.boks/bot/current' 2>/dev/null || true",
 		"docker stop bot-v1-1",
 		"docker run -d --name bot-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
+		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
 		"docker stop bot-v1-1",
 		"docker rm bot-v1-1",
 		"docker images ghcr.io/x/bot --format {{.Tag}} {{.ID}}",
@@ -1075,5 +1155,361 @@ func TestContainerNameSanitizes(t *testing.T) {
 	got := ContainerName("app", "sha:ab/12", time.Unix(5, 0))
 	if got != "app-sha-ab-12-5" {
 		t.Errorf("got %s", got)
+	}
+}
+
+// The snapshot is what rollback will run, so it has to hold the release rather than point at a
+// config that may since have changed.
+func TestDeployRecordsWhatItRan(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out[digests] = `["mirror.example.com/x/y@sha256:other","ghcr.io/x/y@sha256:abc"]`
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	body, ok := f.uploads[".boks/demo/releases/demo-v2-1700000000.json"]
+	if !ok {
+		t.Fatalf("no snapshot written: %v", f.uploads)
+	}
+	if err := json.Unmarshal([]byte(body), &snap); err != nil {
+		t.Fatal(err)
+	}
+	cfg := parse(t, onePort)
+	if snap.Version != release.FormatVersion || snap.ID != "demo-v2-1700000000" || snap.App != "demo" ||
+		snap.Image != "ghcr.io/x/y" || snap.Digest != "sha256:abc" || snap.Tag != "v2" ||
+		!reflect.DeepEqual(snap.Ports, cfg.Ports) || !reflect.DeepEqual(snap.Volumes, cfg.Volumes) ||
+		snap.Network != cfg.Network || !snap.TLS || !snap.CreatedAt.Equal(time.Unix(1700000000, 0)) ||
+		snap.EnvPath != ".boks/demo/demo-v2-1700000000.env" {
+		t.Errorf("snapshot does not describe the release: %+v", snap)
+	}
+	if f.uploads[".boks/demo/current"] != "demo-v2-1700000000\n" {
+		t.Errorf("current not moved: %q", f.uploads[".boks/demo/current"])
+	}
+	if !strings.Contains(f.appends[".boks/demo/journal.jsonl"], `"result":"ok"`) {
+		t.Errorf("journal not closed: %q", f.appends[".boks/demo/journal.jsonl"])
+	}
+}
+
+// A deploy that died between switching routes and retiring the old container leaves no trace in
+// docker. The journal is the only place that knows, and the next run has to say so.
+func TestDeployWarnsAboutAnOperationThatNeverFinished(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["sh -c cat '.boks/demo/journal.jsonl'"] =
+		`{"op":"1","action":"deploy","to":"demo-v1-1","started_at":"2026-09-15T10:00:00Z"}`
+	var log strings.Builder
+	if err := Run(context.Background(), f, &log, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "never finished") {
+		t.Errorf("the interrupted deploy must be reported: %q", log.String())
+	}
+	// Reported once: the entry is closed, or every later deploy would report it again.
+	if !strings.Contains(f.appends[".boks/demo/journal.jsonl"], `{"op":"1",`) ||
+		!strings.Contains(f.appends[".boks/demo/journal.jsonl"], `"result":"abandoned"}`) {
+		t.Errorf("the abandoned entry must be closed: %q", f.appends[".boks/demo/journal.jsonl"])
+	}
+}
+
+// A switch that returned an error may still have happened on the proxy — the connection can drop
+// after kamal-proxy acted. Its outcome is unknown, so the entry stays open: `boks releases` and the
+// next deploy are what show it.
+func TestFailedSwitchLeavesTheJournalOpen(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.fail["docker exec boks-proxy kamal-proxy deploy"] = errors.New("connection reset")
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "may still have switched") {
+		t.Fatalf("want an error saying the route may have switched, got %v", err)
+	}
+	opened := f.appends[".boks/demo/journal.jsonl"]
+	if !strings.Contains(opened, `"action":"deploy"`) || strings.Contains(opened, `"result"`) {
+		t.Fatalf("the entry must stay open: %q", opened)
+	}
+	// The next deploy reads that journal: it reports the operation and closes it as abandoned.
+	next := newFake()
+	next.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	next.out["sh -c cat '.boks/demo/journal.jsonl'"] = opened
+	var log strings.Builder
+	if err := Run(context.Background(), next, &log, parse(t, onePort), "v3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "never finished") || !strings.Contains(next.appends[".boks/demo/journal.jsonl"], `"result":"abandoned"`) {
+		t.Errorf("the next deploy must report the open operation: %q / %q", log.String(), next.appends[".boks/demo/journal.jsonl"])
+	}
+}
+
+const journal = ".boks/demo/journal.jsonl"
+
+// journalOpen reports a journal with an opened operation and no closing line for it.
+func journalOpen(f *fake, path string) bool {
+	j := f.appends[path]
+	return strings.Contains(j, `"action":"deploy"`) && !strings.Contains(j, `"result"`)
+}
+
+func TestFailedStartClosesTheJournalEntry(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.fail["docker run"] = errors.New("no such image")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(f.appends[journal], `"result":"failed"`) {
+		t.Errorf("a failed start must be recorded as failed: %q", f.appends[journal])
+	}
+}
+
+// A deploy whose routes could not be brought in line is not finished: the entry stays open, and
+// nothing claims the new version is the current release.
+func TestSettleFailureLeavesTheJournalOpen(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{
+		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+	})
+	f.fail[removeVia] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if !journalOpen(f, journal) {
+		t.Errorf("the entry must stay open: %q", f.appends[journal])
+	}
+	if _, ok := f.uploads[".boks/demo/current"]; ok {
+		t.Errorf("current must not move: %v", f.uploads)
+	}
+}
+
+// The release is written down before the previous containers go, and in the order that leaves more
+// evidence when cut short: snapshot, then current, then the closing line.
+func TestDeployRecordsBeforeItRetires(t *testing.T) {
+	f := routedFake(t, nil)
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	snap := f.writeIndex(".boks/demo/releases/demo-v2-1700000000.json", "")
+	current := f.writeIndex(".boks/demo/current", "")
+	closed := f.writeIndex(journal, `"result":"ok"`)
+	if snap < 0 || current <= snap || closed <= current {
+		t.Errorf("want snapshot, then current, then the closing line; got %d %d %d", snap, current, closed)
+	}
+	if retired := f.callAt("docker rm demo-v1-1"); retired < 0 || retired < f.writeAt(journal, `"result":"ok"`) {
+		t.Errorf("the previous container goes only after the release is recorded: %v", f.calls)
+	}
+}
+
+// If the release cannot be written down, the previous containers are the only trace of what ran
+// before it, so they stay and the deploy reports the failure.
+func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
+	t.Run("digest", func(t *testing.T) {
+		f := routedFake(t, nil)
+		f.fail[digests] = errors.New("connection reset")
+		err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+		if err == nil || !strings.Contains(err.Error(), "could not record") || f.has("docker rm demo-v1-1") {
+			t.Fatalf("a snapshot without its digest is not a record: %v %v", err, f.calls)
+		}
+	})
+	t.Run("routeless", func(t *testing.T) {
+		f := routelessFake("healthy")
+		f.pipeFail = func(path, _ string) error {
+			if path == ".boks/bot/current" {
+				return errors.New("disk full")
+			}
+			return nil
+		}
+		err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
+		if err == nil || !strings.Contains(err.Error(), "could not record") || !strings.Contains(err.Error(), "bot-v1-1") {
+			t.Fatalf("want an error naming the kept copy, got %v", err)
+		}
+		if f.has("docker rm bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f bot-v2") {
+			t.Errorf("the old copy stays stopped and the new one runs: %v", f.calls)
+		}
+	})
+	for name, fails := range map[string]func(path, content string) bool{
+		"snapshot": func(path, _ string) bool { return strings.Contains(path, "/releases/") },
+		"current":  func(path, _ string) bool { return path == ".boks/demo/current" },
+		"journal":  func(path, content string) bool { return path == journal && strings.Contains(content, `"result":"ok"`) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := routedFake(t, nil)
+			f.pipeFail = func(path, content string) error {
+				if fails(path, content) {
+					return errors.New("disk full")
+				}
+				return nil
+			}
+			err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+			if err == nil || !strings.Contains(err.Error(), "could not record") || !strings.Contains(err.Error(), "demo-v1-1") {
+				t.Fatalf("want an error naming the kept container, got %v", err)
+			}
+			if f.has("docker rm demo-v1-1") || f.has("docker stop demo-v1-1") {
+				t.Errorf("the previous container must stay: %v", f.calls)
+			}
+		})
+	}
+}
+
+// A journal that cannot be opened stops the deploy before anything of the app changes.
+func TestDeployDoesNotStartWithoutAJournalEntry(t *testing.T) {
+	for cfg, f := range map[string]*fake{onePort: routedFake(t, nil), noPorts: routelessFake("healthy")} {
+		f.pipeFail = func(path, content string) error {
+			if strings.HasSuffix(path, "journal.jsonl") {
+				return errors.New("read-only file system")
+			}
+			return nil
+		}
+		if err := Run(context.Background(), f, io.Discard, parse(t, cfg), "v2", quick()); err == nil {
+			t.Fatal("want an error")
+		}
+		if f.has("docker run") || f.has("docker stop") || f.has("docker exec boks-proxy kamal-proxy deploy") {
+			t.Errorf("nothing of the app may change: %v", f.calls)
+		}
+	}
+}
+
+// An app without environment gets no env file, so its snapshot must not name one.
+func TestSnapshotNamesNoEnvFileWhenThereIsNone(t *testing.T) {
+	f := routedFake(t, nil)
+	o := fixed
+	o.Env = nil
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/demo-v2-1700000000.json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.EnvPath != "" {
+		t.Errorf("no env file was written, got %q", snap.EnvPath)
+	}
+}
+
+// Hosts covered by a certificate were routed at it; the snapshot keeps which domains those were.
+func TestSnapshotKeepsTheCertificateDomains(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out["docker exec boks-proxy cat /certs/boks/_.example.com.crt"] = "-----BEGIN CERTIFICATE-----"
+	cfg := parse(t, onePort+"cert: {domains: [\"*.example.com\"], dns: cloudflare, email: a@example.com}\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/demo-v2-1700000000.json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.CertDomains) != 1 || snap.CertDomains[0] != "*.example.com" {
+		t.Errorf("want the certificate's domains, got %v", snap.CertDomains)
+	}
+}
+
+const botJournal = ".boks/bot/journal.jsonl"
+
+// Stopping the running copy changes the server, so the entry is open before it.
+func TestRoutelessOpensTheJournalBeforeTheStop(t *testing.T) {
+	f := routelessFake("healthy")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	opened, stopped := f.writeAt(botJournal, `"action":"deploy"`), f.callAt("docker stop bot-v1-1")
+	if opened < 0 || stopped < 0 || opened > stopped {
+		t.Errorf("the entry must be opened before the stop: opened at %d, stop at %d", opened, stopped)
+	}
+	if !strings.Contains(f.appends[botJournal], `"result":"ok"`) || f.uploads[".boks/bot/current"] != "bot-v2-1700000000\n" {
+		t.Errorf("a routeless deploy is recorded too: %q %v", f.appends[botJournal], f.uploads)
+	}
+}
+
+func TestRoutelessFailedStopClosesTheJournalEntry(t *testing.T) {
+	f := routelessFake("healthy")
+	f.fail["docker stop bot-v1-1"] = errors.New("connection reset")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(f.appends[botJournal], `"result":"failed"`) {
+		t.Errorf("a refused stop must be recorded as failed: %q", f.appends[botJournal])
+	}
+}
+
+// The entry closes after the cleanup, so a run cut while the old copy is being brought back stays
+// visibly unfinished.
+func TestRoutelessFailedStartClosesTheJournalAfterTheCleanup(t *testing.T) {
+	for name, f := range map[string]*fake{"unhealthy": routelessFake("unhealthy"), "leftover": routelessFake("unhealthy")} {
+		if name == "leftover" {
+			f.out["docker ps -a --filter name=^bot-v2-1700000000$"] = "bot-v2-1700000000\n"
+		}
+		if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+			t.Fatalf("%s: want an error", name)
+		}
+		closed := f.writeAt(botJournal, `"result":"failed"`)
+		cleaned := f.callAt("docker rm -f bot-v2-1700000000")
+		if name == "unhealthy" {
+			cleaned = f.callAt("docker start bot-v1-1")
+		}
+		if closed < 0 || cleaned < 0 || closed <= cleaned {
+			t.Errorf("%s: the entry must close after the cleanup: closed at %d, cleanup at %d", name, closed, cleaned)
+		}
+	}
+}
+
+func TestRoutelessRouteFailureLeavesTheJournalOpen(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out[proxyList] = listed(t, map[string]proxy.Listed{
+		"bot.web": {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:3000"}},
+	})
+	f.fail[removeVia] = errors.New("boom")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+		t.Fatal("want an error")
+	}
+	if !journalOpen(f, botJournal) {
+		t.Errorf("the entry must stay open: %q", f.appends[botJournal])
+	}
+}
+
+// A refused deploy changed nothing, so it leaves nothing in the journal either.
+func TestRoutelessNameCollisionWritesNoJournal(t *testing.T) {
+	f := routelessFake("unhealthy")
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v2-1700000000\t\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
+		t.Fatal("want an error")
+	}
+	if len(f.appends) != 0 {
+		t.Errorf("no journal entry for a refused deploy: %v", f.appends)
+	}
+}
+
+// The opening line names the release being replaced, which is what a later run needs to say what
+// was serving; and a current pointer that cannot be read stops the deploy before it changes anything.
+func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.appends[journal], `"from":"demo-v1-1","to":"demo-v2-1700000000"`) {
+		t.Errorf("want the replaced release in the opening line: %q", f.appends[journal])
+	}
+	f = routedFake(t, nil)
+	f.fail["sh -c cat '.boks/demo/current'"] = errors.New("connection reset")
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if f.has("docker run") || len(f.appends) != 0 {
+		t.Errorf("nothing may change: %v %v", f.calls, f.appends)
+	}
+}
+
+// A Docker Hub image configured by its short name is recorded under its canonical repository; the
+// digest is still the one to keep, not dropped because the names differ.
+func TestSnapshotKeepsTheDigestOfAShortImageName(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out[digests] = `["docker.io/library/redis@sha256:abc"]`
+	cfg := parse(t, strings.Replace(onePort, "image: ghcr.io/x/y", "image: redis", 1))
+	if err := Run(context.Background(), f, io.Discard, cfg, "7", fixed); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/demo-7-1700000000.json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.Digest != "sha256:abc" {
+		t.Errorf("want the canonical repository's digest, got %q", snap.Digest)
 	}
 }
