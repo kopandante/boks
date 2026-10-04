@@ -851,3 +851,21 @@ func TestStopFirstDoesNotRevertOntoACopyThatStayedDown(t *testing.T) {
 		t.Errorf("no route goes back to a copy that is not running: %v", f.calls)
 	}
 }
+
+// A copy whose state could not be read after its restart may well be back, so its routes are still
+// sent to it; only one docker says is not running is skipped.
+func TestStopFirstRevertsOntoACopyOfUnknownState(t *testing.T) {
+	f := stopFirstFake(t)
+	f.fail[deployVia+"demo.web --target "+newCopy] = errors.New("unhealthy")
+	f.onRun = func(cmd string) {
+		if cmd == "docker start demo-v1-1" {
+			f.fail[isRunningQuery+"demo-v1-1"] = errors.New("connection reset")
+		}
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err == nil {
+		t.Fatal("want an error")
+	}
+	if !f.has(deployVia + "demo.web --target demo-v1-1:3000") {
+		t.Errorf("the route goes back to a copy that may be up: %v", f.calls)
+	}
+}

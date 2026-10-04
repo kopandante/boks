@@ -308,8 +308,8 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 		return fmt.Errorf("%w; routes may still point at %s: once the old copies run again, run `%s` or check `boks proxy list` — "+
 			"the operation stays open in the journal", left, name, l.again)
 	}
-	back := revive(cleanup, r, log, stopped)
-	err = errors.Join(err, back)
+	dead, revived := reviveAll(cleanup, r, log, stopped)
+	err = errors.Join(err, revived)
 	// Until a route switch was attempted, no route changed and the outcome is known.
 	if !switching {
 		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
@@ -318,12 +318,17 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	// The routes go back to the copy that is running again — the ones that moved and the one whose
 	// switch failed, which may have moved all the same. The proxy health-checks that copy before it
 	// moves a route, so a copy that did not come back keeps its routes where they are.
-	// A copy that did not come back is no target: the proxy would wait out its health check on every
-	// route, under the server's admission lock, to end where it started.
-	if back == nil {
-		attempted := cfg.Ports[:min(len(switched)+1, len(cfg.Ports))]
-		revert(cleanup, r, log, cfg, plan, attempted, among(old, stopped), routes)
+	// A copy docker says is not running is no target: the proxy would wait out its health check on
+	// every route, under the server's admission lock, to end where it started. One whose state could
+	// not be read may be back, and attempting is never worse than skipping.
+	var back []string
+	for _, c := range stopped {
+		if !slices.Contains(dead, c) {
+			back = append(back, c)
+		}
 	}
+	attempted := cfg.Ports[:min(len(switched)+1, len(cfg.Ports))]
+	revert(cleanup, r, log, cfg, plan, attempted, among(old, back), routes)
 	return fmt.Errorf("%w\n%s was removed and %v brought back; the routes were moved back to them as the lines above say — "+
 		"check `boks proxy list`: the operation stays open in the journal", err, name, stopped)
 }
@@ -483,18 +488,29 @@ func stateOf(up bool, err error) string {
 // says which of them are not running afterwards: one `docker start` that returned is not a copy
 // that is back.
 func revive(ctx context.Context, r remote.Runner, log io.Writer, stopped []string) error {
+	_, err := reviveAll(ctx, r, log, stopped)
+	return err
+}
+
+// reviveAll is revive that also names the copies docker answered are not running — not those whose
+// state could not be read, which may well be back.
+func reviveAll(ctx context.Context, r remote.Runner, log io.Writer, stopped []string) (dead []string, err error) {
 	var down []string
 	for _, c := range stopped {
 		fmt.Fprintf(log, "restart %s\n", c)
 		best(ctx, r, log, "docker", "start", c)
-		if up, err := isRunning(ctx, r, c); err != nil || !up {
+		up, err := isRunning(ctx, r, c)
+		if err != nil || !up {
 			down = append(down, c)
+		}
+		if err == nil && !up {
+			dead = append(dead, c)
 		}
 	}
 	if len(down) > 0 {
-		return fmt.Errorf("%v did not come back up: check them with `docker ps -a` and `docker start` them", down)
+		return dead, fmt.Errorf("%v did not come back up: check them with `docker ps -a` and `docker start` them", down)
 	}
-	return nil
+	return nil, nil
 }
 
 // among is the containers of old that are named in these names.
