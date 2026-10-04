@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -165,14 +166,14 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 }
 
 // recordedNetworks checks that a snapshot's networks can be put back as recorded. From version 3 on
-// a release names them; this boks puts a container on one network, the app's own, and a snapshot
-// naming none or more was damaged or written by another boks — today's networks would restore what
+// a release names them; this boks puts a container on one network, the app's own, under the app's
+// name, and a snapshot naming none or more, or dropping that alias, was damaged or written by another boks — today's networks would restore what
 // the release never ran with, and dropping the rest would restore less than it had.
 func recordedNetworks(app string, s *release.Snapshot) error {
 	if s.Version < 3 {
 		return nil
 	}
-	if len(s.Networks) != 1 || s.Networks[0].Name != config.AppNetwork(app) {
+	if len(s.Networks) != 1 || s.Networks[0].Name != config.AppNetwork(app) || !slices.Contains(s.Networks[0].Aliases, app) {
 		return fmt.Errorf("its snapshot names the networks %v, and a release of %s runs on %s alone", s.Networks, app, config.AppNetwork(app))
 	}
 	return nil

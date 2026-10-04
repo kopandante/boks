@@ -102,6 +102,30 @@ func TestTheAppsNetworkMustBeItsOwn(t *testing.T) {
 	}
 }
 
+// A container another app removes between the listing and the inspect fails one listing, not the
+// deploy: it is asked again. The network the apps shared before is not to be removed on boks's word.
+func TestTheListingIsAskedAgainAndTheSharedNetworkLeftAlone(t *testing.T) {
+	f := routedFake(t, nil)
+	f.fail[boxes] = errors.New("Error: No such object: 0123")
+	listings := 0
+	f.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, boxes) {
+			if listings++; listings == 2 {
+				delete(f.fail, boxes) // the second ask finds the container gone from the listing too
+			}
+		}
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatalf("a listing that fails once is asked again: %v", err)
+	}
+	g := routedFake(t, nil)
+	g.out[netOwner] = `{}`
+	err := Run(context.Background(), g, io.Discard, parse(t, strings.Replace(onePort, "app: demo", "app: test", 1)), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "rename the app") {
+		t.Errorf("an unlabelled network may be the shared one: want the advice to rename the app, got %v", err)
+	}
+}
+
 // What runs on the server can change while a deploy pulls and waits for its admission, so the names
 // are asked again under the lock; a conflict found then still changes nothing of the app.
 func TestTheNetworkIsAskedAgainUnderTheAdmissionLock(t *testing.T) {
@@ -136,8 +160,20 @@ func TestTheProxyJoinsTheAppsNetworkOnce(t *testing.T) {
 	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want the failed connect")
 	}
-	if g.has(deployVia) || g.has("docker rm demo-v1-1") {
-		t.Errorf("no route moves and the old copy stays: %v", g.calls)
+	if g.has(deployVia) || g.has("docker rm demo-v1-1") || !g.has("docker rm -f "+newCopy) {
+		t.Errorf("no route moves, the old copy stays and the new one goes: %v", g.calls)
+	}
+	if journalOpen(g, journal) || !strings.Contains(g.appends[journal], `"result":"failed"`) {
+		t.Errorf("no route moved, so the outcome is known: %q", g.appends[journal])
+	}
+	// Stop-first: the old copy comes back, and no route is sent back to where it never left.
+	h := stopFirstFake(t)
+	h.fail["docker network connect"] = errors.New("network not found")
+	if err := Run(context.Background(), h, io.Discard, parse(t, stopFirst), "v2", fixed); err == nil {
+		t.Fatal("want the failed connect")
+	}
+	if h.has(deployVia) || !h.has("docker start demo-v1-1") || journalOpen(h, journal) {
+		t.Errorf("want the old copy back, no route touched, the operation closed: %v / %q", h.calls, h.appends[journal])
 	}
 }
 
@@ -251,6 +287,7 @@ func TestRollbackRefusesDamagedNetworks(t *testing.T) {
 		"none":          `[]`,
 		"another":       `[{"name":"boks-other","aliases":["demo"]}]`,
 		"more than one": `[{"name":"boks-demo","aliases":["demo"]},{"name":"boks-other"}]`,
+		"no alias":      `[{"name":"boks-demo"}]`,
 	} {
 		f := demoReleases(t, `{"version":3,`+v1Release+`,"networks":`+networks+`}`)
 		err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed)

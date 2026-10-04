@@ -13,6 +13,9 @@ import (
 	"github.com/kopandante/boks/internal/remote"
 )
 
+// inventoryTries is how many times the container listing is asked before a failure stands.
+const inventoryTries = 3
+
 // box is a container on the server, with the names it answers to on each network it is attached to.
 type box struct {
 	name string
@@ -44,11 +47,19 @@ const boxFormat = `{"id":{{json .Id}},"name":{{json .Name}},"hostname":{{json .C
 // inventory lists every container on the server, stopped ones too: a stopped copy comes back with
 // its aliases. All of them rather than those docker's network filter returns, which is documented
 // for running containers; a small server has few. A container removed between the listing and the
-// inspect fails the call, which is a refusal to guess, not an answer that there is no conflict.
+// inspect — another app retiring its old copy, which no lock of this deploy keeps out — fails the
+// call; it is asked again, and a listing that keeps failing is a refusal to guess, not an answer that
+// there is no conflict.
 func inventory(ctx context.Context, r remote.Runner) ([]box, error) {
 	script := "ids=$(docker ps -aq --no-trunc) || exit 1; " +
 		`[ -z "$ids" ] || exec docker inspect --format ` + remote.Quote(boxFormat) + " $ids"
-	out, err := r.Run(ctx, "sh", "-c", script)
+	var out string
+	var err error
+	for try := 0; try < inventoryTries; try++ {
+		if out, err = r.Run(ctx, "sh", "-c", script); err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("listing the containers on the server: %w", err)
 	}
@@ -98,8 +109,11 @@ func checkNetworks(ctx context.Context, r remote.Runner, cfg *config.Config, nam
 		return false, err
 	}
 	if exists && owner != cfg.App {
-		return false, fmt.Errorf("network %s exists but was not made by boks for %s (its boks.app label is %q): "+
-			"remove or rename it, then deploy again; nothing was changed", n.Name, cfg.App, owner)
+		// It may be the network apps shared before this boks (an old `network:` value such as
+		// boks-test), with the proxy and other apps on it: removing it would cut them off.
+		return false, fmt.Errorf("network %s exists but was not made by boks for %s (its boks.app label is %q), and it may "+
+			"be one other containers use, such as the network apps shared before: rename the app, or remove the network "+
+			"only once `docker network inspect %s` shows nothing on it; nothing was changed", n.Name, cfg.App, owner, n.Name)
 	}
 	boxes, err := inventory(ctx, r)
 	if err != nil {

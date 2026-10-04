@@ -247,6 +247,13 @@ func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 	op operation, adm *admission, name string, old []container, plan map[string]string, routes held) error {
 	err := l.start(ctx, name)
 	adm.release(ctx)
+	if err == nil {
+		// The proxy joins before any route moves, so a failure here moved none: the new copy goes and
+		// the operation ends as failed rather than as one whose routes nobody can vouch for.
+		if err = joinProxy(ctx, r, log, cfg); err != nil {
+			discard(context.WithoutCancel(ctx), r, log, cfg.App, name)
+		}
+	}
 	if err != nil {
 		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
 		return err
@@ -292,6 +299,10 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	var switched []config.Port
 	switching := false
 	err = l.start(ctx, name)
+	if err == nil && len(cfg.Ports) > 0 {
+		// Before switching starts: a proxy that could not join moved no route.
+		err = joinProxy(ctx, r, log, cfg)
+	}
 	if err == nil {
 		if len(cfg.Ports) > 0 {
 			switching = true
@@ -1138,9 +1149,6 @@ func service(cfg *config.Config, target string, p config.Port) proxy.Service {
 // ports whose routes had already moved when an error stopped it.
 func switchProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string, plan map[string]string) ([]config.Port, error) {
 	var done []config.Port
-	if err := joinProxy(ctx, r, log, cfg); err != nil {
-		return nil, err
-	}
 	for _, p := range cfg.Ports {
 		svc := service(cfg, name, p)
 		svc.Name = plan[p.Name]
