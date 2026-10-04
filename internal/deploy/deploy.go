@@ -327,10 +327,14 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 			back = append(back, c)
 		}
 	}
+	if len(back) == 0 {
+		return fmt.Errorf("%w\n%s was removed, and %v did not come back, so no route was moved back: they may still point at the removed copy. "+
+			"Start them, then run `%s` — the operation stays open in the journal", err, name, dead, l.again)
+	}
 	attempted := cfg.Ports[:min(len(switched)+1, len(cfg.Ports))]
 	revert(cleanup, r, log, cfg, plan, attempted, among(old, back), routes)
-	return fmt.Errorf("%w\n%s was removed and %v brought back; the routes were moved back to them as the lines above say — "+
-		"check `boks proxy list`: the operation stays open in the journal", err, name, stopped)
+	return fmt.Errorf("%w\n%s was removed and the routes were sent back to %v as the lines above say — "+
+		"check `boks proxy list`: the operation stays open in the journal", err, name, back)
 }
 
 // unrecorded reports a deploy whose new version is up but could not be written down. Retiring the

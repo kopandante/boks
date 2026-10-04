@@ -850,6 +850,9 @@ func TestStopFirstDoesNotRevertOntoACopyThatStayedDown(t *testing.T) {
 	if f.has(deployVia + "demo.web --target demo-v1-1") {
 		t.Errorf("no route goes back to a copy that is not running: %v", f.calls)
 	}
+	if !strings.Contains(err.Error(), "no route was moved back") || strings.Contains(err.Error(), "sent back") {
+		t.Errorf("the error must not claim routes went back: %v", err)
+	}
 }
 
 // A copy whose state could not be read after its restart may well be back, so its routes are still
