@@ -137,7 +137,11 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err != nil {
 		return err
 	}
-	stopFirst := cfg.ReplaceMode() == config.ReplaceStopFirst || servingStopFirst(ctx, r, log, cfg.App, from)
+	servingAsks, err := servingStopFirst(ctx, r, cfg.App, from)
+	if err != nil {
+		return err
+	}
+	stopFirst := cfg.ReplaceMode() == config.ReplaceStopFirst || servingAsks
 	var live []string
 	if stopFirst {
 		if live, err = running(ctx, r, cfg.App); err != nil {
@@ -230,20 +234,19 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 }
 
 // servingStopFirst reports whether the release serving now was put in place stop-first. A snapshot
-// that cannot be read leaves the decision to the incoming side, which is what boks did before it
-// recorded the mode at all.
-func servingStopFirst(ctx context.Context, r remote.Runner, log io.Writer, app, current string) bool {
+// that cannot be read is a refusal, not a vote for overlap: the release it describes may be the one
+// writing a single-writer volume, and a newer format may say so in a field this binary cannot see.
+func servingStopFirst(ctx context.Context, r remote.Runner, app, current string) (bool, error) {
 	if current == "" {
-		return false
+		return false, nil
 	}
 	s, err := release.Load(ctx, r, app, current)
 	if err != nil {
-		fmt.Fprintf(log, "warning: could not read how the serving release %s was replaced, so the config decides: %v\n", current, err)
-		return false
+		return false, fmt.Errorf("cannot tell how the serving release may be replaced: %w", err)
 	}
 	// A version 1 snapshot records no mode, and its shape is what decided it: a release without
 	// ports was always replaced stop-first.
-	return s.Replace == config.ReplaceStopFirst || s.Replace == "" && len(s.Ports) == 0
+	return s.Replace == config.ReplaceStopFirst || s.Replace == "" && len(s.Ports) == 0, nil
 }
 
 // replaceOverlap starts the new copy beside the old one and moves the routes to it; the proxy moves

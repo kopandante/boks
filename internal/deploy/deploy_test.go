@@ -1278,6 +1278,9 @@ func TestFailedSwitchLeavesTheJournalOpen(t *testing.T) {
 
 const journal = ".boks/demo/journal.jsonl"
 
+// servingOverlap is the snapshot of a serving demo-v1-1 that was replaced with overlap.
+const servingOverlap = `{"version":2,"id":"demo-v1-1","replace":"overlap","ports":[{"name":"web","port":3000,"host":"demo.example.com"}]}`
+
 // journalOpen reports a journal with an opened operation and no closing line for it.
 func journalOpen(f *fake, path string) bool {
 	j := f.appends[path]
@@ -1516,6 +1519,7 @@ func TestRoutelessNameCollisionWritesNoJournal(t *testing.T) {
 func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
 	f := routedFake(t, nil)
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = servingOverlap
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -1555,6 +1559,7 @@ func TestSnapshotKeepsTheDigestOfAShortImageName(t *testing.T) {
 func TestSnapshotNamesTheReleaseItWasDeployedOver(t *testing.T) {
 	f := routedFake(t, nil)
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = servingOverlap
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}

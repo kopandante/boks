@@ -51,7 +51,7 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		poll = time.Second
 	}
 	deadline := time.Now().Add(wait)
-	waiting := ""
+	waiting, vanished := "", 0
 	for {
 		_, err := r.Run(ctx, "ln", "-sn", token, admitLock)
 		if err == nil {
@@ -63,6 +63,23 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 			return &admission{r: r, log: log, token: token, held: true}, nil
 		}
 		owner := ownerApp(strings.TrimSpace(held))
+		// The caller holds this app's deploy lock, so a lock this app holds under another token is
+		// a leftover of an earlier run whose release did not get through: it is taken back.
+		if owner == app {
+			fmt.Fprintf(log, "taking back the admission lock an earlier run of %s left behind\n", app)
+			best(ctx, r, log, "sh", "-c", "[ \"$(readlink "+admitLock+")\" = "+remote.Quote(strings.TrimSpace(held))+" ] && rm -f "+admitLock+" || true")
+			continue
+		}
+		// No lock to wait for, and still `ln` fails: what fails is the server, not a wait, and saying
+		// so after a few tries beats saying it after five minutes. A lock let go of between the two
+		// calls reads the same way once, so once is not enough.
+		if owner == "" {
+			if vanished++; vanished >= 3 {
+				return nil, fmt.Errorf("could not take the admission lock %s: %w", admitLock, err)
+			}
+		} else {
+			vanished = 0
+		}
 		if owner != "" && owner != waiting {
 			fmt.Fprintf(log, "waiting for the deploy of %s to finish admitting its container on this server\n", owner)
 			waiting = owner
@@ -218,6 +235,11 @@ func containerMemory(ctx context.Context, r remote.Runner) ([]usage, error) {
 			continue
 		}
 		used, _, _ := strings.Cut(mem, " / ")
+		// docker prints `--` for a container whose stats it has none of (one stuck restarting). Its use
+		// stays unknown, which counts as nothing: its whole limit is still to come.
+		if strings.TrimSpace(used) == "--" {
+			continue
+		}
 		n, err := parseSize(used)
 		if err != nil {
 			return nil, fmt.Errorf("unreadable memory use %q of %s: %w", mem, list[i].name, err)

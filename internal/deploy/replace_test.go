@@ -182,7 +182,7 @@ func TestTheCheckRefusesWhatItCannotRead(t *testing.T) {
 		"no line":   func(f *fake) { f.out[memInfo] = "MemTotal: 1 kB\n" },
 		"limits":    func(f *fake) { f.fail[limits] = errors.New("boom") },
 		"stats":     func(f *fake) { f.fail[memStats] = errors.New("boom") },
-		"bad stats": func(f *fake) { f.out[memStats] = "id-other-v1-1\t--  / --" },
+		"bad stats": func(f *fake) { f.out[memStats] = "id-other-v1-1\tlots / --" },
 	} {
 		f := routedFake(t, nil)
 		f.server(4000, map[string][2]int{"other-v1-1": {512, 10}})
@@ -608,5 +608,79 @@ func TestUnlockReportsAnAppLockItCouldNotRemove(t *testing.T) {
 	f.out["sh -c test -e /tmp/boks-demo.lock"] = "absent"
 	if err := Unlock(context.Background(), f, "demo"); err != nil {
 		t.Errorf("an absent app lock with the admission lock freed is an unlock: %v", err)
+	}
+}
+
+// The serving release's snapshot is a vote on whether two copies may share its volume; one that
+// cannot be read — a dropped connection, a format this binary does not know — refuses the deploy
+// instead of counting as a vote for overlap.
+func TestAnUnreadableServingReleaseRefuses(t *testing.T) {
+	for name, broke := range map[string]func(*fake){
+		"unreadable": func(f *fake) { f.fail["cat .boks/demo/releases/demo-v1-1.json"] = errors.New("connection reset") },
+		"newer":      func(f *fake) { f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version":99,"id":"demo-v1-1"}` },
+	} {
+		f := stopFirstFake(t)
+		f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+		broke(f)
+		err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+		if err == nil || !strings.Contains(err.Error(), "cannot tell how the serving release may be replaced") {
+			t.Errorf("%s: want a refusal, got %v", name, err)
+		}
+		if f.has("docker run") || f.has("docker stop") || len(f.appends) != 0 {
+			t.Errorf("%s: nothing may change: %v", name, f.calls)
+		}
+	}
+}
+
+// docker has no stats for a container stuck restarting and prints `--`; that container's use is
+// unknown, counted as nothing, rather than blocking every deploy on the server.
+func TestAContainerWithoutStatsCountsItsWholeLimit(t *testing.T) {
+	f := routedFake(t, nil)
+	f.server(1100, map[string][2]int{"looping-v1-1": {512, 0}})
+	f.out[memStats] = "id-looping-v1-1\t-- / --"
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "332MiB is free") {
+		t.Fatalf("1100 − 512 still to come − 256 leaves 332, got %v", err)
+	}
+}
+
+// A lock this app left under another token is a leftover: the caller holds the app's deploy lock,
+// so no other run of the app can be holding it. It is taken back instead of waited for.
+func TestAdmissionTakesBackALeftoverOfThisApp(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out["sh -c readlink /tmp/boks.admit.lock"] = "demo.1699999999000000000"
+	f.onRun = func(cmd string) {
+		switch {
+		case strings.Contains(cmd, "'demo.1699999999000000000' ] && rm -f"):
+			delete(f.out, "sh -c readlink /tmp/boks.admit.lock")
+			delete(f.fail, "ln -sn")
+		case strings.HasPrefix(cmd, "ln -sn") && f.out["sh -c readlink /tmp/boks.admit.lock"] != "":
+			f.fail["ln -sn"] = errors.New("File exists")
+		}
+	}
+	o := fixed
+	o.Poll, o.AdmitWait = time.Millisecond, time.Second
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("docker run") {
+		t.Errorf("the deploy goes on once the leftover is gone: %v", f.calls)
+	}
+}
+
+// `ln` that fails with no lock in the way is the server failing, said after a few tries rather
+// than after the whole wait.
+func TestAdmissionFailsFastWithoutALockInTheWay(t *testing.T) {
+	f := routedFake(t, nil)
+	f.fail["ln -sn"] = errors.New("Read-only file system")
+	o := fixed
+	o.Poll, o.AdmitWait = time.Millisecond, 3*time.Second
+	start := time.Now()
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o)
+	if err == nil || !strings.Contains(err.Error(), "Read-only file system") {
+		t.Fatalf("want the ln failure, got %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Errorf("must not wait the whole AdmitWait: %s", time.Since(start))
 	}
 }
