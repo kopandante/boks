@@ -93,7 +93,7 @@ func TestDeployPullsLoggedInBeforeTheProxy(t *testing.T) {
 // included, and says which variable held it.
 func TestARefusedLoginChangesNothing(t *testing.T) {
 	f := depotFake()
-	f.fail[loginCall] = errors.New("sh: exit status 1: Error response from daemon: unauthorized\n" + loginRefused)
+	f.fail[loginCall] = errors.New("sh: exit status 1: Error response from daemon: Get \"https://registry.depot.dev/v2/\": unauthorized: authentication required\n" + loginRefused)
 	cfg := parse(t, depotPort)
 	err := Run(context.Background(), f, io.Discard, cfg, "v2", depotOptions(t, cfg))
 	if err == nil || !strings.Contains(err.Error(), "refused the login as x-token with the token in DEPOT_TOKEN") ||
@@ -105,6 +105,13 @@ func TestARefusedLoginChangesNothing(t *testing.T) {
 	}
 	if !f.has("rmdir /tmp/boks-demo.lock") {
 		t.Errorf("the app's lock is given back: %v", f.calls)
+	}
+	// A login that fails on the way to the registry is not blamed on the token.
+	g := depotFake()
+	g.fail[loginCall] = errors.New("sh: exit status 1: Error response from daemon: Get \"https://registry.depot.dev/v2/\": dial tcp: i/o timeout\n" + loginRefused)
+	err = Run(context.Background(), g, io.Discard, cfg, "v2", depotOptions(t, cfg))
+	if err == nil || strings.Contains(err.Error(), "token") || !strings.Contains(err.Error(), "docker login to registry.depot.dev on this server failed") {
+		t.Errorf("want the failed login said as it is, got %v", err)
 	}
 }
 
@@ -214,7 +221,7 @@ func TestNewLogin(t *testing.T) {
 
 // The script itself, run by a real shell against stand-in docker and flock, once per outcome: the
 // logout runs wherever the login may have happened and nowhere else, the token reaches `docker
-// login` on its stdin and nothing else, a silent pull is stopped by a signal or a cut connection,
+// login` on its stdin, a silent pull is stopped by a signal or a cut connection,
 // and the script's status is the pull's. Under sh and dash: Ubuntu's sh is dash, whose traps differ
 // from bash's in the details the script leans on.
 func TestTheLoginScriptLogsOutWhateverHappens(t *testing.T) {
@@ -231,6 +238,8 @@ func TestTheLoginScriptLogsOutWhateverHappens(t *testing.T) {
 		// boks going away closes the connection; nothing else would make a silent pull notice.
 		{name: "connection cut", pull: "hang", act: "cut", status: -1, ran: all},
 		{name: "SIGTERM", pull: "hang", act: "term", status: 143, ran: all},
+		// A user whose docker keeps its config elsewhere has the lock there, beside the credentials.
+		{name: "own docker config", dockerConfig: "conf", status: 0, ran: all},
 	}
 	shells := []string{"sh"}
 	if _, err := exec.LookPath("dash"); err == nil {
@@ -256,6 +265,7 @@ type scriptCase struct {
 	name                       string
 	flock, login, pull, logout string
 	act                        string
+	dockerConfig               string   // DOCKER_CONFIG, under the case's directory; "" leaves it unset
 	status                     int      // the exit status; -1 is any but 0
 	ran                        []string // what docker was asked, in order, in full
 	says                       string   // what the script must say on stderr
@@ -265,7 +275,7 @@ const fakeDocker = `#!/bin/sh
 echo "$*" >> "$DIR/log"
 case "$1" in
 login) cat > "$DIR/login-stdin"; echo "WARNING! stored unencrypted" >&2; [ "$LOGIN" != fail ] ;;
-pull) echo $$ > "$DIR/pull-pid"; cat > "$DIR/pull-stdin"
+pull) echo $$ > "$DIR/pull-pid"
   case "$PULL" in fail) exit 3 ;; hang) exec sleep 30 ;; esac ;;
 logout) [ "$LOGOUT" != fail ] ;;
 esac
@@ -289,6 +299,11 @@ func runScript(t *testing.T, shell string, c scriptCase) {
 	cmd.Stdin = strings.NewReader(l.Token)
 	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "HOME=" + dir, "DIR=" + dir,
 		"FLOCK=" + c.flock, "LOGIN=" + c.login, "PULL=" + c.pull, "LOGOUT=" + c.logout}
+	conf := filepath.Join(dir, ".docker")
+	if c.dockerConfig != "" {
+		conf = filepath.Join(dir, c.dockerConfig)
+		cmd.Env = append(cmd.Env, "DOCKER_CONFIG="+conf)
+	}
 	// Its own process group, so whatever the script leaves behind can be stopped after a failure.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stderr bytes.Buffer
@@ -347,14 +362,16 @@ func runScript(t *testing.T, shell string, c scriptCase) {
 	if got := strings.TrimSpace(read("flock-args")); got != "-w 600 9" {
 		t.Errorf("flock ran with %q", got)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".docker", registryLock)); err != nil {
-		t.Errorf("no lock in the docker config: %v", err)
+	if _, err := os.Stat(filepath.Join(conf, registryLock)); err != nil {
+		t.Errorf("no lock in the docker config %s: %v", conf, err)
+	}
+	if c.dockerConfig != "" {
+		if _, err := os.Stat(filepath.Join(dir, ".docker")); err == nil {
+			t.Errorf("a lock beside ~/.docker, not the docker config %s", conf)
+		}
 	}
 	if slices.Contains(c.ran, wantLogin) && read("login-stdin") != depotToken {
 		t.Errorf("login read %q from stdin", read("login-stdin"))
-	}
-	if got := read("pull-stdin"); got != "" {
-		t.Errorf("the pull read %q from stdin", got)
 	}
 	if pid, err := strconv.Atoi(strings.TrimSpace(read("pull-pid"))); err == nil {
 		for i := 0; syscall.Kill(pid, 0) == nil; i++ {

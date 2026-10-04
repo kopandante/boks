@@ -97,8 +97,12 @@ func pullWithLogin(ctx context.Context, r remote.Runner, l *Login, ref string) e
 	}
 	if _, err := r.Pipe(ctx, []byte(l.Token), "sh", "-c", loginPull(l, ref)); err != nil {
 		if strings.Contains(err.Error(), loginRefused) {
-			return fmt.Errorf("%s refused the login as %s with the token in %s: %w\nnothing was changed on this server",
-				l.Host, l.User, l.TokenEnv, err)
+			// A login fails for the network or the disk too; only docker's own words of refusal name the token.
+			if refusedToken(err) {
+				return fmt.Errorf("%s refused the login as %s with the token in %s: %w\nnothing was changed on this server",
+					l.Host, l.User, l.TokenEnv, err)
+			}
+			return fmt.Errorf("docker login to %s on this server failed: %w\nnothing was changed on this server", l.Host, err)
 		}
 		// Depot takes any token at the login and refuses it only when the image is asked for, so a
 		// wrong token is mostly seen here.
