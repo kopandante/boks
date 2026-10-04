@@ -69,11 +69,12 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 		start: func(ctx context.Context, name string) error {
 			return run(ctx, r, log, &target, name, snapshot.Tag, ref, snapshot.EnvPath)
 		},
-		// The release being restored keeps its own identity: `current` points back at its snapshot
-		// rather than at a copy under a new id, so a second rollback goes one step further back
-		// instead of returning to the release this one just left.
-		record: func(ctx context.Context, _, op string) error {
-			return serving(ctx, r, cfg.App, snapshot.ID, op, o.Now())
+		// The release being restored keeps its own identity: `current` points back at its snapshot,
+		// which still names the release it was deployed over, rather than at a copy under a new id.
+		// So a second rollback goes one step further back instead of returning to the release this
+		// one just left.
+		record: func(ctx context.Context, _ string, op operation) error {
+			return serving(ctx, r, cfg.App, snapshot.ID, op.id, o.Now())
 		},
 	}, o)
 }

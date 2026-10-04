@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,10 +43,14 @@ type Snapshot struct {
 	TLS     bool          `json:"tls"`
 	// CertDomains are the domains of the certificate the routes were deployed with; a host they
 	// cover was routed at that certificate rather than at kamal-proxy's autocert.
-	CertDomains []string  `json:"cert_domains,omitempty"`
-	Network     string    `json:"network"`
-	EnvPath     string    `json:"env_path,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	CertDomains []string `json:"cert_domains,omitempty"`
+	Network     string   `json:"network"`
+	EnvPath     string   `json:"env_path,omitempty"`
+	// Previous is the release that was serving when this one was deployed: where a rollback
+	// without an id returns, and what Prune keeps. Empty for a first deploy, and in snapshots
+	// written before the field.
+	Previous  string    `json:"previous,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Entry is one line of the operation journal. Started without Finished is the state that used to
@@ -150,34 +155,74 @@ func Current(ctx context.Context, r remote.Runner, app string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
-// Previous is the release recorded just before the current one, in deploy order. A snapshot
-// newer than current (a deploy that saved it and was cut before moving current) is not "before" it;
-// with no recorded current there is no previous either.
+// Previous is the release a rollback without an id returns to: the one that was serving when the
+// current release was deployed. Deploy order is not that once a rollback has happened: after
+// v1, v2, v3 and a rollback to v2, a deploy of v4 is made over v2, and its rollback must reach v2,
+// not v3, which was left for a reason. A rollback keeps the restored release's own snapshot, so a
+// second one goes on to the release before it. A snapshot newer than current (a deploy that saved
+// it and was cut before moving current) is not "before" it; with no recorded current there is no
+// previous either.
 func Previous(ctx context.Context, r remote.Runner, app string) (string, error) {
 	ids, err := IDs(ctx, r, app)
 	if err != nil {
 		return "", err
 	}
 	current, err := Current(ctx, r, app)
+	if err != nil || !slices.Contains(ids, current) {
+		return "", err
+	}
+	return predecessor(ctx, r, app, ids, current)
+}
+
+// predecessor is the release id was deployed over, as its snapshot names it. A snapshot that names
+// none — written before the field, or a first deploy — falls back to deploy order. A predecessor no
+// longer kept is no predecessor: a rollback to it could not be reproduced.
+func predecessor(ctx context.Context, r remote.Runner, app string, ids []string, id string) (string, error) {
+	s, err := Load(ctx, r, app, id)
 	if err != nil {
 		return "", err
 	}
-	for i, id := range ids {
-		if id == current && i > 0 {
-			return ids[i-1], nil
+	prev := s.Previous
+	if prev == "" {
+		if i := slices.Index(ids, id); i > 0 {
+			prev = ids[i-1]
 		}
 	}
-	return "", nil
+	if !slices.Contains(ids, prev) {
+		return "", nil
+	}
+	return prev, nil
 }
 
-// Prune keeps the newest `keep` snapshots and their env files. It runs after a deploy succeeds,
-// so the release just recorded is always among them.
+// Prune keeps `keep` snapshots and their env files: first the releases a rollback walks back
+// through from the current one, then the newest of the rest. Age alone is not enough once a
+// rollback has happened: after v1, v2, v3, two rollbacks to v1 and a deploy of v4, the newest
+// three are v2, v3 and v4, and pruning by age would delete v1 — the release v4 was deployed over
+// and the one its rollback has to reach. It runs after a deploy succeeds, so the release just
+// recorded is current and always kept.
 func Prune(ctx context.Context, r remote.Runner, app string, keep int) error {
 	ids, err := IDs(ctx, r, app)
 	if err != nil || len(ids) <= keep {
 		return err
 	}
-	for _, id := range ids[:len(ids)-keep] {
+	current, err := Current(ctx, r, app)
+	if err != nil {
+		return err
+	}
+	kept := map[string]bool{}
+	for id := current; slices.Contains(ids, id) && !kept[id] && len(kept) < keep; {
+		kept[id] = true
+		if id, err = predecessor(ctx, r, app, ids, id); err != nil {
+			return err
+		}
+	}
+	for i := len(ids) - 1; i >= 0 && len(kept) < keep; i-- {
+		kept[ids[i]] = true
+	}
+	for _, id := range ids {
+		if kept[id] {
+			continue
+		}
 		if _, err := r.Run(ctx, "rm", "-f", snapshotPath(app, id), EnvPath(app, id)); err != nil {
 			return err
 		}

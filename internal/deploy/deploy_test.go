@@ -1516,3 +1516,20 @@ func TestSnapshotKeepsTheDigestOfAShortImageName(t *testing.T) {
 		t.Errorf("want the canonical repository's digest, got %q", snap.Digest)
 	}
 }
+
+// A snapshot names the release it was deployed over: that, not deploy order, is where a rollback
+// without an id returns once a rollback has happened.
+func TestSnapshotNamesTheReleaseItWasDeployedOver(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/demo-v2-1700000000.json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.Previous != "demo-v1-1" {
+		t.Errorf("want the release serving before, got %q", snap.Previous)
+	}
+}

@@ -69,6 +69,7 @@ func TestPreviousSkipsTheCurrentRelease(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v3-3\n"
+	f.out["cat .boks/demo/releases/demo-v3-3.json"] = `{"id":"demo-v3-3"}`
 	prev, err := Previous(context.Background(), f, "demo")
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +156,7 @@ func TestIDsAreOldestFirstAcrossTags(t *testing.T) {
 		t.Errorf("want oldest first and no temporary files, got %v", ids)
 	}
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v10-300\n"
+	f.out["cat .boks/demo/releases/demo-v10-300.json"] = `{"id":"demo-v10-300"}`
 	if prev, _ := Previous(context.Background(), f, "demo"); prev != "demo-v9-200" {
 		t.Errorf("the release before v10 is the newer v9, got %q", prev)
 	}
@@ -206,6 +208,8 @@ func TestSaveWritesTheFormatVersion(t *testing.T) {
 func TestPreviousIsTheOneBeforeCurrent(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-100.json\ndemo-v2-200.json\ndemo-v3-300.json\n"
+	f.out["cat .boks/demo/releases/demo-v1-100.json"] = `{"id":"demo-v1-100"}`
+	f.out["cat .boks/demo/releases/demo-v2-200.json"] = `{"id":"demo-v2-200"}`
 	for current, want := range map[string]string{"demo-v2-200": "demo-v1-100", "demo-v1-100": "", "": "", "demo-gone-50": ""} {
 		f.out["sh -c cat '.boks/demo/current'"] = current + "\n"
 		if got, err := Previous(context.Background(), f, "demo"); err != nil || got != want {
@@ -224,5 +228,46 @@ func TestJournalLinesCarryOnlyWhatHappened(t *testing.T) {
 	if len(lines) != 2 || strings.Contains(lines[0], "finished_at") || strings.Contains(lines[1], "started_at") ||
 		strings.Contains(lines[1], `"to"`) {
 		t.Errorf("want no zero fields, got %q", lines)
+	}
+}
+
+// Once a rollback has happened, deploy order is not what served before: v4 was deployed over v2,
+// after v3 had been rolled back from, so a rollback from v4 must reach v2 and not v3.
+func TestPreviousIsWhatTheCurrentReleaseWasDeployedOver(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-100.json\ndemo-v2-200.json\ndemo-v3-300.json\ndemo-v4-400.json\n"
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v4-400\n"
+	f.out["cat .boks/demo/releases/demo-v4-400.json"] = `{"id":"demo-v4-400","previous":"demo-v2-200"}`
+	if prev, err := Previous(context.Background(), f, "demo"); err != nil || prev != "demo-v2-200" {
+		t.Errorf("want the release v4 was deployed over, got %q (%v)", prev, err)
+	}
+}
+
+// After v1, v2, v3, two rollbacks to v1 and a deploy of v4 over it, the newest three are v2, v3,
+// v4; v1 is what v4's rollback has to reach, so it is v2 — oldest of the releases a rollback no
+// longer walks through — that goes.
+func TestPruneKeepsWhatARollbackReaches(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\ndemo-v4-4.json\n"
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v4-4\n"
+	f.out["cat .boks/demo/releases/demo-v4-4.json"] = `{"id":"demo-v4-4","previous":"demo-v1-1"}`
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1"}`
+	if err := Prune(context.Background(), f, "demo", 3); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".boks/demo/releases/demo-v2-2.json", ".boks/demo/demo-v2-2.env"}
+	if strings.Join(f.removed, " ") != strings.Join(want, " ") {
+		t.Errorf("want v2 removed and v1 kept, got %v", f.removed)
+	}
+}
+
+// A predecessor that is no longer kept cannot be returned to, so there is no previous release.
+func TestPreviousIsNothingWhenThePredecessorWasPruned(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v2-2.json\ndemo-v3-3.json\n"
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v3-3\n"
+	f.out["cat .boks/demo/releases/demo-v3-3.json"] = `{"id":"demo-v3-3","previous":"demo-v1-1"}`
+	if prev, err := Previous(context.Background(), f, "demo"); err != nil || prev != "" {
+		t.Errorf("want no previous release, got %q (%v)", prev, err)
 	}
 }

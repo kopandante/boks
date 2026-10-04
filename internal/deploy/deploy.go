@@ -47,9 +47,9 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	}
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
 	return put(ctx, r, log, cfg, launch{
-		action: "deploy", tag: tag, ref: cfg.Image + ":" + tag, pull: o.Pull, prune: true,
+		action: "deploy", tag: tag, ref: cfg.Image + ":" + tag, pull: o.Pull,
 		start: func(ctx context.Context, name string) error { return start(ctx, r, log, cfg, name, tag, o.Env) },
-		record: func(ctx context.Context, name, op string) error {
+		record: func(ctx context.Context, name string, op operation) error {
 			return record(ctx, r, log, cfg, name, tag, op, o.Env, o.Now())
 		},
 	}, o)
@@ -67,9 +67,7 @@ type launch struct {
 	// start runs the container. record writes down that it is now the release serving and closes
 	// the journal entry; the previous containers are retired only once it succeeds.
 	start  func(ctx context.Context, name string) error
-	record func(ctx context.Context, name, op string) error
-	// prune removes this repository's images beyond keep once the previous containers are gone.
-	prune bool
+	record func(ctx context.Context, name string, op operation) error
 }
 
 // put runs l on a server whose lock the caller holds. cfg is what l runs with: the current config
@@ -115,7 +113,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	if err := l.start(ctx, name); err != nil {
-		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
+		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
 		return err
 	}
 	switched, err := switchProxy(ctx, r, log, cfg, name, plan)
@@ -141,9 +139,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return unrecorded(err, name, old)
 	}
 	retire(ctx, r, log, names(old))
-	if l.prune {
-		prune(ctx, r, log, cfg, l.tag)
-	}
+	prune(ctx, r, log, cfg, l.tag)
 	return nil
 }
 
@@ -223,7 +219,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		stopped = append(stopped, c)
 		if _, err := r.Run(ctx, "docker", "stop", c); err != nil {
 			revive(ctx, r, log, stopped)
-			finish(ctx, r, log, cfg.App, op, "failed", o.Now())
+			finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
 			return fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
 		}
 	}
@@ -237,12 +233,12 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		// otherwise both would run at once, which is the one outcome this path exists to prevent.
 		// The entry closes only after the cleanup, so a run cut during it stays visibly unfinished.
 		if !discard(ctx, r, log, name) {
-			finish(ctx, r, log, cfg.App, op, "failed", o.Now())
+			finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
 			return fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
 				err, name, stopped)
 		}
 		revive(ctx, r, log, stopped)
-		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
+		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
 		return err
 	}
 	if err := removeExcept(ctx, r, log, stale, nil); err != nil {
@@ -271,9 +267,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 		return unrecorded(err, name, old)
 	}
 	retire(ctx, r, log, gone)
-	if l.prune {
-		prune(ctx, r, log, cfg, l.tag)
-	}
+	prune(ctx, r, log, cfg, l.tag)
 	return nil
 }
 
@@ -609,7 +603,7 @@ func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, k
 // beginOperation opens the journal entry and, on the way, says whether the previous one was ever
 // closed. A deploy cut between switching routes and recording the release leaves no trace in
 // docker — the journal is the only place that knows.
-func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to string, now time.Time) (string, error) {
+func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to string, now time.Time) (operation, error) {
 	// The open entry is closed as abandoned once reported: otherwise every later deploy, however
 	// successful, would report the same interruption again.
 	if open, err := release.Unfinished(ctx, r, cfg.App); err == nil && open != nil {
@@ -619,10 +613,14 @@ func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 	}
 	from, err := release.Current(ctx, r, cfg.App)
 	if err != nil {
-		return "", err
+		return operation{}, err
 	}
-	return release.Begin(ctx, r, cfg.App, action, from, to, now)
+	id, err := release.Begin(ctx, r, cfg.App, action, from, to, now)
+	return operation{id: id, from: from}, err
 }
+
+// operation is an open journal entry, and the release that was serving when it began.
+type operation struct{ id, from string }
 
 func finish(ctx context.Context, r remote.Runner, log io.Writer, app, op, result string, now time.Time) {
 	if op == "" {
@@ -637,7 +635,7 @@ func finish(ctx context.Context, r remote.Runner, log io.Writer, app, op, result
 // The order is deliberate: the snapshot exists before anything claims to be current, and the
 // journal closes last, so an interruption always leaves more evidence rather than less. Any of the
 // three failing is an error, because the caller retires the previous containers only after it.
-func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, op string, env []byte, now time.Time) error {
+func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag string, op operation, env []byte, now time.Time) error {
 	digest, err := digestOf(ctx, r, cfg.Image, tag)
 	if err != nil {
 		return err
@@ -645,7 +643,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	snapshot := release.Snapshot{
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
 		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Network: cfg.Network,
-		EnvPath: envFile(cfg.App, name, env), CreatedAt: now,
+		EnvPath: envFile(cfg.App, name, env), Previous: op.from, CreatedAt: now,
 	}
 	if cfg.Cert != nil {
 		snapshot.CertDomains = cfg.Cert.Domains
@@ -653,7 +651,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	if err := release.Save(ctx, r, snapshot); err != nil {
 		return err
 	}
-	if err := serving(ctx, r, cfg.App, name, op, now); err != nil {
+	if err := serving(ctx, r, cfg.App, name, op.id, now); err != nil {
 		return err
 	}
 	if err := release.Prune(ctx, r, cfg.App, cfg.Keep); err != nil {

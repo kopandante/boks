@@ -15,6 +15,7 @@ func TestRollbackRunsTheRecordedRelease(t *testing.T) {
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v2-2\n"
+	f.out["cat .boks/demo/releases/demo-v2-2.json"] = `{"id":"demo-v2-2","previous":"demo-v1-1"}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{
 		"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1","digest":"sha256:old",
 		"ports":[{"name":"web","port":3000,"host":"demo.example.com","health_path":"/up","health_port":0}],
@@ -47,11 +48,25 @@ func TestRollbackRefusesWhenTheReleaseEnvIsGone(t *testing.T) {
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v2-2\n"
+	f.out["cat .boks/demo/releases/demo-v2-2.json"] = `{"id":"demo-v2-2","previous":"demo-v1-1"}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1","env_path":".boks/demo/demo-v1-1.env"}`
 	f.fail["test -f"] = errNotFound
 	err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed)
 	if err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
 		t.Fatalf("want a refusal about the missing environment, got %v", err)
+	}
+	if f.has("docker") || len(f.appends) > 0 {
+		t.Errorf("the refusal must come before anything on the server changes: %v", f.calls)
+	}
+
+	// An app without routes is where it matters most: the running copy would be stopped first.
+	bot := botReleases("healthy")
+	bot.fail["test -f"] = errNotFound
+	if err := Rollback(context.Background(), bot, io.Discard, parse(t, noPorts), "", quick()); err == nil {
+		t.Fatal("want a refusal about the missing environment")
+	}
+	if bot.has("docker") || len(bot.appends) > 0 {
+		t.Errorf("the running copy must be left alone: %v", bot.calls)
 	}
 }
 
@@ -74,6 +89,7 @@ func botReleases(health string) *fake {
 	f.out["docker inspect --format"] = health
 	f.out["sh -c ls -1"] = "bot-v1-1.json\nbot-v2-2.json\n"
 	f.out["sh -c cat '.boks/bot/current'"] = "bot-v2-2\n"
+	f.out["cat .boks/bot/releases/bot-v2-2.json"] = `{"id":"bot-v2-2","previous":"bot-v1-1"}`
 	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
 		"digest":"sha256:old","ports":[],"volumes":["data:/data"],"network":"boks","env_path":".boks/bot/bot-v1-1.env"}`
 	return f
@@ -83,7 +99,10 @@ func botReleases(health string) *fake {
 // of Redis on one volume, or two workers on one queue, are what this path exists to prevent.
 func TestRoutelessRollbackStopsTheRunningCopyFirst(t *testing.T) {
 	f := botReleases("healthy")
-	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
+	// The config publishes a port today; the release being restored did not, and it is the
+	// release that decides how it runs.
+	routedNow := noPorts + "ports:\n  - {name: web, port: 80, host: bot.example.com}\n"
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, routedNow), "", quick()); err != nil {
 		t.Fatal(err)
 	}
 	stop, run := f.callAt("docker stop bot-v2-2"), f.callAt("docker run -d --name bot-v1-1700000000")
@@ -95,6 +114,9 @@ func TestRoutelessRollbackStopsTheRunningCopyFirst(t *testing.T) {
 	}
 	if f.has("docker pull") || touchesProxy(f) {
 		t.Errorf("a rollback of an app without routes neither pulls nor touches the proxy: %v", f.calls)
+	}
+	if !f.has("docker images ghcr.io/x/bot") {
+		t.Errorf("images beyond keep are pruned after a rollback too: %v", f.calls)
 	}
 }
 
@@ -173,6 +195,7 @@ func TestRollbackHandlesTheCertificateLikeADeploy(t *testing.T) {
 	snapshot := func(f *fake) {
 		f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
 		f.out["sh -c cat '.boks/demo/current'"] = "demo-v2-2\n"
+		f.out["cat .boks/demo/releases/demo-v2-2.json"] = `{"id":"demo-v2-2","previous":"demo-v1-1"}`
 		f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1",
 			"ports":[{"name":"web","port":3000,"host":"demo.example.com"}],"network":"boks"}`
 	}
