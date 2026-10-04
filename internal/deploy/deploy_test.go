@@ -1212,15 +1212,31 @@ func TestDeployWarnsAboutAnOperationThatNeverFinished(t *testing.T) {
 	}
 }
 
-func TestFailedSwitchClosesTheJournalEntry(t *testing.T) {
+// A switch that returned an error may still have happened on the proxy — the connection can drop
+// after kamal-proxy acted. Its outcome is unknown, so the entry stays open: `boks releases` and the
+// next deploy are what show it.
+func TestFailedSwitchLeavesTheJournalOpen(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.fail["docker exec boks-proxy kamal-proxy deploy"] = errors.New("health check failed")
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
-		t.Fatal("want an error")
+	f.fail["docker exec boks-proxy kamal-proxy deploy"] = errors.New("connection reset")
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "may still have switched") {
+		t.Fatalf("want an error saying the route may have switched, got %v", err)
 	}
-	if !strings.Contains(f.appends[".boks/demo/journal.jsonl"], `"result":"failed"`) {
-		t.Errorf("a failed deploy must be recorded as failed: %q", f.appends[".boks/demo/journal.jsonl"])
+	opened := f.appends[".boks/demo/journal.jsonl"]
+	if !strings.Contains(opened, `"action":"deploy"`) || strings.Contains(opened, `"result"`) {
+		t.Fatalf("the entry must stay open: %q", opened)
+	}
+	// The next deploy reads that journal: it reports the operation and closes it as abandoned.
+	next := newFake()
+	next.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	next.out["sh -c cat '.boks/demo/journal.jsonl'"] = opened
+	var log strings.Builder
+	if err := Run(context.Background(), next, &log, parse(t, onePort), "v3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "never finished") || !strings.Contains(next.appends[".boks/demo/journal.jsonl"], `"result":"abandoned"`) {
+		t.Errorf("the next deploy must report the open operation: %q / %q", log.String(), next.appends[".boks/demo/journal.jsonl"])
 	}
 }
 
@@ -1477,5 +1493,23 @@ func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
 	}
 	if f.has("docker run") || len(f.appends) != 0 {
 		t.Errorf("nothing may change: %v %v", f.calls, f.appends)
+	}
+}
+
+// A Docker Hub image configured by its short name is recorded under its canonical repository; the
+// digest is still the one to keep, not dropped because the names differ.
+func TestSnapshotKeepsTheDigestOfAShortImageName(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out[digests] = `["docker.io/library/redis@sha256:abc"]`
+	cfg := parse(t, strings.Replace(onePort, "image: ghcr.io/x/y", "image: redis", 1))
+	if err := Run(context.Background(), f, io.Discard, cfg, "7", fixed); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/demo-7-1700000000.json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.Digest != "sha256:abc" {
+		t.Errorf("want the canonical repository's digest, got %q", snap.Digest)
 	}
 }

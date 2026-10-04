@@ -92,8 +92,11 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	switched, err := switchProxy(ctx, r, log, cfg, name, plan)
 	if err != nil {
 		revert(ctx, r, log, cfg, plan, switched, old)
-		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
-		return fmt.Errorf("%w\nnew container %s is left running for inspection; see the revert/warning lines above for where traffic goes now", err, name)
+		// The entry stays open: a command that failed may still have switched its route on the
+		// proxy (the connection can drop after the proxy acted), so how this ended is not known,
+		// and the journal is what tells the next run that an operation never finished.
+		return fmt.Errorf("%w\nnew container %s is left running for inspection; the route that failed may still have switched to it, "+
+			"so see the revert/warning lines above and `boks proxy list` for where traffic goes now — the operation stays open in the journal", err, name)
 	}
 	// Routing a host at a certificate path makes the proxy read that file, so the deploy is a
 	// load: record it, or `cert status` will keep claiming a reload is owed.
