@@ -227,7 +227,7 @@ func reattach(ctx context.Context, r remote.Runner, log io.Writer) error {
 // shared — all of them. Only docker's own answer that there is no such container counts as gone; any
 // other failure is an error.
 func targetNetworks(ctx context.Context, r remote.Runner, c string) ([]string, bool, error) {
-	out, err := r.Run(ctx, "sh", "-c", "out=$(docker container inspect --format '{{index .Config.Labels \"boks.app\"}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "+
+	out, err := r.Run(ctx, "sh", "-c", "out=$(docker container inspect --format '{{index .Config.Labels \"boks.app\"}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "+
 		remote.Quote(c)+" 2>&1) && echo \"$out\" || case \"$out\" in *'No such container'*|*'No such object'*) echo '<gone>';; "+
 		"*) echo \"$out\" >&2; exit 1;; esac")
 	if err != nil {
@@ -236,8 +236,9 @@ func targetNetworks(ctx context.Context, r remote.Runner, c string) ([]string, b
 	if strings.TrimSpace(out) == "<gone>" {
 		return nil, true, nil
 	}
-	// The label comes first and may be empty, so the line is split at its first space.
-	app, list, _ := strings.Cut(strings.TrimRight(out, "\n"), " ")
+	// The label comes first and may be empty; a bar parts it from the networks, since the runner trims
+	// the line and a space would vanish with an empty label.
+	app, list, _ := strings.Cut(strings.TrimSpace(out), "|")
 	nets := strings.Fields(list)
 	if own := config.AppNetwork(app); app != "" && slices.Contains(nets, own) {
 		return []string{own}, false, nil

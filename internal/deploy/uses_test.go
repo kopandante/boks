@@ -126,12 +126,13 @@ func TestTheDependencyIsAskedAgainUnderTheAdmissionLock(t *testing.T) {
 // and left behind it would be one more copy for stop-first to revive. In stop-first the old copy then
 // comes back.
 func TestACreatedContainerThatCannotJoinIsRemoved(t *testing.T) {
-	for _, failing := range []string{"docker network connect boks-cache", "docker start " + newCopy} {
+	for _, failing := range []string{"docker create", "docker network connect boks-cache", "docker start " + newCopy} {
 		f := cacheFake(t)
 		f.fail[failing] = errors.New("connection reset")
 		if err := Run(context.Background(), f, io.Discard, parse(t, usesCache), "v2", fixed); err == nil {
 			t.Fatalf("%s: want an error", failing)
 		}
+		// A failed create may have created the copy all the same, so it is removed too.
 		if !f.has("docker rm -f "+newCopy) || f.has(deployVia) {
 			t.Errorf("%s: want the new container removed and no route moved: %v", failing, f.calls)
 		}
@@ -183,12 +184,18 @@ func TestRollbackRefusesNetworksThatDoNotMatchTheUses(t *testing.T) {
 		"a network missing": `"uses":["cache"],"networks":[{"name":"boks-demo","aliases":["demo"]}]`,
 		"an extra network":  `"networks":[{"name":"boks-demo","aliases":["demo"]},{"name":"boks-cache"}]`,
 		"another order":     `"uses":["a","b"],"networks":[{"name":"boks-demo","aliases":["demo"]},{"name":"boks-b"},{"name":"boks-a"}]`,
+		"an alias there":    `"uses":["cache"],"networks":[{"name":"boks-demo","aliases":["demo"]},{"name":"boks-cache","aliases":["cache"]}]`,
 	} {
 		f := demoReleases(t, `{"version":4,`+v1Release+`,`+body+`}`)
 		err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed)
 		if err == nil || !strings.Contains(err.Error(), "cannot be reproduced") || f.has("docker") {
 			t.Errorf("%s: want a refusal before anything changes, got %v", name, err)
 		}
+	}
+	// A snapshot from before networks were recorded never names apps it used.
+	g := demoReleases(t, `{`+v1Release+`,"uses":["cache"]}`)
+	if err := Rollback(context.Background(), g, io.Discard, parse(t, onePort), "", fixed); err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
+		t.Errorf("want a refusal, got %v", err)
 	}
 }
 

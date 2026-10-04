@@ -174,6 +174,9 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 // dropping some would restore less than it had.
 func recordedNetworks(app string, s *release.Snapshot) error {
 	if s.Version < 3 {
+		if len(s.Uses) > 0 {
+			return fmt.Errorf("its snapshot names apps it used (%v) but no networks, which no boks writes", s.Uses)
+		}
 		return nil
 	}
 	want := []string{config.AppNetwork(app)}
@@ -184,7 +187,10 @@ func recordedNetworks(app string, s *release.Snapshot) error {
 	for i, n := range s.Networks {
 		got[i] = n.Name
 	}
-	if !slices.Equal(got, want) || !slices.Contains(s.Networks[0].Aliases, app) {
+	// On the networks of the apps it used the release took no alias: one there would answer to the
+	// dependency's name beside the dependency.
+	aliased := slices.ContainsFunc(s.Networks[min(1, len(s.Networks)):], func(n config.Network) bool { return len(n.Aliases) > 0 })
+	if !slices.Equal(got, want) || !slices.Contains(s.Networks[0].Aliases, app) || aliased {
 		return fmt.Errorf("its snapshot names the networks %v, and a release of %s using %v runs on %v, under the alias %s", s.Networks, app, s.Uses, want, app)
 	}
 	return nil

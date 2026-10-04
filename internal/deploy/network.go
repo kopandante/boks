@@ -182,7 +182,7 @@ func checkUse(ctx context.Context, r remote.Runner, cfg *config.Config, name, de
 	case owner != dep:
 		return refuse("network %s was not made by boks for %s (its boks.app label is %q)", n.Name, dep, owner)
 	}
-	var serving []string
+	serving := 0
 	for _, b := range boxes {
 		if !b.answers(n.Name, dep) {
 			continue
@@ -195,7 +195,7 @@ func checkUse(ctx context.Context, r remote.Runner, cfg *config.Config, name, de
 		}
 		switch b.health {
 		case "healthy":
-			serving = append(serving, b.name)
+			serving++
 		case "":
 			return refuse("%s has no HEALTHCHECK: %s reaches it by name, past the proxy, so only the image's own health check "+
 				"says it answers — add one to its image", b.name, cfg.App)
@@ -203,7 +203,7 @@ func checkUse(ctx context.Context, r remote.Runner, cfg *config.Config, name, de
 			return refuse("its copy %s is %s, and %s reaching %s by name could land on it", b.name, b.health, cfg.App, dep)
 		}
 	}
-	if len(serving) == 0 {
+	if serving == 0 {
 		return refuse("no running copy answers to %s on %s", dep, n.Name)
 	}
 	return taken(boxes, n.Name, cfg.App, []string{name})

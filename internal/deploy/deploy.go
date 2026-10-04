@@ -1100,26 +1100,25 @@ func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 // run starts container name from image ref, labelled as version tag of the app cfg describes.
 func run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, ref, envPath string) error {
 	fmt.Fprintf(log, "run %s\n", name)
-	args := runArgs(cfg, name, tag, ref, envPath)
 	nets := cfg.Networks()
 	if len(nets) == 1 {
-		_, err := r.Run(ctx, args...)
+		_, err := r.Run(ctx, runArgs(cfg, name, tag, ref, envPath)...)
 		return err
 	}
 	// `docker run` attaches one network; the others are joined before the container starts, or the
 	// app would start unable to reach the apps it uses, and fail or retry on its own schedule.
-	if _, err := r.Run(ctx, append([]string{"docker", "create"}, args[3:]...)...); err != nil {
-		return err
-	}
-	err := joinAll(ctx, r, name, nets[1:])
+	_, err := r.Run(ctx, append([]string{"docker", "create"}, runOptions(cfg, name, tag, ref, envPath)...)...)
 	if err == nil {
-		_, err = r.Run(ctx, "docker", "start", name)
+		if err = joinAll(ctx, r, name, nets[1:]); err == nil {
+			_, err = r.Run(ctx, "docker", "start", name)
+		}
 	}
 	if err != nil {
-		// The container is this run's — create succeeded under its name — and no route reaches it
-		// yet, so it goes: left behind, it would be one more copy that stop-first must not revive.
-		fmt.Fprintf(log, "remove %s\n", name)
-		best(context.WithoutCancel(ctx), r, log, "docker", "rm", "-f", name)
+		// No route reaches the copy yet, so it goes: left behind, it would be one more copy that
+		// stop-first must not revive. A failed create may still have created it — the answer can be
+		// lost after docker acted — and discard leaves alone a container under the name that another
+		// app labelled.
+		discard(context.WithoutCancel(ctx), r, log, cfg.App, name)
 	}
 	return err
 }
@@ -1138,10 +1137,15 @@ func joinAll(ctx context.Context, r remote.Runner, name string, nets []config.Ne
 }
 
 func runArgs(cfg *config.Config, name, tag, ref, envPath string) []string {
+	return append([]string{"docker", "run", "-d"}, runOptions(cfg, name, tag, ref, envPath)...)
+}
+
+// runOptions are what `docker run -d` and `docker create` take after the command, the image last.
+func runOptions(cfg *config.Config, name, tag, ref, envPath string) []string {
 	// The alias rides on the network the container starts on: it is how whoever shares that network
 	// reaches the app, under a name that outlives this container.
 	n := cfg.Networks()[0]
-	a := []string{"docker", "run", "-d", "--name", name, "--network", n.Name}
+	a := []string{"--name", name, "--network", n.Name}
 	for _, alias := range n.Aliases {
 		a = append(a, "--network-alias", alias)
 	}

@@ -129,7 +129,7 @@ func TestANewProxyJoinsTheNetworksItsRoutesNeed(t *testing.T) {
 	}
 	// A target that uses other apps is on their networks too; the proxy joins only its app's own.
 	u := &fake{state: "running", out: routes()}
-	u.out[inspectOf+"'a-v1-1'"] = "a boks-a boks-cache boks-convex "
+	u.out[inspectOf+"'a-v1-1'"] = "a|boks-a boks-cache boks-convex"
 	if err := Boot(context.Background(), u, io.Discard, "img"); err != nil || at(u.calls, "docker network connect boks-cache") >= 0 ||
 		at(u.calls, "docker network connect boks-convex") >= 0 || at(u.calls, "docker network connect boks-a") < 0 {
 		t.Errorf("want only boks-a joined for a, not the networks it uses: %v %v", err, u.calls)
@@ -186,8 +186,9 @@ func routes() map[string]string {
 	return map[string]string{
 		answer + " --json": `{"a.web":{"hosts":["a.example.com"],"targets":["a-v1-1:3000"]},` +
 			`"a.api":{"hosts":["api.example.com"],"targets":["a-v1-1:3001"]},"b.web":{"hosts":["b.example.com"],"targets":["b-v1-1:80"]}}`,
-		inspectOf + "'a-v1-1'": "a boks-a ",
-		inspectOf + "'b-v1-1'": " boks-test boks ",
+		inspectOf + "'a-v1-1'": "a|boks-a",
+		// Trimmed, as the SSH runner returns it.
+		inspectOf + "'b-v1-1'": "|boks-test boks",
 	}
 }
 
@@ -201,7 +202,7 @@ func joins(calls []string) []string {
 	return j
 }
 
-const inspectOf = "sh -c out=$(docker container inspect --format '{{index .Config.Labels \"boks.app\"}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "
+const inspectOf = "sh -c out=$(docker container inspect --format '{{index .Config.Labels \"boks.app\"}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "
 
 // A proxy that was just started is not yet a proxy that answers: the deploy asks it for its
 // services right away, so Boot returns only once it does — or says it never did.
