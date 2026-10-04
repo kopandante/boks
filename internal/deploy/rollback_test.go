@@ -303,10 +303,10 @@ func TestStampNamesTheRelease(t *testing.T) {
 // not recorded and changes nothing anywhere.
 func TestCheckRollbackChangesNothing(t *testing.T) {
 	f := botReleases("healthy")
-	if err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err != nil {
-		t.Fatalf("the previous release is there and reproducible: %v", err)
+	if target, err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err != nil || target != "bot-v1-1" {
+		t.Fatalf("want the previous release, which is there and reproducible: %q %v", target, err)
 	}
-	if err := CheckRollback(context.Background(), f, parse(t, noPorts), "bot-v9-9"); err == nil {
+	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), "bot-v9-9"); err == nil {
 		t.Error("want a refusal for a release this server does not have")
 	}
 	if f.has("docker") || f.has("mkdir") || len(f.uploads) > 0 || len(f.appends) > 0 {

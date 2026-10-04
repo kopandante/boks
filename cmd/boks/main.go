@@ -74,7 +74,7 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		if len(rest) != 1 {
 			return fmt.Errorf("deploy needs exactly one <tag>")
 		}
-		stamp := time.Now()
+		stamp := now()
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return runDeploy(ctx, r, out, cfg, rest[0], stamp)
 		})
@@ -86,16 +86,12 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		if len(rest) == 1 {
 			id = rest[0]
 		}
-		// Every server is asked before any of them changes: a rollback refused halfway through the
-		// list would leave the app on two versions.
 		if len(cfg.Servers) > 1 {
-			for _, s := range cfg.Servers {
-				if err := deploy.CheckRollback(ctx, remote.SSH{Host: s}, cfg, id); err != nil {
-					return fmt.Errorf("%s: %w\nno server was rolled back", s, err)
-				}
+			if err := sameRollback(ctx, cfg, id); err != nil {
+				return err
 			}
 		}
-		stamp := time.Now()
+		stamp := now()
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return deploy.Rollback(ctx, r, out, cfg, id, deploy.Options{Stamp: stamp})
 		})
@@ -113,10 +109,38 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 }
 
+// connect and now are what a command reaches the servers and the clock through.
+var (
+	connect = func(host string) remote.Runner { return remote.SSH{Host: host} }
+	now     = time.Now
+)
+
+// sameRollback asks every server, before any of them changes, where a rollback would take it, and
+// refuses unless that is one release everywhere. A rollback refused halfway through the list would
+// leave the app on two versions; so would one that took each server to its own previous release,
+// as after a deploy that reached only some of them.
+func sameRollback(ctx context.Context, cfg *config.Config, id string) error {
+	targets := make([]string, len(cfg.Servers))
+	for i, s := range cfg.Servers {
+		target, err := deploy.CheckRollback(ctx, connect(s), cfg, id)
+		if err != nil {
+			return fmt.Errorf("%s: %w\nno server was rolled back", s, err)
+		}
+		targets[i] = target
+	}
+	for i, target := range targets {
+		if target != targets[0] {
+			return fmt.Errorf("the servers would roll back to different releases (%s: %s, %s: %s), so none was; "+
+				"name one with `boks rollback <id>`, or deploy again", cfg.Servers[0], targets[0], cfg.Servers[i], target)
+		}
+	}
+	return nil
+}
+
 func each(ctx context.Context, cfg *config.Config, out io.Writer, fn action) error {
 	for _, s := range cfg.Servers {
 		fmt.Fprintf(out, "== %s\n", s)
-		if err := fn(ctx, remote.SSH{Host: s}); err != nil {
+		if err := fn(ctx, connect(s)); err != nil {
 			return fmt.Errorf("%s: %w", s, err)
 		}
 	}

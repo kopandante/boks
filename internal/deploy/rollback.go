@@ -64,13 +64,12 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 	}, o)
 }
 
-// CheckRollback says, changing nothing, whether a rollback to id (empty: to the previous release)
-// can be done on this server. A command over several servers asks every one of them first: a
-// rollback that went through on the first and was refused on the second would leave the app
-// split across two versions.
-func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id string) error {
-	_, _, err := reproducible(ctx, r, cfg, id)
-	return err
+// CheckRollback says, changing nothing, which release a rollback to id (empty: to the previous
+// release) would return this server to, or why it cannot. A command over several servers asks
+// every one of them first, so that it does not leave the app split across two versions.
+func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id string) (string, error) {
+	id, _, err := reproducible(ctx, r, cfg, id)
+	return id, err
 }
 
 // reproducible resolves the release a rollback returns to and makes sure it can be run as it was.
