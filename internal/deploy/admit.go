@@ -57,6 +57,12 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		if err == nil {
 			return &admission{r: r, log: log, token: token, held: true}, nil
 		}
+		// Interrupted while `ln` ran, the link may have been made anyway: nobody would ever give it back,
+		// and every other app would wait on it. Removing it by this run's token is safe either way.
+		if ctx.Err() != nil {
+			removeAdmitLock(context.WithoutCancel(ctx), r, log, token)
+			return nil, ctx.Err()
+		}
 		held, _ := r.Run(ctx, "sh", "-c", "readlink "+admitLock+" 2>/dev/null || true")
 		// The link may be this run's own: `ln` succeeded and only its answer was lost on the way back.
 		if strings.TrimSpace(held) == token {
@@ -96,6 +102,7 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		}
 		select {
 		case <-ctx.Done():
+			removeAdmitLock(context.WithoutCancel(ctx), r, log, token)
 			return nil, ctx.Err()
 		case <-time.After(poll):
 		}

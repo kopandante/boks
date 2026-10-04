@@ -428,7 +428,12 @@ func running(ctx context.Context, r remote.Runner, app string) ([]string, error)
 // container is down, and its state says so; an answer other than "not running" is not taken as one.
 // The copy that failed is among those returned: `docker start` of a container that is still running
 // is a no-op, so it is safe to bring back with the rest.
+//
+// A stop is not interrupted once it is asked for: the container has its SIGTERM either way, and an
+// interrupted `docker stop` would leave it shutting down while the revival that follows takes it for
+// running and leaves it to die. So the stops and their confirmation run to the end.
 func stopAll(ctx context.Context, r remote.Runner, log io.Writer, live []string) ([]string, error) {
+	ctx = context.WithoutCancel(ctx)
 	var stopped []string
 	for _, c := range live {
 		fmt.Fprintf(log, "stop %s\n", c)

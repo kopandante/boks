@@ -778,3 +778,61 @@ func TestRollbackLabelsTheReleasesOwnMode(t *testing.T) {
 		t.Errorf("want the release's own mode on the label: %s", run)
 	}
 }
+
+// A run interrupted while `ln` was on its way may have made the link anyway; it removes it by its own
+// token on the way out rather than leave it to block every other app.
+func TestAnInterruptedAdmissionRemovesItsOwnLink(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := routedFake(t, nil)
+	f.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, "ln -sn") {
+			cancel()
+			f.fail["ln -sn"] = context.Canceled
+		}
+	}
+	if err := Run(ctx, f, io.Discard, parse(t, onePort), "v2", fixed); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the cancellation, got %v", err)
+	}
+	if !f.has(admitGive("demo")) || f.has("docker run") {
+		t.Errorf("the run's own link is removed and nothing starts: %v", f.calls)
+	}
+}
+
+// An interrupt that lands while the old copy is being stopped does not cut the stop short: it runs
+// to the end and is confirmed, so a revival that follows sees a copy that is really down.
+func TestAStopIsNotInterrupted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := routelessFake("healthy")
+	f.onRun = func(cmd string) {
+		if cmd == "docker stop bot-v1-1" {
+			cancel()
+		}
+	}
+	stopCtx := ctxRecorder{fake: f}
+	// The fake does not act on cancellation, so the run goes on; what matters is the context the stop
+	// and its confirmation ran with.
+	_ = Run(ctx, &stopCtx, io.Discard, parse(t, noPorts), "v2", quick())
+	if !f.has("docker stop bot-v1-1") || stopCtx.cancelledAt["docker stop bot-v1-1"] || stopCtx.cancelledAt[isRunningQuery+"bot-v1-1"] {
+		t.Errorf("the stop and its confirmation must not see the cancellation: %v", stopCtx.cancelledAt)
+	}
+}
+
+func (c *ctxRecorder) seen(cmd string) bool { _, ok := c.cancelledAt[cmd]; return ok }
+
+// ctxRecorder notes, for each command, whether the context it first ran with was already cancelled.
+type ctxRecorder struct {
+	*fake
+	cancelledAt map[string]bool
+}
+
+func (c *ctxRecorder) Run(ctx context.Context, args ...string) (string, error) {
+	if c.cancelledAt == nil {
+		c.cancelledAt = map[string]bool{}
+	}
+	out, err := c.fake.Run(ctx, args...)
+	// The first time a command runs is what counts: retire stops the same container again later.
+	if cmd := strings.Join(args, " "); !c.seen(cmd) {
+		c.cancelledAt[cmd] = ctx.Err() != nil
+	}
+	return out, err
+}
