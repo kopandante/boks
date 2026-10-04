@@ -922,9 +922,15 @@ func Unlock(ctx context.Context, r remote.Runner, app string) error {
 // missing reports an image that is not on the server. A rollback runs an image the server is meant
 // to have kept; one that was pruned is fetched before anything is stopped, rather than by `docker
 // run` while a stop-first app is down — or not at all, with the app already down, if the registry is.
+//
+// Only docker's own "No such image" counts: an inspect that failed for another reason (a dropped
+// connection, a daemon hiccup) says nothing about the image, and pulling then would fail a rollback
+// during a registry outage — the usual time for one — whose image is on the server all along.
 func missing(ctx context.Context, r remote.Runner, ref string) bool {
-	_, err := r.Run(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", ref)
-	return err != nil
+	q := remote.Quote(ref)
+	out, err := r.Run(ctx, "sh", "-c", "out=$(docker image inspect --format '{{.Id}}' "+q+" 2>&1) && echo present || "+
+		"case \"$out\" in *'No such image'*) echo absent;; *) echo unknown;; esac")
+	return err == nil && strings.TrimSpace(out) == "absent"
 }
 
 func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabled bool) error {

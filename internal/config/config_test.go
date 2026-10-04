@@ -209,3 +209,15 @@ func TestReplaceMode(t *testing.T) {
 		}
 	}
 }
+
+// The shipped example is what people copy: it must parse, and Convex on SQLite in it is replaced
+// stop-first.
+func TestTheExampleParses(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "examples", "convex-lab", "boks.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReplaceMode() != ReplaceStopFirst {
+		t.Errorf("convex-lab keeps SQLite on its volume: want stop-first, got %s", cfg.ReplaceMode())
+	}
+}

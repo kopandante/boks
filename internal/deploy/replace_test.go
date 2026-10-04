@@ -737,7 +737,7 @@ func TestDiscardReadsExactlyItsOwnName(t *testing.T) {
 // A rollback whose image was pruned fetches it before anything stops, not while the app is down.
 func TestRollbackFetchesAMissingImageBeforeTheStop(t *testing.T) {
 	f := demoReleases(t, `{`+v1Release+`,"digest":"sha256:old","replace":"stop-first"}`)
-	f.fail["docker image inspect --format {{.Id}}"] = errors.New("No such image")
+	f.out["sh -c out=$(docker image inspect"] = "absent"
 	if err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -751,6 +751,16 @@ func TestRollbackFetchesAMissingImageBeforeTheStop(t *testing.T) {
 	}
 	if g.has("docker pull") {
 		t.Errorf("an image still on the server is not pulled again: %v", g.calls)
+	}
+	// An inspect that failed for another reason says nothing about the image: no pull, which would
+	// fail the rollback during a registry outage.
+	h := demoReleases(t, `{`+v1Release+`,"digest":"sha256:old"}`)
+	h.out["sh -c out=$(docker image inspect"] = "unknown"
+	if err := Rollback(context.Background(), h, io.Discard, parse(t, onePort), "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if h.has("docker pull") {
+		t.Errorf("an unknown answer is not taken for a missing image: %v", h.calls)
 	}
 }
 
