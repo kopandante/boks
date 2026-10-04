@@ -242,6 +242,7 @@ func TestUnlockClearsTheAdmissionLockOfThisApp(t *testing.T) {
 	f := newFake()
 	f.fail["rmdir"] = errors.New("No such file or directory")
 	f.out["sh -c case"] = "freed"
+	f.out["sh -c test -e /tmp/boks-demo.lock"] = "absent"
 	if err := Unlock(context.Background(), f, "demo"); err != nil {
 		t.Errorf("a freed admission lock is an unlock: %v", err)
 	}
@@ -568,5 +569,44 @@ func TestAdmissionRecognizesItsOwnLock(t *testing.T) {
 	}
 	if !f.has(admitGive("demo")) {
 		t.Errorf("the lock it owns is given back: %v", f.calls)
+	}
+}
+
+// A container removed between listing and inspecting (another app retiring its old copy) is asked
+// about again rather than failing the check; a failure that persists still refuses.
+func TestTheCheckAsksAgainWhenAContainerGoesMeanwhile(t *testing.T) {
+	f := routedFake(t, nil)
+	f.server(4000, map[string][2]int{"other-v1-1": {512, 10}})
+	inspects := 0
+	f.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, limits) {
+			if inspects++; inspects == 1 {
+				f.fail[limits] = errors.New("No such container: id-gone")
+			} else {
+				delete(f.fail, limits)
+			}
+		}
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed); err != nil {
+		t.Fatalf("a container gone meanwhile is not a failure: %v", err)
+	}
+	if inspects != 2 {
+		t.Errorf("want one more try, got %d inspects", inspects)
+	}
+}
+
+// Freeing a stale admission lock excuses a missing app lock only when the server says it is
+// missing; a failed rmdir with the lock still there is an error.
+func TestUnlockReportsAnAppLockItCouldNotRemove(t *testing.T) {
+	f := newFake()
+	f.fail["rmdir"] = errors.New("connection reset")
+	f.out["sh -c case"] = "freed"
+	f.out["sh -c test -e /tmp/boks-demo.lock"] = "present"
+	if err := Unlock(context.Background(), f, "demo"); err == nil {
+		t.Error("an app lock still there is not unlocked")
+	}
+	f.out["sh -c test -e /tmp/boks-demo.lock"] = "absent"
+	if err := Unlock(context.Background(), f, "demo"); err != nil {
+		t.Errorf("an absent app lock with the admission lock freed is an unlock: %v", err)
 	}
 }

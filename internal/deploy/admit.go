@@ -183,17 +183,9 @@ type usage struct {
 // docker stats does not report counts as using nothing, which is the conservative side: its whole
 // limit is still to come, and a copy being stopped gives back nothing.
 func containerMemory(ctx context.Context, r remote.Runner) ([]usage, error) {
-	out, err := r.Run(ctx, "docker", "ps", "-q", "--no-trunc")
+	out, err := containerLimits(ctx, r)
 	if err != nil {
-		return nil, fmt.Errorf("listing running containers: %w", err)
-	}
-	ids := strings.Fields(out)
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	out, err = r.Run(ctx, append([]string{"docker", "container", "inspect", "--format", "{{.Id}}\t{{.Name}}\t{{.HostConfig.Memory}}"}, ids...)...)
-	if err != nil {
-		return nil, fmt.Errorf("reading container limits: %w", err)
+		return nil, err
 	}
 	var list []usage
 	byID := map[string]int{}
@@ -233,6 +225,28 @@ func containerMemory(ctx context.Context, r remote.Runner) ([]usage, error) {
 		list[i].used = n
 	}
 	return list, nil
+}
+
+// containerLimits lists the running containers with their limits. Listing and inspecting are two
+// calls, and another app's deploy may remove a container in between — it retires its old copies
+// after it has let go of admission — which fails the inspect for a container that no longer uses
+// anything. That is asked again, a few times, before it counts as a failure.
+func containerLimits(ctx context.Context, r remote.Runner) (string, error) {
+	var err error
+	for range 3 {
+		var out string
+		if out, err = r.Run(ctx, "docker", "ps", "-q", "--no-trunc"); err != nil {
+			return "", fmt.Errorf("listing running containers: %w", err)
+		}
+		ids := strings.Fields(out)
+		if len(ids) == 0 {
+			return "", nil
+		}
+		if out, err = r.Run(ctx, append([]string{"docker", "container", "inspect", "--format", "{{.Id}}\t{{.Name}}\t{{.HostConfig.Memory}}"}, ids...)...); err == nil {
+			return out, nil
+		}
+	}
+	return "", fmt.Errorf("reading container limits: %w", err)
 }
 
 // sizeUnits are the suffixes docker stats prints: binary on Linux, decimal elsewhere.

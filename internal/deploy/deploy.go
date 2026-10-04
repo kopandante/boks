@@ -893,8 +893,12 @@ func Unlock(ctx context.Context, r remote.Runner, app string) error {
 		admErr = fmt.Errorf("could not check the admission lock %s: %w", admitLock, admErr)
 	}
 	_, err := r.Run(ctx, "rmdir", lockPath(app))
+	// No app lock at all is fine when the admission lock was what was stale — but only an answer
+	// from the server says the app lock is absent; a failed connection does not.
 	if err != nil && admErr == nil && freed {
-		return nil
+		if out, e := r.Run(ctx, "sh", "-c", "test -e "+lockPath(app)+" && echo present || echo absent"); e == nil && strings.TrimSpace(out) == "absent" {
+			return nil
+		}
 	}
 	return errors.Join(err, admErr)
 }
