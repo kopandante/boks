@@ -163,7 +163,7 @@ ports:
   - {name: actions, port: 3001, host: actions.example.com, health_port: 3000}
 `
 
-var fixed = Options{Pull: true, Env: []byte("SECRET=1\n"), Now: func() time.Time { return time.Unix(1700000000, 0) }}
+var fixed = Options{Env: []byte("SECRET=1\n"), Now: func() time.Time { return time.Unix(1700000000, 0) }}
 
 func TestRunHappyPath(t *testing.T) {
 	f := newFake()
@@ -1135,14 +1135,12 @@ func TestRunDoesNotGuessRevertTargetAmongSeveralOld(t *testing.T) {
 	}
 }
 
-func TestRollbackSkipsPull(t *testing.T) {
+// No env means no env file.
+func TestRunWithoutEnv(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v1", Options{Now: fixed.Now}); err != nil {
 		t.Fatal(err)
-	}
-	if f.has("docker pull") {
-		t.Errorf("rollback must not pull, calls %v", f.calls)
 	}
 	for _, c := range f.calls {
 		if strings.Contains(c, "--env-file") {
@@ -1511,5 +1509,22 @@ func TestSnapshotKeepsTheDigestOfAShortImageName(t *testing.T) {
 	}
 	if snap.Digest != "sha256:abc" {
 		t.Errorf("want the canonical repository's digest, got %q", snap.Digest)
+	}
+}
+
+// A snapshot names the release it was deployed over: that, not deploy order, is where a rollback
+// without an id returns once a rollback has happened.
+func TestSnapshotNamesTheReleaseItWasDeployedOver(t *testing.T) {
+	f := routedFake(t, nil)
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/demo-v2-1700000000.json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.Previous != "demo-v1-1" {
+		t.Errorf("want the release serving before, got %q", snap.Previous)
 	}
 }

@@ -20,7 +20,9 @@ import (
 const usage = `usage: boks [-f boks.yml] <command>
 
   deploy <tag>     pull image:<tag>, start it, switch the proxy, retire the previous version
-  rollback <tag>   same as deploy without an explicit pull (docker still fetches a missing image)
+  rollback [id]    return to a recorded release (the previous one by default), reproducing the
+                   image by digest, the ports, volumes and environment it actually ran with.
+                   The ids are what "boks releases" prints
   ps               containers and proxy routes of this app on every server
   releases         releases recorded on each server, newest last
   proxy boot       make sure kamal-proxy is running (idempotent)
@@ -68,12 +70,30 @@ type action func(ctx context.Context, r remote.Runner) error
 func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
-	case "deploy", "rollback":
+	case "deploy":
 		if len(rest) != 1 {
-			return fmt.Errorf("%s needs exactly one <tag>", cmd)
+			return fmt.Errorf("deploy needs exactly one <tag>")
 		}
+		stamp := now()
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return runDeploy(ctx, r, out, cfg, rest[0], cmd == "deploy")
+			return runDeploy(ctx, r, out, cfg, rest[0], stamp)
+		})
+	case "rollback":
+		if len(rest) > 1 {
+			return fmt.Errorf("rollback takes at most one release id; `boks releases` lists them")
+		}
+		id := ""
+		if len(rest) == 1 {
+			id = rest[0]
+		}
+		if len(cfg.Servers) > 1 {
+			if err := sameRollback(ctx, cfg, id); err != nil {
+				return err
+			}
+		}
+		stamp := now()
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			return deploy.Rollback(ctx, r, out, cfg, id, deploy.Options{Stamp: stamp})
 		})
 	case "releases":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return releases(ctx, r, out, cfg) })
@@ -89,22 +109,50 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 }
 
+// connect and now are what a command reaches the servers and the clock through.
+var (
+	connect = func(host string) remote.Runner { return remote.SSH{Host: host} }
+	now     = time.Now
+)
+
+// sameRollback asks every server, before any of them changes, where a rollback would take it, and
+// refuses unless that is one release everywhere. A rollback refused halfway through the list would
+// leave the app on two versions; so would one that took each server to its own previous release,
+// as after a deploy that reached only some of them.
+func sameRollback(ctx context.Context, cfg *config.Config, id string) error {
+	targets := make([]string, len(cfg.Servers))
+	for i, s := range cfg.Servers {
+		target, err := deploy.CheckRollback(ctx, connect(s), cfg, id)
+		if err != nil {
+			return fmt.Errorf("%s: %w\nno server was rolled back", s, err)
+		}
+		targets[i] = target
+	}
+	for i, target := range targets {
+		if target != targets[0] {
+			return fmt.Errorf("the servers would roll back to different releases (%s: %s, %s: %s), so none was; "+
+				"name one with `boks rollback <id>`, or deploy again", cfg.Servers[0], targets[0], cfg.Servers[i], target)
+		}
+	}
+	return nil
+}
+
 func each(ctx context.Context, cfg *config.Config, out io.Writer, fn action) error {
 	for _, s := range cfg.Servers {
 		fmt.Fprintf(out, "== %s\n", s)
-		if err := fn(ctx, remote.SSH{Host: s}); err != nil {
+		if err := fn(ctx, connect(s)); err != nil {
 			return fmt.Errorf("%s: %w", s, err)
 		}
 	}
 	return nil
 }
 
-func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string, pull bool) error {
+func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string, stamp time.Time) error {
 	env, err := cfg.EnvContent()
 	if err != nil {
 		return err
 	}
-	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Pull: pull, Env: env})
+	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Env: env, Stamp: stamp})
 }
 
 func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config) error {
