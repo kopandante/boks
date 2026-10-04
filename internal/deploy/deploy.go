@@ -21,7 +21,9 @@ import (
 
 type Options struct {
 	Env []byte
-	Now func() time.Time
+	// Login is the registry login every pull of the app's image goes through; nil for a public image.
+	Login *Login
+	Now   func() time.Time
 	// Stamp names this run's containers and releases; zero means Now. A command that goes over
 	// several servers passes one, so a release has the same id on each of them and `boks rollback
 	// <id>` means one release everywhere, not one that exists on a single server.
@@ -111,24 +113,28 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if _, err := checkNetworks(ctx, r, cfg, name); err != nil {
 		return err
 	}
-	if routed {
-		if err := bootProxy(ctx, r, log, cfg.App, cfg.ProxyImage, o); err != nil {
-			return err
-		}
-		// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
-		// the deploy or, worse, makes it accept and then fail every TLS handshake for that host.
-		if covered(cfg) && !cert.Installed(ctx, r, cfg) {
-			crt, _ := cert.ServerPaths(cfg.Cert)
-			return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
-		}
-	}
-	if err := pull(ctx, r, log, l.ref, l.pull || missing(ctx, r, l.ref)); err != nil {
+	// The pull comes before the proxy is booted: a registry that refuses the login, or an image that
+	// is not there, is a refusal that leaves the server as it found it.
+	if err := pull(ctx, r, log, l.ref, l.pull || missing(ctx, r, l.ref), o.Login); err != nil {
 		return err
 	}
 	// Whether the image declares a HEALTHCHECK is known before anything is touched. A deploy that
 	// is bound to be refused must not first take the running copy down.
 	if !routed && declaresNoHealthcheck(ctx, r, l.ref) {
 		return noHealthcheck(cfg)
+	}
+	if routed {
+		if err := bootProxy(ctx, r, log, cfg.App, cfg.ProxyImage, o); err != nil {
+			return err
+		}
+		// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
+		// the deploy or, worse, makes it accept and then fail every TLS handshake for that host. The
+		// file is read through the proxy, so only once it is booted: a stopped proxy would read as a
+		// missing certificate.
+		if covered(cfg) && !cert.Installed(ctx, r, cfg) {
+			crt, _ := cert.ServerPaths(cfg.Cert)
+			return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
+		}
 	}
 	old, err := containers(ctx, r, cfg.App)
 	if err != nil {
@@ -991,9 +997,16 @@ func missing(ctx context.Context, r remote.Runner, ref string) bool {
 	return err == nil && strings.TrimSpace(out) == "absent"
 }
 
-func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabled bool) error {
+// pull is the one place an app's image is fetched, for a deploy and for a rollback alike. An image on
+// the private registry goes through the login; any other — a public image, or a release recorded
+// before the image moved — is pulled as it always was.
+func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabled bool, login *Login) error {
 	if !enabled {
 		return nil
+	}
+	if login != nil && login.Logs(ref) {
+		fmt.Fprintf(log, "pull %s (logged in to %s for the pull)\n", ref, login.Host)
+		return pullWithLogin(ctx, r, login, ref)
 	}
 	fmt.Fprintf(log, "pull %s\n", ref)
 	_, err := r.Run(ctx, "docker", "pull", ref)
@@ -1160,6 +1173,12 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string) []string {
 	for _, v := range cfg.Volumes {
 		vol, path, _ := strings.Cut(v, ":")
 		a = append(a, "-v", cfg.App+proxy.NameSep+vol+":"+path)
+	}
+	// An image on the private registry is fetched by pull alone, logged in. Left to itself, docker
+	// would fetch one that went missing without the login — refused, or worse, let through by a login
+	// some earlier run left behind.
+	if cfg.Registry.Logs(ref) {
+		a = append(a, "--pull", "never")
 	}
 	return append(a, ref)
 }

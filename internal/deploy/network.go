@@ -50,9 +50,15 @@ func hasName(names []string, name string) bool {
 
 // boxFormat prints one JSON object per container, so names and labels that hold tabs, spaces or
 // quotes still parse.
+//
+// The health is read with index, not as .State.Health: `.Id` is no field of docker's Go type (that
+// is ID), so the CLI runs the template over the raw JSON instead, where a container without a
+// HEALTHCHECK has no Health key at all — and a field lookup of a missing key fails the whole
+// inspect (docker 29.8, boks-lab, 2026-10-04: every deploy refused on a server holding one such
+// container). index answers a missing key with nothing.
 const boxFormat = `{"id":{{json .Id}},"name":{{json .Name}},"hostname":{{json .Config.Hostname}},` +
 	`"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}},` +
-	`"running":{{json .State.Running}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}`
+	`"running":{{json .State.Running}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}""{{end}}}`
 
 // inventory lists every container on the server, stopped ones too: a stopped copy comes back with
 // its aliases. All of them rather than those docker's network filter returns, which is documented

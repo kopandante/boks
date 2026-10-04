@@ -32,6 +32,8 @@ type fake struct {
 	// onRun, when set, sees every command as it runs, before its answer is looked up: a test can
 	// change what the server says from then on.
 	onRun func(cmd string)
+	// stdin is what each command that is not a file write was given on its standard input.
+	stdin map[string]string
 }
 
 type write struct {
@@ -174,6 +176,10 @@ func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string
 			return "", f.wrote(strings.Trim(path, "'"), string(content), true)
 		}
 	}
+	if f.stdin == nil {
+		f.stdin = map[string]string{}
+	}
+	f.stdin[strings.Join(args, " ")] = string(content)
 	return f.Run(ctx, args...)
 }
 
@@ -231,6 +237,8 @@ func TestRunHappyPath(t *testing.T) {
 		// Whether the app's network is free for its alias is known before anything changes.
 		netOwnerQuery("boks-demo"),
 		boxesQuery,
+		// The image comes before the proxy: a pull the registry refuses leaves the server as it was.
+		"docker pull ghcr.io/x/y:v2",
 		// The proxy and its networks are every app's, so booting it takes the server's admission lock.
 		admitTake("demo"),
 		"docker network inspect boks",
@@ -239,7 +247,6 @@ func TestRunHappyPath(t *testing.T) {
 		proxyNets,
 		proxyList,
 		admitGive("demo"),
-		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		proxyList,
 		admitTake("demo"),
@@ -316,7 +323,7 @@ const proxyProbe = "docker ps -a --filter name=^boks-proxy$ --format {{.State}}"
 
 const boxesQuery = boxes + ` || exit 1; [ -z "$ids" ] || exec docker inspect --format '{"id":{{json .Id}},"name":{{json .Name}},` +
 	`"hostname":{{json .Config.Hostname}},"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}},` +
-	`"running":{{json .State.Running}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}' $ids`
+	`"running":{{json .State.Running}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}""{{end}}}' $ids`
 
 func netOwnerQuery(network string) string {
 	return netOwner + ` --format '{{json .Labels}}' '` + network + `' 2>&1) && echo "$out" || ` +
@@ -1488,6 +1495,28 @@ func TestSnapshotKeepsTheCertificateDomains(t *testing.T) {
 	}
 	if len(snap.CertDomains) != 1 || snap.CertDomains[0] != "*.example.com" {
 		t.Errorf("want the certificate's domains, got %v", snap.CertDomains)
+	}
+}
+
+// The certificate is read through the proxy, so it is checked once the proxy is booted: a deploy
+// still brings back a proxy that was stopped or removed, with the certificate on its volume, rather
+// than send the operator to issue a certificate that is already there.
+func TestTheCertificateIsCheckedOnceTheProxyIsUp(t *testing.T) {
+	f := newFake() // no proxy: the deploy boots it
+	const crt = "docker exec boks-proxy cat /certs/boks/_.example.com.crt"
+	f.fail[crt] = errors.New("Error response from daemon: No such container: boks-proxy")
+	f.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, "docker run -d --name boks-proxy") {
+			delete(f.fail, crt)
+			f.out[crt] = "-----BEGIN CERTIFICATE-----"
+		}
+	}
+	cfg := parse(t, onePort+"cert: {domains: [\"*.example.com\"], dns: cloudflare, email: a@example.com}\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if boot, check := f.callAt("docker run -d --name boks-proxy"), f.callAt(crt); boot < 0 || check < boot {
+		t.Errorf("want the proxy booted before the certificate is read: %d %d", boot, check)
 	}
 }
 

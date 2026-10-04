@@ -103,7 +103,9 @@
    - [x] 4б — `uses:` и его контракт, снимок формата 4
 5. [ ] R4 `server install` делает firewall хоста совместимым с Docker (без `flush ruleset`, мосты boks в
        forward, постоянный `ip_forward`; проверка reload и перезагрузки с живыми tinyproxy и fail2ban)
-6. [ ] E2 вход в реестр Depot короткоживущим pull-токеном перед `pull` (`docker login` через stdin)
+6. [x] E2 вход в реестр Depot перед `pull` (`docker login` через stdin, logout в любом исходе) — общим
+       токеном Depot из окружения boks, не короткоживущим pull-токеном (тот для реестра проекта
+       отвечает `not_found`, #52)
 7. [x] Тест адреса посетителя через kamal-proxy v0.10.0 с TLS — XFF перезаписывается, `X-Real-IP` и
        `CF-Connecting-IP` проходят (локально и на сервере 2026-10-02)
 8. [ ] glavdoroga: `boks.yml` ×3 (convex, redis — свой образ с HEALTHCHECK, next), повтор
