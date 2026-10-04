@@ -43,7 +43,8 @@ func TestDeployArgsMinimal(t *testing.T) {
 type fake struct {
 	calls  []string
 	state  string
-	silent int // how many times a just-started proxy does not answer yet
+	silent int               // how many times a just-started proxy does not answer yet
+	out    map[string]string // answers by command prefix
 }
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
@@ -55,6 +56,11 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	if cmd == answer && f.silent > 0 {
 		f.silent--
 		return "", errors.New("dial unix /home/kamal-proxy/.config/kamal-proxy/kamal-proxy.sock: connect: no such file or directory")
+	}
+	for prefix, out := range f.out {
+		if strings.HasPrefix(cmd, prefix) {
+			return out, nil
+		}
 	}
 	return "", nil
 }
@@ -78,16 +84,58 @@ func TestBootIdempotent(t *testing.T) {
 }
 
 func TestBootStartsMissingProxy(t *testing.T) {
-	f := &fake{state: ""}
+	f := &fake{state: "", out: map[string]string{answer + " --json": "{}"}}
 	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
-	started := f.calls[len(f.calls)-2]
-	if !strings.HasPrefix(started, "docker run -d --name boks-proxy") || !strings.HasSuffix(started, " img") {
+	started := f.calls[len(f.calls)-3]
+	if !strings.HasPrefix(started, "docker run -d --name boks-proxy --restart unless-stopped --network boks ") || !strings.HasSuffix(started, " img") {
 		t.Errorf("expected docker run, got %s", started)
 	}
-	if f.calls[len(f.calls)-1] != answer {
+	if f.calls[len(f.calls)-2] != answer {
 		t.Errorf("Boot must wait for the proxy to answer: %v", f.calls)
+	}
+}
+
+// A proxy created anew keeps its routes in its config volume but none of its networks: it joins
+// those of the containers its routes target — an app's own network, the network apps shared
+// before — once each, and a target that is gone costs a warning, not the boot.
+func TestANewProxyJoinsTheNetworksItsRoutesNeed(t *testing.T) {
+	inspect := "docker container inspect --format {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}} "
+	f := &fake{state: "", out: map[string]string{
+		answer + " --json": `{"a.web":{"hosts":["a.example.com"],"targets":["a-v1-1:3000"]},` +
+			`"a.api":{"hosts":["api.example.com"],"targets":["a-v1-1:3001"]},"b.web":{"hosts":["b.example.com"],"targets":["b-v1-1:80"]}}`,
+		inspect + "a-v1-1": "boks-a ",
+		inspect + "b-v1-1": "boks-test boks ",
+	}}
+	var log strings.Builder
+	if err := Boot(context.Background(), f, &log, "img"); err != nil {
+		t.Fatal(err)
+	}
+	var joins []string
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "docker network connect ") {
+			joins = append(joins, c)
+		}
+	}
+	if strings.Join(joins, "\n") != "docker network connect boks-a boks-proxy\ndocker network connect boks-test boks-proxy" {
+		t.Errorf("want each target's network joined once, and not its own: %v", f.calls)
+	}
+	// A stopped proxy that starts again keeps its networks.
+	g := &fake{state: "exited", out: f.out}
+	if err := Boot(context.Background(), g, io.Discard, "img"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range g.calls {
+		if strings.HasPrefix(c, "docker network connect") || strings.HasPrefix(c, answer+" --json") {
+			t.Errorf("a restarted proxy has its networks: %v", g.calls)
+		}
+	}
+	// A route list that cannot be read is a warning.
+	h := &fake{state: ""}
+	log.Reset()
+	if err := Boot(context.Background(), h, &log, "img"); err != nil || !strings.Contains(log.String(), "joined no app network") {
+		t.Errorf("want a warning, got %v: %q", err, log.String())
 	}
 }
 

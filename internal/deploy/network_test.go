@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/kopandante/boks/internal/proxy"
 )
 
 // boxLine is one container as the inventory prints it, attached to boks-demo with these aliases.
@@ -180,12 +182,22 @@ func TestAnAppWithoutRoutesTakesTheProxyOffItsNetwork(t *testing.T) {
 	f := routelessFake("healthy")
 	f.out[proxyProbe] = "running"
 	f.out[proxyNets] = "boks,boks-bot"
-	f.out[proxyList] = listed(t, nil)
+	f.out[proxyList] = listed(t, map[string]proxy.Listed{"bot.web": {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:80"}}})
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
 	}
-	if !f.has("docker network disconnect boks-bot boks-proxy") {
-		t.Errorf("the proxy routes nothing of the app any more: %v", f.calls)
+	removed, left := f.callAt("docker exec boks-proxy kamal-proxy remove bot.web"), f.callAt("docker network disconnect boks-bot boks-proxy")
+	if removed < 0 || left < removed {
+		t.Errorf("the proxy leaves once the app's last route is gone: %d %d %v", removed, left, f.calls)
+	}
+	// A route that could not be removed keeps the proxy where it reaches the old copy.
+	k := routelessFake("healthy")
+	k.out[proxyProbe] = "running"
+	k.out[proxyNets] = "boks,boks-bot"
+	k.out[proxyList] = f.out[proxyList]
+	k.fail["docker exec boks-proxy kamal-proxy remove"] = errors.New("connection reset")
+	if err := Run(context.Background(), k, io.Discard, parse(t, noPorts), "v2", quick()); err == nil || k.has("docker network disconnect") {
+		t.Errorf("want the failed removal, and the proxy kept on the network: %v: %v", err, k.calls)
 	}
 	g := routelessFake("healthy")
 	g.out[proxyProbe] = "exited"

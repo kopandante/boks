@@ -159,7 +159,52 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 	if err != nil {
 		return err
 	}
-	return awaitAnswer(ctx, r)
+	if err := awaitAnswer(ctx, r); err != nil {
+		return err
+	}
+	if state == "" {
+		reattach(ctx, r, log)
+	}
+	return nil
+}
+
+// reattach puts a proxy that was just created back on the networks of the containers its routes
+// target. The routes outlive a removed proxy in its config volume, its networks do not: a new
+// container is on Network alone, and every route to an app on its own network — or on the network
+// apps shared before — would answer 502 until that app is deployed again. A stopped proxy that is
+// started again keeps its networks and needs none of this. Best effort: a target that is gone has
+// no network to join, and the next deploy of its app connects the proxy where it routes.
+func reattach(ctx context.Context, r remote.Runner, log io.Writer) {
+	services, names, err := Services(ctx, r)
+	if err != nil {
+		fmt.Fprintf(log, "warning: the new proxy could not list its routes, so it joined no app network: %v\n", err)
+		return
+	}
+	seen, joined := map[string]bool{}, map[string]bool{Network: true}
+	for _, n := range names {
+		for _, t := range services[n].Targets {
+			c, _, _ := strings.Cut(t, ":")
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			out, err := r.Run(ctx, "docker", "container", "inspect", "--format",
+				"{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}", c)
+			if err != nil {
+				fmt.Fprintf(log, "warning: route %s targets %s, whose networks could not be read: %v\n", n, c, err)
+				continue
+			}
+			for _, net := range strings.Fields(out) {
+				if joined[net] {
+					continue
+				}
+				joined[net] = true
+				if err := Connect(ctx, r, log, net); err != nil {
+					fmt.Fprintf(log, "warning: route %s may not reach %s: %v\n", n, c, err)
+				}
+			}
+		}
+	}
 }
 
 // awaitAnswer waits for a proxy that was just started to open its command socket: the deploy
