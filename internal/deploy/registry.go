@@ -46,18 +46,26 @@ const registryWait = 10 * time.Minute
 
 // loginPull is the shell script that pulls ref with a login to l, run on the server as one
 // transaction: the logout is armed before the login and runs however the script ends — the pull
-// failing, the login refused, the connection to boks dropping (the pull then dies writing to it, or
-// finishes, and the script exits either way). One script rather than three commands from here,
-// because a run of boks cut short could otherwise leave the login behind it, and its own logout
-// would race the login it never saw finish.
+// failing, the login refused, a signal, the connection to boks dropping. One script rather than
+// three commands from here, because a run of boks cut short could otherwise leave the login behind
+// it, and its own logout would race the login it never saw finish.
+//
+// The pull runs in the background, watched. A pull can sit silent for minutes (a stalled registry,
+// a busy daemon), and a silent process never learns that boks went away: nothing makes it write to
+// the closed connection. So a watcher writes a dot to the connection every two seconds and stops
+// the pull once that write fails — the connection is gone, the run was cancelled. The script waits
+// on the pull with the wait builtin, which a trapped signal interrupts at once, where a foreground
+// pull would hold the trap until the pull ended.
 func loginPull(l *Login, ref string) string {
 	host := remote.Quote(l.Host)
 	return "exec 9>>" + registryLock + " || exit 1\n" +
 		"flock -w " + strconv.Itoa(int(registryWait.Seconds())) + " 9 || { echo " +
 		remote.Quote("boks: another pull has held the registry login "+registryLock+" for over "+registryWait.String()) + " >&2; exit 1; }\n" +
+		"pull= watch=\n" +
 		// A logout that fails leaves the token on the server, which is a failure of the pull even when
 		// the image came: the status says so, unless the pull had already failed and says it first.
-		"logout() { st=$?; docker logout " + host + " >/dev/null 2>&1 && return; echo " +
+		"logout() { st=$?; [ -z \"$pull\" ] || kill \"$pull\" 2>/dev/null; [ -z \"$watch\" ] || kill \"$watch\" 2>/dev/null\n" +
+		"  docker logout " + host + " >/dev/null 2>&1 && return; echo " +
 		remote.Quote("boks: docker logout "+l.Host+" failed, so the token may be left in the docker config of this "+
 			"server; run `docker logout "+l.Host+"` there") + " >&2; [ \"$st\" -ne 0 ] || exit 1; }\n" +
 		"trap logout EXIT\n" +
@@ -66,7 +74,14 @@ func loginPull(l *Login, ref string) string {
 		// credentials are stored unencrypted, true for the length of the pull and noise after it.
 		"said=$(docker login " + host + " -u " + remote.Quote(l.User) + " --password-stdin 2>&1 >/dev/null) || " +
 		"{ echo \"$said\" >&2; echo " + remote.Quote(loginRefused) + " >&2; exit 1; }\n" +
-		"docker pull " + remote.Quote(ref) + " </dev/null"
+		"docker pull " + remote.Quote(ref) + " </dev/null >/dev/null & pull=$!\n" +
+		// A subshell takes SIGPIPE back to its default, which would end the watcher and leave the pull;
+		// ignored, the failed write is an error the watcher acts on.
+		// Its sleep holds neither the connection nor the lock, so stopping the watcher releases both at
+		// once rather than two seconds later.
+		"{ trap '' PIPE; while kill -0 \"$pull\" 2>/dev/null; do sleep 2 >/dev/null 2>&1; printf . 2>/dev/null || " +
+		"{ kill \"$pull\" 2>/dev/null; exit; }; done; } 9>&- & watch=$!\n" +
+		"wait \"$pull\""
 }
 
 // loginRefused marks, in what the script says, that the login failed rather than the pull.

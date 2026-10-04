@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kopandante/boks/internal/config"
 )
@@ -213,18 +215,18 @@ func TestNewLogin(t *testing.T) {
 func TestTheLoginScriptLogsOutWhateverHappens(t *testing.T) {
 	dir := t.TempDir()
 	fakeDocker := `#!/bin/sh
-echo "$1" >> "$DIR/log"
+echo "$*" >> "$DIR/log"
 case "$1" in
 login) cat > "$DIR/login-stdin"; echo "WARNING! stored unencrypted" >&2; [ "$LOGIN" = ok ] || exit 1 ;;
 pull) cat > "$DIR/pull-stdin"
-  case "$PULL" in fail) exit 3 ;; term) kill -TERM $PPID; sleep 1 ;; esac ;;
+  case "$PULL" in fail) exit 3 ;; term) kill -TERM $PPID; sleep 1 ;; hang) exec sleep 30 ;; esac ;;
 logout) [ "$LOGOUT" = ok ] || exit 1 ;;
 esac
 `
 	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(fakeDocker), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "flock"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "flock"), []byte("#!/bin/sh\necho \"$*\" > \"$DIR/flock-args\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	l := &Login{Registry: &config.Registry{Host: "registry.depot.dev", User: "x-token", TokenEnv: "T"}, Token: depotToken}
@@ -234,53 +236,115 @@ esac
 		shells = append(shells, "dash")
 	}
 	for _, shell := range shells {
-		t.Run(shell, func(t *testing.T) { runLoginScript(t, shell, dir, l) })
+		t.Run(shell, func(t *testing.T) {
+			runLoginScript(t, shell, dir, l)
+			runLoginScriptCut(t, shell, dir, l)
+		})
 	}
+}
+
+const (
+	wantLogin  = "login registry.depot.dev -u x-token --password-stdin"
+	wantPull   = "pull registry.depot.dev/p:v1"
+	wantLogout = "logout registry.depot.dev"
+)
+
+func loginScript(shell, dir string, l *Login, login, pull, logout string) *exec.Cmd {
+	os.Remove(filepath.Join(dir, "log"))
+	os.Remove(filepath.Join(dir, "pull-stdin"))
+	os.Remove(filepath.Join(dir, "flock-args"))
+	cmd := exec.Command(shell, "-c", loginPull(l, "registry.depot.dev/p:v1"))
+	cmd.Stdin = bytes.NewReader([]byte(l.Token))
+	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "DIR=" + dir, "LOGIN=" + login, "PULL=" + pull, "LOGOUT=" + logout}
+	return cmd
+}
+
+// dockerRan is what the stand-in docker was asked, one command per element.
+func dockerRan(dir string) []string {
+	log, _ := os.ReadFile(filepath.Join(dir, "log"))
+	return strings.Split(strings.TrimSpace(string(log)), "\n")
 }
 
 func runLoginScript(t *testing.T, shell, dir string, l *Login) {
 	for _, c := range []struct {
 		login, pull, logout string
 		status              int
-		log                 string
+		ran                 []string
 	}{
-		{"ok", "ok", "ok", 0, "login pull logout"},
-		{"no", "ok", "ok", 1, "login logout"},
-		{"ok", "fail", "ok", 3, "login pull logout"},
-		{"ok", "term", "ok", 143, "login pull logout"},
+		{"ok", "ok", "ok", 0, []string{wantLogin, wantPull, wantLogout}},
+		{"no", "ok", "ok", 1, []string{wantLogin, wantLogout}},
+		{"ok", "fail", "ok", 3, []string{wantLogin, wantPull, wantLogout}},
+		{"ok", "term", "ok", 143, []string{wantLogin, wantPull, wantLogout}},
 		// A logout that fails fails the script, and a failed pull keeps its own status.
-		{"ok", "ok", "fail", 1, "login pull logout"},
-		{"ok", "fail", "fail", 3, "login pull logout"},
+		{"ok", "ok", "fail", 1, []string{wantLogin, wantPull, wantLogout}},
+		{"ok", "fail", "fail", 3, []string{wantLogin, wantPull, wantLogout}},
 	} {
-		os.Remove(filepath.Join(dir, "log"))
-		os.Remove(filepath.Join(dir, "pull-stdin"))
-		cmd := exec.Command(shell, "-c", loginPull(l, "registry.depot.dev/p:v1"))
-		cmd.Stdin = bytes.NewReader([]byte(l.Token))
-		cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "DIR=" + dir, "LOGIN=" + c.login, "PULL=" + c.pull, "LOGOUT=" + c.logout}
+		cmd := loginScript(shell, dir, l, c.login, c.pull, c.logout)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		_ = cmd.Run()
+		name := "login " + c.login + ", pull " + c.pull + ", logout " + c.logout
 		if got := cmd.ProcessState.ExitCode(); got != c.status {
-			t.Errorf("login %s, pull %s, logout %s: exit %d, want %d (%s)", c.login, c.pull, c.logout, got, c.status, stderr.String())
+			t.Errorf("%s: exit %d, want %d (%s)", name, got, c.status, stderr.String())
 		}
 		if c.logout != "ok" && !strings.Contains(stderr.String(), "docker logout registry.depot.dev failed") {
-			t.Errorf("a failed logout is said: %q", stderr.String())
+			t.Errorf("%s: a failed logout is said: %q", name, stderr.String())
 		}
-		log, _ := os.ReadFile(filepath.Join(dir, "log"))
-		if got := strings.Join(strings.Fields(string(log)), " "); got != c.log {
-			t.Errorf("login %s, pull %s: docker ran %q, want %q", c.login, c.pull, got, c.log)
+		if got := dockerRan(dir); strings.Join(got, "|") != strings.Join(c.ran, "|") {
+			t.Errorf("%s: docker ran %q, want %q", name, got, c.ran)
+		}
+		// Waiting, and for long enough to outlast another pull: an flock without -w, or with -u,
+		// would not serialize anything.
+		if got, _ := os.ReadFile(filepath.Join(dir, "flock-args")); strings.TrimSpace(string(got)) != "-w 600 9" {
+			t.Errorf("%s: flock ran with %q", name, got)
 		}
 		if got, _ := os.ReadFile(filepath.Join(dir, "login-stdin")); string(got) != depotToken {
-			t.Errorf("login %s, pull %s: login read %q from stdin", c.login, c.pull, got)
+			t.Errorf("%s: login read %q from stdin", name, got)
 		}
 		if got, _ := os.ReadFile(filepath.Join(dir, "pull-stdin")); len(got) != 0 {
-			t.Errorf("login %s, pull %s: the pull read %q from stdin", c.login, c.pull, got)
+			t.Errorf("%s: the pull read %q from stdin", name, got)
 		}
 		if c.login != "ok" && (!strings.Contains(stderr.String(), loginRefused) || !strings.Contains(stderr.String(), "WARNING")) {
-			t.Errorf("a refused login is said as such, with what docker said: %q", stderr.String())
+			t.Errorf("%s: a refused login is said as such, with what docker said: %q", name, stderr.String())
 		}
 		if c.login == "ok" && strings.Contains(stderr.String(), "WARNING") {
-			t.Errorf("what a successful login says is not passed on: %q", stderr.String())
+			t.Errorf("%s: what a successful login says is not passed on: %q", name, stderr.String())
 		}
+	}
+}
+
+// boks going away — a cancelled run, a CI job killed — closes the connection the script writes to.
+// A pull that sits silent would never notice; the watcher does, stops the pull and the script logs
+// out within seconds rather than when the pull would have ended.
+func runLoginScriptCut(t *testing.T, shell, dir string, l *Login) {
+	cmd := loginScript(shell, dir, l, "ok", "hang", "ok")
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100 && !slices.Contains(dockerRan(dir), wantPull); i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	start := time.Now()
+	out.Close()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		t.Fatalf("the script outlived the connection by 15s: docker ran %q", dockerRan(dir))
+	}
+	if cmd.ProcessState.ExitCode() == 0 {
+		t.Error("a pull cut short is not a success")
+	}
+	if got := dockerRan(dir); strings.Join(got, "|") != strings.Join([]string{wantLogin, wantPull, wantLogout}, "|") {
+		t.Errorf("docker ran %q, want the logout after the cut pull", got)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("the logout came %s after the connection closed", d)
 	}
 }
