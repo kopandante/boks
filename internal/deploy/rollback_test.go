@@ -180,8 +180,8 @@ func TestRollbackKeepsTheOldCopyWhenCurrentCannotBeMoved(t *testing.T) {
 		return nil
 	}
 	err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick())
-	if err == nil || !strings.Contains(err.Error(), "could not record it") {
-		t.Fatalf("want the unrecorded rollback reported, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "could not record it") || !strings.Contains(err.Error(), "`boks rollback` again") {
+		t.Fatalf("want the unrecorded rollback reported with the rollback to repeat, got %v", err)
 	}
 	if f.has("docker rm bot-v2-2") {
 		t.Errorf("the previous copy must be kept: %v", f.calls)
@@ -228,7 +228,7 @@ func TestRollbackHandlesTheCertificateLikeADeploy(t *testing.T) {
 }
 
 // An explicit id is the release returned to, whatever the current one was deployed over; and the
-// mounts are the recorded ones, not those the config names today.
+// route and mounts are the recorded ones, not those the config names today.
 func TestRollbackToAnExplicitRelease(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
@@ -236,7 +236,7 @@ func TestRollbackToAnExplicitRelease(t *testing.T) {
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v3-3\n"
 	f.out["cat .boks/demo/releases/demo-v3-3.json"] = `{"id":"demo-v3-3","previous":"demo-v2-2"}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1",
-		"digest":"sha256:one","ports":[{"name":"web","port":3000,"host":"demo.example.com"}],"volumes":["data:/data"],"network":"boks"}`
+		"digest":"sha256:one","ports":[{"name":"web","port":4000,"host":"old.example.com"}],"volumes":["data:/data"],"network":"boks"}`
 	cfg := parse(t, strings.Replace(onePort, "volumes: [data:/data]", "volumes: [cache:/cache]", 1))
 	if err := Rollback(context.Background(), f, io.Discard, cfg, "demo-v1-1", fixed); err != nil {
 		t.Fatal(err)
@@ -244,6 +244,9 @@ func TestRollbackToAnExplicitRelease(t *testing.T) {
 	run := f.callAt("docker run")
 	if run < 0 || !strings.HasSuffix(f.calls[run], "-v demo.data:/data ghcr.io/x/y@sha256:one") || strings.Contains(f.calls[run], "cache") {
 		t.Errorf("want release v1 with its own mounts only, got %v", f.calls)
+	}
+	if !f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1700000000:4000 --host old.example.com") {
+		t.Errorf("the route must be the recorded one, port and host: %v", f.calls)
 	}
 	if got := f.uploads[".boks/demo/current"]; got != "demo-v1-1\n" {
 		t.Errorf("current must name the release asked for, got %q", got)
