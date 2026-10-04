@@ -540,7 +540,7 @@ Shchr — 12. Docker на всех четырёх в режиме Swarm: это 
 |---|---|---|
 | Базы и кэши | 5 postgres + 7 redis на Habsida, по паре на Tokyo (auctions, telegram-bots), свои у riman, kids, shchr, encar | провижининг описан, кода нет |
 | Связки из нескольких контейнеров | стек телеметрии на Habsida (prometheus, loki, grafana, alloy, swarm-exporter), Convex + dashboard на Bravo, courier на Tokyo — всё это compose | compose **выброшен решением**; либо разбирать на отдельные приложения, либо пересматривать решение |
-| Свой registry | 20 образов на Habsida тянутся с `:5000`, на Bravo стоит `registry:2`, riman — с `registry.cars.habsidev.com` | вход в приватный реестр, его запуск и TLS не продуманы |
+| Свой registry | 20 образов на Habsida тянутся с `:5000`, на Bravo стоит `registry:2`, riman — с `registry.cars.habsidev.com` | вход в приватный реестр по HTTPS сделан (E2, блок `registry`, см. «Модель деплоя»); запуск своего реестра и его TLS не продуманы |
 | Превью по PR | `dkauto-preview`, `dbauto-preview`, `hanexport:pr-151`, `autohubkorea-convex-preview`, `translationspreview` | замысел |
 | Авторизация перед приложением | logto + oauth2-proxy на Shchr | не описано; умеет ли kamal-proxy forward-auth — проверить |
 | Расписания | Dokploy Schedules, cron-пробы, recycler | нет |

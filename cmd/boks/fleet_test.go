@@ -201,3 +201,18 @@ func TestTheRegistryTokenReachesTheLogin(t *testing.T) {
 		}
 	}
 }
+
+// The environment is read once, before any server is reached: an env_file that is not there
+// refuses the deploy with every server untouched, not after the first one was deployed.
+func TestAMissingEnvFileReachesNoServer(t *testing.T) {
+	a, b := &recorder{server: server{}}, &recorder{server: server{}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	cfg := parseConfig(t, twoServers+"env_file: missing.env\n")
+	cfg.Dir = t.TempDir()
+	if err := dispatch(context.Background(), cfg, []string{"deploy", "v2"}, io.Discard); err == nil || !strings.Contains(err.Error(), "missing.env") {
+		t.Errorf("want the missing env file named, got %v", err)
+	}
+	if len(a.calls)+len(b.calls) != 0 {
+		t.Errorf("no server is reached: %v %v", a.calls, b.calls)
+	}
+}
