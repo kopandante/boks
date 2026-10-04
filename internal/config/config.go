@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -38,7 +39,16 @@ var (
 	// survives; fractions and suffixes like `MB` or `GiB` are left out because they read as one thing
 	// and mean another depending on who parses them.
 	memoryRe = regexp.MustCompile(`^([1-9][0-9]*)([bkmgBKMG])$`)
+	// registryHostRe is a registry as docker names it in an image reference: a lowercase DNS name with
+	// at least one dot, or an IPv4 address, and an optional port. No scheme and no path — the
+	// repository belongs in image.
+	registryHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
+	envNameRe      = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	registryUserRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+-]*$`)
 )
+
+// DefaultRegistryUser is the user name Depot's registry takes with a token as the password.
+const DefaultRegistryUser = "x-token"
 
 // minMemory is the smallest limit docker accepts; below it `docker run` refuses, and it is better
 // to hear that from the config than from a half-done deploy.
@@ -123,9 +133,54 @@ type Config struct {
 	// app's name, its alias there. It is membership, not access control: two apps that use one
 	// dependency share its network and see each other.
 	Uses []string `yaml:"uses"`
+	// Registry is the private registry the image is pulled from: boks logs in to it on the server for
+	// each pull and logs out once the pull is over. Nil means the image is public and pulled without a
+	// login, as before.
+	Registry *Registry `yaml:"registry"`
 	// Attach overrides Networks with what a recorded release joined; never read from boks.yml.
 	Attach []Network `yaml:"-"`
 	Dir    string    `yaml:"-"`
+}
+
+// Registry is a private registry reached over HTTPS with a token (E2). The token itself is never in
+// boks.yml and never kept on a server: boks reads it from the environment it runs in — the
+// operator's shell or CI — under the name TokenEnv, and hands it to `docker login` on stdin.
+type Registry struct {
+	Host     string `yaml:"host"`      // registry.depot.dev; the image must live on this host
+	User     string `yaml:"user"`      // DefaultRegistryUser when empty
+	TokenEnv string `yaml:"token_env"` // the environment variable holding the token, e.g. DEPOT_TOKEN
+}
+
+// Token reads the registry's token from the environment through lookup (os.LookupEnv outside
+// tests). A token the config declares and the environment does not hold is a refusal (E6), and one
+// that is set but blank is the same thing: a login without a password would fail on the server, and
+// only after the deploy had begun.
+func (r *Registry) Token(lookup func(string) (string, bool)) (string, error) {
+	v, ok := lookup(r.TokenEnv)
+	if !ok {
+		return "", fmt.Errorf("registry.token_env: %s is not set in the environment boks runs in; "+
+			"export the token of %s under that name", r.TokenEnv, r.Host)
+	}
+	if strings.TrimSpace(v) == "" {
+		return "", fmt.Errorf("registry.token_env: %s is set but empty; it must hold the token of %s", r.TokenEnv, r.Host)
+	}
+	return v, nil
+}
+
+// ImageHost is the registry an image reference names, by docker's rule: the part before the first
+// slash when it has a dot or a colon in it or is localhost, and Docker Hub otherwise.
+func ImageHost(ref string) string {
+	first, _, ok := strings.Cut(ref, "/")
+	if ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
+		return first
+	}
+	return "docker.io"
+}
+
+// Logs reports whether pulling ref goes through the login to r. A release recorded before the image
+// moved to the registry names another host, and is pulled as it was then, without a login.
+func (r *Registry) Logs(ref string) bool {
+	return r != nil && ImageHost(ref) == r.Host
 }
 
 // ReplaceMode is how this app's versions take turns. An app without routes has no traffic to hand
@@ -185,6 +240,17 @@ func Parse(data []byte) (*Config, error) {
 		}
 		return nil, err
 	}
+	// `registry:` with nothing after it decodes to no registry at all, and the image would then be
+	// pulled without a login — which fails on the server, after the deploy began, and reads as a
+	// registry outage rather than as the half-written block it is.
+	if cfg.Registry == nil {
+		var probe struct {
+			Registry yaml.Node `yaml:"registry"`
+		}
+		if yaml.Unmarshal(data, &probe) == nil && probe.Registry.Kind != 0 {
+			return nil, errors.New("registry: the block is empty; give host and token_env, or remove the key for a public image")
+		}
+	}
 	// Anything past the first document would be read by nobody, so refuse the file rather than
 	// apply half of it. An empty document holds nothing that could go unread: a trailing `---`
 	// (with or without a comment after it) parsed on earlier versions and still does.
@@ -229,6 +295,9 @@ func (c *Config) applyDefaults() {
 	if c.DeployTimeout == "" {
 		c.DeployTimeout = DefaultDeployTimeout
 	}
+	if c.Registry != nil && c.Registry.User == "" {
+		c.Registry.User = DefaultRegistryUser
+	}
 }
 
 func (c *Config) validate() error {
@@ -257,6 +326,9 @@ func (c *Config) validate() error {
 	if err := c.Cert.validate(); err != nil {
 		return err
 	}
+	if err := c.validateRegistry(); err != nil {
+		return err
+	}
 	return c.validateLists()
 }
 
@@ -278,6 +350,48 @@ func (c *Config) validateResources() error {
 		}
 	default:
 		return fmt.Errorf("replace: %q must be %s or %s", c.Replace, ReplaceOverlap, ReplaceStopFirst)
+	}
+	return nil
+}
+
+func (c *Config) validateRegistry() error {
+	r := c.Registry
+	if r == nil {
+		return nil
+	}
+	switch {
+	case r.Host == "":
+		return errors.New("registry.host is required, e.g. registry.depot.dev")
+	case strings.HasPrefix(strings.ToLower(r.Host), "http://"):
+		return fmt.Errorf("registry.host: %q is plain HTTP, and HTTP registries are not supported: the token would cross the network in clear", r.Host)
+	case strings.Contains(r.Host, "://"):
+		return fmt.Errorf("registry.host: %q — write the host alone (registry.depot.dev); boks only speaks HTTPS to it", r.Host)
+	case strings.Contains(r.Host, "/"):
+		return fmt.Errorf("registry.host: %q — the host alone, without a path; the repository goes in image", r.Host)
+	case !registryHostRe.MatchString(r.Host):
+		return fmt.Errorf("registry.host: %q is not a registry host such as registry.depot.dev (lowercase, no scheme, optional :port)", r.Host)
+	}
+	// Docker talks plain HTTP to a registry on a loopback address unless told otherwise, so a token
+	// sent there would cross in clear — the case E2 rules out.
+	name, _, _ := strings.Cut(r.Host, ":")
+	if ip := net.ParseIP(name); name == "localhost" || ip != nil && ip.IsLoopback() {
+		return fmt.Errorf("registry.host: %q is a loopback address, which docker reaches over plain HTTP; HTTP registries are not supported", r.Host)
+	}
+	if !envNameRe.MatchString(r.TokenEnv) {
+		return fmt.Errorf("registry.token_env: %q must name an environment variable (%s), e.g. DEPOT_TOKEN — the token itself never goes in boks.yml",
+			r.TokenEnv, envNameRe)
+	}
+	if !registryUserRe.MatchString(r.User) {
+		return fmt.Errorf("registry.user: %q must match %s", r.User, registryUserRe)
+	}
+	// The login is to one host; an image elsewhere would be pulled without it and fail on the server.
+	if h := ImageHost(c.Image); h != r.Host {
+		return fmt.Errorf("image: %s is on %s, not on registry.host %s; boks logs in to %s only", c.Image, h, r.Host, r.Host)
+	}
+	// The proxy is booted by `docker run`, which pulls without the login.
+	if r.Logs(c.ProxyImage) {
+		return fmt.Errorf("proxy_image: %s is on the private registry %s, and the proxy is pulled without a login; use a public proxy image",
+			c.ProxyImage, r.Host)
 	}
 	return nil
 }

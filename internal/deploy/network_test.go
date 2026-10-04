@@ -339,7 +339,9 @@ func TestTheProxysOwnNameMustBeFreeOnTheNetwork(t *testing.T) {
 }
 
 // A proxy that cannot reach the target of another app's route fails the boot, and with it the deploy,
-// before anything of this app changes; the admission lock is given back.
+// before anything of this app changes; the admission lock is given back. The image is already pulled
+// by then — the pull goes first, so that a registry refusing the login leaves the proxy untouched —
+// and an image on disk changes nothing that runs.
 func TestAProxyThatCannotReachARouteStopsTheDeploy(t *testing.T) {
 	f := routedFake(t, map[string]proxy.Listed{"other.web": {Hosts: []string{"o.example.com"}, Targets: []string{"other-v1-1:80"}}})
 	f.fail["sh -c out=$(docker container inspect"] = errors.New("connection reset")
@@ -347,7 +349,7 @@ func TestAProxyThatCannotReachARouteStopsTheDeploy(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "other-v1-1") {
 		t.Fatalf("want the boot's failure, got %v", err)
 	}
-	if f.has("docker pull") || f.has("docker run") || len(f.appends) != 0 || !f.has(admitGive("demo")) {
+	if f.has("docker run") || len(f.appends) != 0 || !f.has(admitGive("demo")) {
 		t.Errorf("nothing of the app changes, and the lock is given back: %v", f.calls)
 	}
 }

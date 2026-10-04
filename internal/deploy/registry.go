@@ -1,0 +1,161 @@
+package deploy
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/kopandante/boks/internal/config"
+	"github.com/kopandante/boks/internal/remote"
+)
+
+// Login is what a pull from a private registry logs in with (E2). The token came from the
+// environment boks runs in; it reaches the server only on the stdin of `docker login`, never in a
+// command line, which anyone on the server can read in `ps`.
+type Login struct {
+	*config.Registry
+	Token string
+}
+
+// NewLogin reads the token of the config's registry from the environment through lookup, or is nil
+// for an app whose image is public. A token the config declares and the environment lacks is a
+// refusal, and the command makes it before it connects to any server (E6).
+func NewLogin(cfg *config.Config, lookup func(string) (string, bool)) (*Login, error) {
+	if cfg.Registry == nil {
+		return nil, nil
+	}
+	token, err := cfg.Registry.Token(lookup)
+	if err != nil {
+		return nil, fmt.Errorf("%w\nnothing was changed on the servers", err)
+	}
+	return &Login{Registry: cfg.Registry, Token: token}, nil
+}
+
+// registryLock serializes logins on a server. The credentials live in the one docker config of the
+// server's user, which every app deployed there shares: without it, one deploy's logout could land
+// between another's login and its pull. It is an flock, so a run that dies lets go of it with its
+// process and nothing has to clear it by hand.
+const registryLock = "/tmp/boks.registry.lock"
+
+// registryWait is how long a pull waits for another one to finish with the registry login.
+const registryWait = 10 * time.Minute
+
+// loginPull is the shell script that pulls ref with a login to l, run on the server as one
+// transaction: the logout is armed before the login and runs however the script ends — the pull
+// failing, the login refused, the connection to boks dropping (the pull then dies writing to it, or
+// finishes, and the script exits either way). One script rather than three commands from here,
+// because a run of boks cut short could otherwise leave the login behind it, and its own logout
+// would race the login it never saw finish.
+func loginPull(l *Login, ref string) string {
+	host := remote.Quote(l.Host)
+	return "exec 9>>" + registryLock + " || exit 1\n" +
+		"flock -w " + strconv.Itoa(int(registryWait.Seconds())) + " 9 || { echo " +
+		remote.Quote("boks: another pull has held the registry login "+registryLock+" for over "+registryWait.String()) + " >&2; exit 1; }\n" +
+		// A logout that fails leaves the token on the server, which is a failure of the pull even when
+		// the image came: the status says so, unless the pull had already failed and says it first.
+		"logout() { st=$?; docker logout " + host + " >/dev/null 2>&1 && return; echo " +
+		remote.Quote("boks: docker logout "+l.Host+" failed, so the token may be left in the docker config of this "+
+			"server; run `docker logout "+l.Host+"` there") + " >&2; [ \"$st\" -ne 0 ] || exit 1; }\n" +
+		"trap logout EXIT\n" +
+		"trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 141' PIPE; trap 'exit 143' TERM\n" +
+		// What docker login says goes out only when it fails: on success it is a warning that the
+		// credentials are stored unencrypted, true for the length of the pull and noise after it.
+		"said=$(docker login " + host + " -u " + remote.Quote(l.User) + " --password-stdin 2>&1 >/dev/null) || " +
+		"{ echo \"$said\" >&2; echo " + remote.Quote(loginRefused) + " >&2; exit 1; }\n" +
+		"docker pull " + remote.Quote(ref) + " </dev/null"
+}
+
+// loginRefused marks, in what the script says, that the login failed rather than the pull.
+const loginRefused = "boks: docker login was refused"
+
+// pullWithLogin pulls ref on a server logged in to l for the length of the pull and no longer.
+func pullWithLogin(ctx context.Context, r remote.Runner, l *Login, ref string) error {
+	if err := checkSecure(ctx, r, l.Host); err != nil {
+		return err
+	}
+	if _, err := r.Pipe(ctx, []byte(l.Token), "sh", "-c", loginPull(l, ref)); err != nil {
+		if strings.Contains(err.Error(), loginRefused) {
+			return fmt.Errorf("%s refused the login as %s with the token in %s: %w\nnothing was changed on this server",
+				l.Host, l.User, l.TokenEnv, err)
+		}
+		// Depot takes any token at the login and refuses it only when the image is asked for, so a
+		// wrong token is mostly seen here.
+		if refusedToken(err) {
+			return fmt.Errorf("%s refused the pull of %s with the token in %s (user %s): the token is wrong, expired, "+
+				"or has no access to this repository: %w\nnothing was changed on this server", l.Host, ref, l.TokenEnv, l.User, err)
+		}
+		return fmt.Errorf("pull %s logged in to %s: %w", ref, l.Host, err)
+	}
+	return nil
+}
+
+// refusedToken reports a pull the registry turned down for its credentials, as docker words it. A
+// bare "permission denied" is not one: that is the docker socket or the disk.
+func refusedToken(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"401 unauthorized", "unauthorized:", "pull access denied", "denied: requested access", "authentication required"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// registryConfig is the part of `docker info` that says which registries the daemon would reach
+// over plain HTTP: those named in insecure-registries, and every address in the insecure ranges
+// (loopback by default).
+type registryConfig struct {
+	InsecureRegistryCIDRs []string
+	IndexConfigs          map[string]struct{ Secure bool }
+}
+
+// checkSecure refuses a registry the server's docker would reach over plain HTTP, before the token
+// is sent anywhere (E2): the config rules out http:// and loopback hosts, but the daemon has its own
+// list. What cannot be checked is refused too — a token is not sent on the hope that it is safe.
+func checkSecure(ctx context.Context, r remote.Runner, host string) error {
+	out, err := r.Run(ctx, "docker", "info", "--format", "{{json .RegistryConfig}}")
+	if err != nil {
+		return fmt.Errorf("could not ask docker whether it reaches %s over HTTPS: %w", host, err)
+	}
+	var rc registryConfig
+	if err := json.Unmarshal([]byte(out), &rc); err != nil {
+		return fmt.Errorf("could not read docker's registry settings: %w", err)
+	}
+	if ic, ok := rc.IndexConfigs[host]; ok && !ic.Secure {
+		return insecure(host, "it is listed in insecure-registries")
+	}
+	if len(rc.InsecureRegistryCIDRs) == 0 {
+		return nil
+	}
+	name, _, _ := strings.Cut(host, ":")
+	addrs := []string{name}
+	if net.ParseIP(name) == nil {
+		// Resolved where docker resolves it: the server, not the machine boks runs on.
+		res, err := r.Run(ctx, "sh", "-c", "getent ahosts "+remote.Quote(name)+" | awk '{print $1}' | sort -u")
+		if err != nil || strings.TrimSpace(res) == "" {
+			return fmt.Errorf("could not resolve %s on the server to check it against docker's insecure ranges: %v", name, err)
+		}
+		addrs = strings.Fields(res)
+	}
+	for _, cidr := range rc.InsecureRegistryCIDRs {
+		_, block, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("could not read docker's insecure range %q: %w", cidr, err)
+		}
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil && block.Contains(ip) {
+				return insecure(host, a+" is in the insecure range "+cidr)
+			}
+		}
+	}
+	return nil
+}
+
+func insecure(host, why string) error {
+	return fmt.Errorf("docker on this server reaches %s over plain HTTP (%s), and HTTP registries are not supported: "+
+		"the token would cross the network in clear\nnothing was changed on this server", host, why)
+}

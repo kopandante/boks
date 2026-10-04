@@ -32,6 +32,8 @@ type fake struct {
 	// onRun, when set, sees every command as it runs, before its answer is looked up: a test can
 	// change what the server says from then on.
 	onRun func(cmd string)
+	// stdin is what each command that is not a file write was given on its standard input.
+	stdin map[string]string
 }
 
 type write struct {
@@ -174,6 +176,10 @@ func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string
 			return "", f.wrote(strings.Trim(path, "'"), string(content), true)
 		}
 	}
+	if f.stdin == nil {
+		f.stdin = map[string]string{}
+	}
+	f.stdin[strings.Join(args, " ")] = string(content)
 	return f.Run(ctx, args...)
 }
 
@@ -231,6 +237,8 @@ func TestRunHappyPath(t *testing.T) {
 		// Whether the app's network is free for its alias is known before anything changes.
 		netOwnerQuery("boks-demo"),
 		boxesQuery,
+		// The image comes before the proxy: a pull the registry refuses leaves the server as it was.
+		"docker pull ghcr.io/x/y:v2",
 		// The proxy and its networks are every app's, so booting it takes the server's admission lock.
 		admitTake("demo"),
 		"docker network inspect boks",
@@ -239,7 +247,6 @@ func TestRunHappyPath(t *testing.T) {
 		proxyNets,
 		proxyList,
 		admitGive("demo"),
-		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		proxyList,
 		admitTake("demo"),

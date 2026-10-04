@@ -145,3 +145,24 @@ func TestProxyBootTakesTheAdmissionLock(t *testing.T) {
 		t.Errorf("want the lock taken, the proxy booted, the lock given back: %d %d %d %v", took, booted, gave, a.calls)
 	}
 }
+
+// A token the config declares and the environment lacks refuses deploy and rollback before any
+// server is reached (E6): not one command runs, not even the lock.
+func TestAMissingRegistryTokenReachesNoServer(t *testing.T) {
+	a, b := &recorder{server: server{}}, &recorder{server: server{}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	lookup0 := lookupEnv
+	lookupEnv = func(string) (string, bool) { return "", false }
+	t.Cleanup(func() { lookupEnv = lookup0 })
+	cfg := parseConfig(t, "app: bot\nimage: registry.depot.dev/p\nservers: [a, b]\n"+
+		"registry: {host: registry.depot.dev, token_env: DEPOT_TOKEN}\n")
+	for _, args := range [][]string{{"deploy", "v2"}, {"rollback"}} {
+		err := dispatch(context.Background(), cfg, args, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "DEPOT_TOKEN is not set") {
+			t.Errorf("%v: want the missing token named, got %v", args, err)
+		}
+	}
+	if len(a.calls)+len(b.calls) != 0 {
+		t.Errorf("no server is reached: %v %v", a.calls, b.calls)
+	}
+}

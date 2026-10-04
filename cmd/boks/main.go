@@ -37,6 +37,10 @@ const usage = `usage: boks [-f boks.yml] <command>
 
 Certificates are issued where boks runs, not on the servers: DNS tokens are often bound to an
 IP. Export the provider's credentials (e.g. CLOUDFLARE_DNS_API_TOKEN) before cert issue/renew.
+
+An image on a private registry (a registry block in boks.yml) is pulled with the token from the
+environment boks runs in, under the name registry.token_env; deploy and rollback refuse without it.
+The server is logged in for the pull only and logged out after it.
 `
 
 func main() {
@@ -75,9 +79,19 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		if len(rest) != 1 {
 			return fmt.Errorf("deploy needs exactly one <tag>")
 		}
-		stamp := now()
+		// The token is read before any server is reached: one the config declares and the
+		// environment lacks refuses the deploy before it changes anything (E6).
+		login, err := deploy.NewLogin(cfg, lookupEnv)
+		if err != nil {
+			return err
+		}
+		env, err := cfg.EnvContent()
+		if err != nil {
+			return err
+		}
+		o := deploy.Options{Env: env, Login: login, Stamp: now()}
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return runDeploy(ctx, r, out, cfg, rest[0], stamp)
+			return deploy.Run(ctx, r, out, cfg, rest[0], o)
 		})
 	case "rollback":
 		if len(rest) > 1 {
@@ -87,6 +101,12 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		if len(rest) == 1 {
 			id = rest[0]
 		}
+		// A rollback pulls only an image the server no longer has, but whether it will is known only
+		// on the server, after the lock: the token is required up front either way.
+		login, err := deploy.NewLogin(cfg, lookupEnv)
+		if err != nil {
+			return err
+		}
 		if len(cfg.Servers) > 1 {
 			if err := sameRollback(ctx, cfg, id); err != nil {
 				return err
@@ -94,7 +114,7 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		}
 		stamp := now()
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return deploy.Rollback(ctx, r, out, cfg, id, deploy.Options{Stamp: stamp})
+			return deploy.Rollback(ctx, r, out, cfg, id, deploy.Options{Login: login, Stamp: stamp})
 		})
 	case "releases":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return releases(ctx, r, out, cfg) })
@@ -110,10 +130,12 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 }
 
-// connect and now are what a command reaches the servers and the clock through.
+// connect, now and lookupEnv are what a command reaches the servers, the clock and its environment
+// through.
 var (
-	connect = func(host string) remote.Runner { return remote.SSH{Host: host} }
-	now     = time.Now
+	connect   = func(host string) remote.Runner { return remote.SSH{Host: host} }
+	now       = time.Now
+	lookupEnv = os.LookupEnv
 )
 
 // sameRollback asks every server, before any of them changes, where a rollback would take it, and
@@ -146,14 +168,6 @@ func each(ctx context.Context, cfg *config.Config, out io.Writer, fn action) err
 		}
 	}
 	return nil
-}
-
-func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string, stamp time.Time) error {
-	env, err := cfg.EnvContent()
-	if err != nil {
-		return err
-	}
-	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Env: env, Stamp: stamp})
 }
 
 func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config) error {
