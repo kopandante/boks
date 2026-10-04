@@ -126,6 +126,13 @@ func TestANewProxyJoinsTheNetworksItsRoutesNeed(t *testing.T) {
 	if got := strings.Join(joins(f.calls), "\n"); got != "docker network connect boks-a boks-proxy\ndocker network connect boks-test boks-proxy" {
 		t.Errorf("want each target's network joined once, and not its own: %v", f.calls)
 	}
+	// A target that uses other apps is on their networks too; the proxy joins only its app's own.
+	u := &fake{state: "running", out: routes()}
+	u.out[inspectOf+"'a-v1-1'"] = "a boks-a boks-cache boks-convex "
+	if err := Boot(context.Background(), u, io.Discard, "img"); err != nil || at(u.calls, "docker network connect boks-cache") >= 0 ||
+		at(u.calls, "docker network connect boks-convex") >= 0 || at(u.calls, "docker network connect boks-a") < 0 {
+		t.Errorf("want only boks-a joined for a, not the networks it uses: %v %v", err, u.calls)
+	}
 	// A proxy on every network its routes need joins none again.
 	g := &fake{state: "running", out: routes()}
 	g.out[networksOf] = "boks,boks-a,boks-test"
@@ -165,14 +172,14 @@ func TestTheProxyBootFailsOnARouteItCannotReach(t *testing.T) {
 	}
 }
 
-// routes is a proxy holding routes to a-v1-1 (on boks-a, through two ports) and b-v1-1 (on the
-// shared boks-test and on boks).
+// routes is a proxy holding routes to a-v1-1 (app a, on boks-a, through two ports) and b-v1-1 (started
+// by an earlier boks, unlabelled, on the shared boks-test and on boks).
 func routes() map[string]string {
 	return map[string]string{
 		answer + " --json": `{"a.web":{"hosts":["a.example.com"],"targets":["a-v1-1:3000"]},` +
 			`"a.api":{"hosts":["api.example.com"],"targets":["a-v1-1:3001"]},"b.web":{"hosts":["b.example.com"],"targets":["b-v1-1:80"]}}`,
-		inspectOf + "'a-v1-1'": "boks-a ",
-		inspectOf + "'b-v1-1'": "boks-test boks ",
+		inspectOf + "'a-v1-1'": "a boks-a ",
+		inspectOf + "'b-v1-1'": " boks-test boks ",
 	}
 }
 
@@ -186,7 +193,7 @@ func joins(calls []string) []string {
 	return j
 }
 
-const inspectOf = "sh -c out=$(docker container inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "
+const inspectOf = "sh -c out=$(docker container inspect --format '{{index .Config.Labels \"boks.app\"}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "
 
 // A proxy that was just started is not yet a proxy that answers: the deploy asks it for its
 // services right away, so Boot returns only once it does — or says it never did.

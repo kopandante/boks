@@ -38,9 +38,14 @@ func (b box) on(network string) bool {
 	return ok
 }
 
-// answers reports whether b, on network, answers to name.
+// answers reports whether b, on network, answers to name. Docker's DNS ignores case, so a name
+// matches whatever its case.
 func (b box) answers(network, name string) bool {
-	return b.on(network) && (slices.Contains(b.base, name) || slices.Contains(b.nets[network], name))
+	return b.on(network) && (hasName(b.base, name) || hasName(b.nets[network], name))
+}
+
+func hasName(names []string, name string) bool {
+	return slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, name) })
 }
 
 // boxFormat prints one JSON object per container, so names and labels that hold tabs, spaces or
@@ -150,7 +155,7 @@ func checkNetworks(ctx context.Context, r remote.Runner, cfg *config.Config, nam
 		return false, err
 	}
 	for _, nm := range mine {
-		if nm != "" && slices.Contains(theirs, nm) {
+		if nm != "" && hasName(theirs, nm) {
 			return false, nameTaken(nm, n.Name, proxy.Container, proxyOwner, cfg.App)
 		}
 	}

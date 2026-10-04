@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -218,10 +219,13 @@ func reattach(ctx context.Context, r remote.Runner, log io.Writer) error {
 	return nil
 }
 
-// targetNetworks are the networks container c is attached to. Only docker's own answer that there is
-// no such container counts as gone; any other failure is an error.
+// targetNetworks are the networks through which the proxy reaches container c: its app's own network
+// when it is on one, since the others are the networks of apps it uses, and the proxy joins only the
+// networks of what it routes to; otherwise — a copy started by an earlier boks on the network apps
+// shared — all of them. Only docker's own answer that there is no such container counts as gone; any
+// other failure is an error.
 func targetNetworks(ctx context.Context, r remote.Runner, c string) ([]string, bool, error) {
-	out, err := r.Run(ctx, "sh", "-c", "out=$(docker container inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "+
+	out, err := r.Run(ctx, "sh", "-c", "out=$(docker container inspect --format '{{index .Config.Labels \"boks.app\"}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "+
 		remote.Quote(c)+" 2>&1) && echo \"$out\" || case \"$out\" in *'No such container'*|*'No such object'*) echo '<gone>';; "+
 		"*) echo \"$out\" >&2; exit 1;; esac")
 	if err != nil {
@@ -230,7 +234,13 @@ func targetNetworks(ctx context.Context, r remote.Runner, c string) ([]string, b
 	if strings.TrimSpace(out) == "<gone>" {
 		return nil, true, nil
 	}
-	return strings.Fields(out), false, nil
+	// The label comes first and may be empty, so the line is split at its first space.
+	app, list, _ := strings.Cut(strings.TrimRight(out, "\n"), " ")
+	nets := strings.Fields(list)
+	if own := config.AppNetwork(app); app != "" && slices.Contains(nets, own) {
+		return []string{own}, false, nil
+	}
+	return nets, false, nil
 }
 
 // awaitAnswer waits for a proxy that was just started to open its command socket: the deploy

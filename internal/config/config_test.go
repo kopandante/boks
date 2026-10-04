@@ -73,6 +73,24 @@ func TestNetworksAreTheAppsOwnUnlessRecorded(t *testing.T) {
 	}
 }
 
+// `uses` names apps: an invalid name, the app itself or a name twice is refused; the apps it names
+// add their networks after the app's own, in order, without an alias.
+func TestUsesNamesOtherApps(t *testing.T) {
+	for v, want := range map[string]string{"[Cache]": "must be an app name", "[demo]": "is this app", "[cache, cache]": "named twice"} {
+		if _, err := Parse([]byte("app: demo\nimage: x\nservers: [a]\nuses: " + v + "\n")); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("uses: %s: want %q, got %v", v, want, err)
+		}
+	}
+	cfg, err := Parse([]byte("app: demo\nimage: x\nservers: [a]\nuses: [convex, cache]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := cfg.Networks()
+	if len(n) != 3 || n[1].Name != "boks-convex" || n[2].Name != "boks-cache" || len(n[1].Aliases) != 0 {
+		t.Errorf("want the app's own network, then boks-convex and boks-cache without aliases: %v", n)
+	}
+}
+
 // An app that publishes nothing (a bot, a worker) is a valid shape: it is judged by the image's
 // own HEALTHCHECK instead of by a route.
 func TestParseAcceptsAnAppWithoutPorts(t *testing.T) {
