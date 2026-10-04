@@ -198,7 +198,7 @@ func TestSaveWritesTheFormatVersion(t *testing.T) {
 	if err := Save(context.Background(), f, Snapshot{ID: "demo-v1-1", App: "demo"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(f.writes[".boks/demo/releases/demo-v1-1.json"], `"version": 3`) {
+	if !strings.Contains(f.writes[".boks/demo/releases/demo-v1-1.json"], `"version": 4`) {
 		t.Errorf("a snapshot must say which format it is: %s", f.writes[".boks/demo/releases/demo-v1-1.json"])
 	}
 }
@@ -292,7 +292,7 @@ func TestSnapshotKeepsTheLimitAndTheReplaceMode(t *testing.T) {
 // keeps two writers off one volume among them — so it is refused rather than run without them.
 func TestLoadRefusesANewerFormat(t *testing.T) {
 	f := newFake()
-	f.out["cat .boks/demo/releases/demo-v9-9.json"] = `{"version": 4, "id": "demo-v9-9", "app": "demo"}`
+	f.out["cat .boks/demo/releases/demo-v9-9.json"] = `{"version": 5, "id": "demo-v9-9", "app": "demo"}`
 	if _, err := Load(context.Background(), f, "demo", "demo-v9-9"); err == nil || !strings.Contains(err.Error(), "newer boks") {
 		t.Fatalf("want a refusal naming a newer boks, got %v", err)
 	}

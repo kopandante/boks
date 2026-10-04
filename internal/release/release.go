@@ -29,8 +29,9 @@ import (
 // Version 2 added the memory limit and the replace mode. A version 1 snapshot reads as what it ran:
 // no limit, and the replace mode its shape implied. Version 3 added the networks the container
 // joined, with the aliases it answered to there; an older snapshot names the one network every app
-// shared then.
-const FormatVersion = 3
+// shared then. Version 4 added the apps the release used, whose networks it joined: a boks that
+// does not know them would put the release back without checking that they are there.
+const FormatVersion = 4
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -51,6 +52,9 @@ type Snapshot struct {
 	// Networks are the networks the container joined, the one it was started on first, with the
 	// aliases it answered to in each. Empty before version 3.
 	Networks []config.Network `json:"networks,omitempty"`
+	// Uses are the apps the release reached, each on its own network, named in Networks after the
+	// app's own. Empty before version 4.
+	Uses []string `json:"uses,omitempty"`
 	// Network is the network every app shared before version 3, which ran the container on it; a
 	// newer snapshot leaves it empty and names its networks in Networks.
 	Network string `json:"network,omitempty"`

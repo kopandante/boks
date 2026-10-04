@@ -867,7 +867,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	}
 	snapshot := release.Snapshot{
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
-		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(),
+		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(), Uses: cfg.Uses,
 		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, Replace: cfg.ReplaceMode(),
 		Previous: op.from, CreatedAt: now,
 	}
@@ -1100,8 +1100,41 @@ func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 // run starts container name from image ref, labelled as version tag of the app cfg describes.
 func run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, ref, envPath string) error {
 	fmt.Fprintf(log, "run %s\n", name)
-	_, err := r.Run(ctx, runArgs(cfg, name, tag, ref, envPath)...)
+	args := runArgs(cfg, name, tag, ref, envPath)
+	nets := cfg.Networks()
+	if len(nets) == 1 {
+		_, err := r.Run(ctx, args...)
+		return err
+	}
+	// `docker run` attaches one network; the others are joined before the container starts, or the
+	// app would start unable to reach the apps it uses, and fail or retry on its own schedule.
+	if _, err := r.Run(ctx, append([]string{"docker", "create"}, args[3:]...)...); err != nil {
+		return err
+	}
+	err := joinAll(ctx, r, name, nets[1:])
+	if err == nil {
+		_, err = r.Run(ctx, "docker", "start", name)
+	}
+	if err != nil {
+		// The container is this run's — create succeeded under its name — and no route reaches it
+		// yet, so it goes: left behind, it would be one more copy that stop-first must not revive.
+		fmt.Fprintf(log, "remove %s\n", name)
+		best(context.WithoutCancel(ctx), r, log, "docker", "rm", "-f", name)
+	}
 	return err
+}
+
+func joinAll(ctx context.Context, r remote.Runner, name string, nets []config.Network) error {
+	for _, n := range nets {
+		a := []string{"docker", "network", "connect"}
+		for _, alias := range n.Aliases {
+			a = append(a, "--alias", alias)
+		}
+		if _, err := r.Run(ctx, append(a, n.Name, name)...); err != nil {
+			return fmt.Errorf("joining network %s: %w", n.Name, err)
+		}
+	}
+	return nil
 }
 
 func runArgs(cfg *config.Config, name, tag, ref, envPath string) []string {

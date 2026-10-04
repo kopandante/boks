@@ -80,6 +80,8 @@ func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	// the app's own network, under the app's alias, because the alias is the app's name for whoever
 	// reaches it, not a property of one release, and the shared network is what the alias replaced.
 	target.Attach = snapshot.Networks
+	// And so are the apps it used: their checks are the release's, not today's config's.
+	target.Uses = snapshot.Uses
 	// The limit is the release's too, absence included: a release recorded without one ran without one.
 	target.Memory = snapshot.Memory
 	// The replace mode is the one field where the release and today's config both have a say, and
@@ -166,15 +168,24 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 }
 
 // recordedNetworks checks that a snapshot's networks can be put back as recorded. From version 3 on
-// a release names them; this boks puts a container on one network, the app's own, under the app's
-// name, and a snapshot naming none or more, or dropping that alias, was damaged or written by another boks — today's networks would restore what
-// the release never ran with, and dropping the rest would restore less than it had.
+// a release names them: the app's own first, under the app's name, then one for each app it used,
+// in that order. A snapshot naming others, fewer or more, or dropping the app's alias, was damaged or
+// written by another boks — today's networks would restore what the release never ran with, and
+// dropping some would restore less than it had.
 func recordedNetworks(app string, s *release.Snapshot) error {
 	if s.Version < 3 {
 		return nil
 	}
-	if len(s.Networks) != 1 || s.Networks[0].Name != config.AppNetwork(app) || !slices.Contains(s.Networks[0].Aliases, app) {
-		return fmt.Errorf("its snapshot names the networks %v, and a release of %s runs on %s alone", s.Networks, app, config.AppNetwork(app))
+	want := []string{config.AppNetwork(app)}
+	for _, dep := range s.Uses {
+		want = append(want, config.AppNetwork(dep))
+	}
+	got := make([]string, len(s.Networks))
+	for i, n := range s.Networks {
+		got[i] = n.Name
+	}
+	if !slices.Equal(got, want) || !slices.Contains(s.Networks[0].Aliases, app) {
+		return fmt.Errorf("its snapshot names the networks %v, and a release of %s using %v runs on %v, under the alias %s", s.Networks, app, s.Uses, want, app)
 	}
 	return nil
 }

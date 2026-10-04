@@ -117,15 +117,12 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	if f.onRun != nil {
 		f.onRun(cmd)
 	}
-	for prefix, err := range f.fail {
-		if strings.HasPrefix(cmd, prefix) {
-			return "", err
-		}
+	// The longest prefix answers, so a test can answer one network or container apart from the rest.
+	if err, ok := longest(f.fail, cmd); ok {
+		return "", err
 	}
-	for prefix, out := range f.out {
-		if strings.HasPrefix(cmd, prefix) {
-			return out, nil
-		}
+	if out, ok := longest(f.out, cmd); ok {
+		return out, nil
 	}
 	switch c := args[len(args)-1]; {
 	case strings.HasPrefix(cmd, "docker stop "):
@@ -136,6 +133,17 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 		return map[bool]string{true: "false", false: "true"}[f.stopped[c]], nil
 	}
 	return "", nil
+}
+
+func longest[V any](answers map[string]V, cmd string) (V, bool) {
+	var v V
+	best := -1
+	for prefix, a := range answers {
+		if strings.HasPrefix(cmd, prefix) && len(prefix) > best {
+			v, best = a, len(prefix)
+		}
+	}
+	return v, best >= 0
 }
 
 const isRunningQuery = "docker container inspect --format {{.State.Running}} "
@@ -307,7 +315,8 @@ func touchesProxy(f *fake) bool {
 const proxyProbe = "docker ps -a --filter name=^boks-proxy$ --format {{.State}}"
 
 const boxesQuery = boxes + ` || exit 1; [ -z "$ids" ] || exec docker inspect --format '{"id":{{json .Id}},"name":{{json .Name}},` +
-	`"hostname":{{json .Config.Hostname}},"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}}}' $ids`
+	`"hostname":{{json .Config.Hostname}},"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}},` +
+	`"running":{{json .State.Running}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}' $ids`
 
 func netOwnerQuery(network string) string {
 	return netOwner + ` --format '{{json .Labels}}' '` + network + `' 2>&1) && echo "$out" || ` +
