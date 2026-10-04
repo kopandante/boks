@@ -7,5 +7,10 @@
 .lego/
 lego/
 
+# артефакты визуальной проверки схем
+docs/diagrams/*.visual-check.*
+# HTML схемы собирается из boks.architecture.json -- команда в docs/architecture.md
+docs/diagrams/boks-architecture.html
+
 # рабочие файлы сессий и выводы внешних ревьюеров -- не часть репозитория
 tmp/

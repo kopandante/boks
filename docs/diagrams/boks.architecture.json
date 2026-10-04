@@ -1,0 +1,310 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "boks — архитектура",
+    "output": "boks-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1240,
+      700
+    ]
+  },
+  "components": [
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "boks CLI",
+      "sublabel": "ноутбук и CI",
+      "pos": [
+        40,
+        60
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "UI",
+      "sublabel": "браузер оператора",
+      "pos": [
+        40,
+        190
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "tag": "не построен"
+    },
+    {
+      "id": "agent",
+      "type": "frontend",
+      "label": "LLM-агент",
+      "sublabel": "через CLI",
+      "pos": [
+        40,
+        320
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "tag": "не построен"
+    },
+    {
+      "id": "boksd",
+      "type": "backend",
+      "label": "boksd",
+      "sublabel": "control API",
+      "pos": [
+        380,
+        150
+      ],
+      "size": [
+        190,
+        76
+      ],
+      "tag": "не построен"
+    },
+    {
+      "id": "apps",
+      "type": "backend",
+      "label": "контейнеры приложений",
+      "sublabel": "docker, лейблы boks.*",
+      "pos": [
+        660,
+        150
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "proxy",
+      "type": "backend",
+      "label": "kamal-proxy",
+      "sublabel": "домен → порт, TLS",
+      "pos": [
+        940,
+        150
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "lego",
+      "type": "external",
+      "label": "lego",
+      "sublabel": "выпуск по таймеру",
+      "pos": [
+        380,
+        350
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "certs",
+      "type": "database",
+      "label": "том сертификатов",
+      "sublabel": "cert, key, отметка",
+      "pos": [
+        940,
+        350
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "dns",
+      "type": "external",
+      "label": "DNS-провайдер",
+      "sublabel": "любой из поддержанных lego",
+      "pos": [
+        380,
+        500
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "acme",
+      "type": "external",
+      "label": "ACME",
+      "sublabel": "Let's Encrypt или другой",
+      "pos": [
+        660,
+        500
+      ],
+      "size": [
+        190,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "любой сервер с Docker и SSH",
+      "wraps": [
+        "boksd",
+        "apps",
+        "proxy",
+        "lego",
+        "certs"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "mTLS для машин, passkey для человека",
+      "wraps": [
+        "boksd"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "cli-api",
+      "from": "cli",
+      "to": "boksd",
+      "label": "HTTPS + сертификат",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "top",
+      "labelAt": [
+        392,
+        78
+      ],
+      "via": [
+        [
+          300,
+          92
+        ],
+        [
+          475,
+          92
+        ]
+      ]
+    },
+    {
+      "id": "ui-api",
+      "from": "ui",
+      "to": "boksd",
+      "label": "HTTPS + passkey",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": -22
+    },
+    {
+      "id": "agent-api",
+      "from": "agent",
+      "to": "boksd",
+      "label": "CLI → HTTPS + mTLS",
+      "labelDy": 26,
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDx": 40
+    },
+    {
+      "id": "api-docker",
+      "from": "boksd",
+      "to": "apps",
+      "label": "docker run на месте",
+      "variant": "emphasis",
+      "labelDy": 62
+    },
+    {
+      "id": "route",
+      "from": "apps",
+      "to": "proxy",
+      "label": "маршрут + health-check",
+      "variant": "emphasis",
+      "labelDy": 62
+    },
+    {
+      "id": "renew",
+      "from": "boksd",
+      "to": "lego",
+      "label": "таймер: продление",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "install-files",
+      "from": "lego",
+      "to": "certs",
+      "label": "boksd кладёт: 640, uid прокси",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": -24
+    },
+    {
+      "id": "reload",
+      "from": "certs",
+      "to": "proxy",
+      "label": "перечитывает при deploy или рестарте",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "txt",
+      "from": "lego",
+      "to": "dns",
+      "label": "TXT-запись токеном",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "order",
+      "from": "lego",
+      "to": "acme",
+      "label": "заказ сертификата",
+      "fromSide": "right",
+      "toSide": "left"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Инструмент, а не наша установка",
+      "items": [
+        "Требование к серверу — Docker и SSH, больше ничего",
+        "Реестр, DNS-провайдер и источник секретов выбирает тот, кто ставит",
+        "Образы приходят готовыми из любого реестра — boks не собирает"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Один вход",
+      "items": [
+        "CLI, UI и агент приходят в control API, различаясь только удостоверением",
+        "SSH остаётся для установки и обновления самого boksd — это начальная загрузка, а не второй способ управления"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Ещё не построено",
+      "items": [
+        "boksd, UI, --json и команда install — решения от 15.09.2026, кода нет",
+        "Продление на сервере требует DNS-токена, который принимают с этого сервера"
+      ]
+    }
+  ]
+}
