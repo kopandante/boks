@@ -98,8 +98,9 @@ type Config struct {
 	Image   string   `yaml:"image"`
 	Servers []string `yaml:"servers"`
 	// Network is read only to refuse it: every app now has its own network, AppNetwork. A key that
-	// went on being accepted would keep meaning something it no longer does.
-	Network       *string           `yaml:"network"`
+	// went on being accepted would keep meaning something it no longer does. A node rather than a
+	// string, because only a node tells a key written with no value (`network:`) from no key at all.
+	Network       yaml.Node         `yaml:"network"`
 	ProxyImage    string            `yaml:"proxy_image"`
 	EnvFile       string            `yaml:"env_file"`
 	Env           map[string]string `yaml:"env"`
@@ -231,7 +232,7 @@ func (c *Config) validate() error {
 	if len(c.Servers) == 0 {
 		return fmt.Errorf("servers: at least one is required")
 	}
-	if c.Network != nil {
+	if c.Network.Kind != 0 {
 		return fmt.Errorf("network: no longer set per app — each app runs on its own network %s, and the proxy joins it; "+
 			"remove the key", AppNetwork(c.App))
 	}

@@ -20,7 +20,7 @@ func TestParseDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Network != nil || cfg.ProxyImage != DefaultProxyImage ||
+	if cfg.Network.Kind != 0 || cfg.ProxyImage != DefaultProxyImage ||
 		cfg.Keep != DefaultKeep || cfg.DeployTimeout != DefaultDeployTimeout {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
@@ -49,7 +49,7 @@ func TestParseRejects(t *testing.T) {
 // Every app has its own network now, so a `network` key would go on saying something that is no
 // longer so: it is refused by name, empty or not, rather than left to mean nothing.
 func TestParseRefusesTheNetworkKey(t *testing.T) {
-	for _, v := range []string{"boks-test", `""`} {
+	for _, v := range []string{"boks-test", `""`, "", "~"} {
 		_, err := Parse([]byte("app: demo\nimage: x\nservers: [a]\nnetwork: " + v + "\n"))
 		if err == nil || !strings.Contains(err.Error(), "own network boks-demo") {
 			t.Errorf("network: %s: want the refusal naming the app's network, got %v", v, err)
