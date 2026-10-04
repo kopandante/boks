@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os/exec"
 	"path"
 	"strconv"
 	"strings"
@@ -76,7 +77,7 @@ func (s SSH) Pipe(ctx context.Context, content []byte, args ...string) (string, 
 // exec runs script on the host; label names the command in errors (the server itself is
 // named by the caller, which iterates servers).
 func (s SSH) exec(ctx context.Context, stdin []byte, label, script string) (string, error) {
-	cmd := command(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", s.Host, script)
+	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", s.Host, script)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
