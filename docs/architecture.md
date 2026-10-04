@@ -5,6 +5,9 @@ kamal-proxy **проверены на стенде** (`experiment-2026-09-05-bok
 вписаны ниже. Первая версия (Rust-ядро, Pingora, плагины, схемы Postgres) — в
 `archive/architecture-v1-2026-09-04.md`, там же причины отказа от каждого решения. Замеры
 серверов — `measurements-2026-09-05.md`, сравнение готовых инструментов — `build-vs-buy.md`.
+Схема архитектуры — `diagrams/boks.architecture.json`; интерактивный HTML в репозитории не лежит и
+собирается archify 2.17.0-dev.1 из корня репозитория:
+`node ~/.claude/skills/archify/bin/archify.mjs deliver architecture docs/diagrams/boks.architecture.json docs/diagrams/boks-architecture.html --quality showcase`.
 
 ## Что это и зачем
 
