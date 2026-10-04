@@ -380,6 +380,14 @@ func (c *Config) validateRegistry() error {
 	if ip := net.ParseIP(name); ip != nil && ip.IsLoopback() {
 		return fmt.Errorf("registry.host: %q is a loopback address, which docker reaches over plain HTTP; HTTP registries are not supported", r.Host)
 	}
+	// Docker files a Docker Hub login under https://index.docker.io/v1/ and looks for another key on
+	// `docker logout docker.io`, which then finds nothing, succeeds, and leaves the token on the
+	// server. Until that is handled, Docker Hub is no private registry boks logs in to.
+	switch name {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return fmt.Errorf("registry.host: %q is Docker Hub, whose logout by host name leaves the token on the server; "+
+			"boks does not log in to it — use a registry such as registry.depot.dev", r.Host)
+	}
 	if !envNameRe.MatchString(r.TokenEnv) {
 		return fmt.Errorf("registry.token_env: %q must name an environment variable (%s), e.g. DEPOT_TOKEN — the token itself never goes in boks.yml",
 			r.TokenEnv, envNameRe)
@@ -391,10 +399,8 @@ func (c *Config) validateRegistry() error {
 	if h := ImageHost(c.Image); h != r.Host {
 		return fmt.Errorf("image: %s is on %s, not on registry.host %s; boks logs in to %s only", c.Image, h, r.Host, r.Host)
 	}
-	// The proxy is booted by `docker run`, which pulls without the login. Only a proxy image the config
-	// names is asked about: the default is public, and on Docker Hub it would share the host with a
-	// private image while needing no login at all.
-	if c.ProxyImage != DefaultProxyImage && r.Logs(c.ProxyImage) {
+	// The proxy is booted by `docker run`, which pulls without the login.
+	if r.Logs(c.ProxyImage) {
 		return fmt.Errorf("proxy_image: %s is on the private registry %s, and the proxy is pulled without a login; use a public proxy image",
 			c.ProxyImage, r.Host)
 	}
