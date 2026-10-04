@@ -87,8 +87,10 @@
 2. [x] R3 + R2 + R1 + R4 — правки `docs/architecture.md` и порядка работ (этот PR)
 3. [ ] #18 сеть на приложение + алиас + `uses:`; прокси подключается к сетям маршрутизируемых
 4. [ ] E1 `memory` + C5 `stop-first`
-5. [ ] R4 правила хоста в `server install` (минимум: идемпотентная таблица nft для пула boks)
-6. [ ] E2 вход в GHCR перед `pull`
-7. [ ] Тест XFF через kamal-proxy
+5. [ ] R4 `server install` делает firewall хоста совместимым с Docker (без `flush ruleset`, мосты boks в
+       forward, постоянный `ip_forward`; проверка reload и перезагрузки с живыми tinyproxy и fail2ban)
+6. [ ] E2 вход в реестр Depot короткоживущим pull-токеном перед `pull` (`docker login` через stdin)
+7. [x] Тест адреса посетителя через kamal-proxy v0.10.0 с TLS — XFF перезаписывается, `X-Real-IP` и
+       `CF-Connecting-IP` проходят (локально и на сервере 2026-10-02)
 8. [ ] glavdoroga: `boks.yml` ×3 (convex, redis — свой образ с HEALTHCHECK, next), повтор
        проверок зеркала, compose снять
