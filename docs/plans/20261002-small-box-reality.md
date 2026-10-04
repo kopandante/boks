@@ -13,9 +13,9 @@
   правила Docker → dockerd запущен с `iptables=false`, `bridge=none`.
 - Связка сейчас на compose в `network_mode: host` (`cars/clients/glavdoroga/deploy/vds/`),
   проверена полностью (цены = прод до рубля, заявка, админка, honeypot, 200×SSR p95 0.89 с).
-  Факт: next 139–202 МБ (202 — под нагрузкой), convex 126–138, redis 8–16, caddy 16–32. Как
-  мерили и сырые цифры — `docs/plans/20261002-vds-mirror.md` в kopandante/glavdoroga (ветка
-  `chore/vds-mirror-deploy`, этапы 1 и 4).
+  Факт: next 139–202 МБ (202 — под нагрузкой), convex 126–138, redis 8–16, caddy 16–32. Итоги
+  по этапам — `docs/plans/20261002-vds-mirror.md` в kopandante/glavdoroga (ветка
+  `chore/vds-mirror-deploy`, этапы 1 и 4); команды замеров и сырые результаты не записаны.
 - Компоненты живут в разном ритме: Convex — закреплённая сборка backend (меняется раз в месяцы),
   Next — образ на каждый коммит, Redis — стоковый образ. Откатываются независимо.
 
