@@ -796,6 +796,31 @@ func TestAnInterruptedAdmissionRemovesItsOwnLink(t *testing.T) {
 	if !f.has(admitGive("demo")) || f.has("docker run") {
 		t.Errorf("the run's own link is removed and nothing starts: %v", f.calls)
 	}
+	if f.has("sh -c readlink") {
+		t.Errorf("an interrupted ln is cleaned up at once, not after asking who holds the lock: %v", f.calls)
+	}
+}
+
+// An interrupt while waiting for another app's lock ends the wait, and the run removes a link of its
+// own that a lost `ln` answer may have left.
+func TestAnInterruptDuringTheWaitEndsIt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := routedFake(t, nil)
+	f.fail["ln -sn"] = errors.New("File exists")
+	f.out["sh -c readlink /tmp/boks.admit.lock"] = "convex.1699999999000000000"
+	f.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, "sh -c readlink") {
+			cancel()
+		}
+	}
+	o := fixed
+	o.Poll, o.AdmitWait = time.Millisecond, time.Hour
+	if err := Run(ctx, f, io.Discard, parse(t, onePort), "v2", o); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want the cancellation, got %v", err)
+	}
+	if !f.has(admitGive("demo")) || f.has("docker run") {
+		t.Errorf("the wait ends with the run's own token cleaned up: %v", f.calls)
+	}
 }
 
 // An interrupt that lands while the old copy is being stopped does not cut the stop short: it runs
