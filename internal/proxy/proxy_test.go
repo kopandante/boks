@@ -120,6 +120,7 @@ func TestBootStartsMissingProxy(t *testing.T) {
 // before — once each.
 func TestANewProxyJoinsTheNetworksItsRoutesNeed(t *testing.T) {
 	f := &fake{state: "", out: routes()}
+	f.out[networksOf] = "boks" // where a new proxy is started
 	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +133,13 @@ func TestANewProxyJoinsTheNetworksItsRoutesNeed(t *testing.T) {
 	if err := Boot(context.Background(), u, io.Discard, "img"); err != nil || at(u.calls, "docker network connect boks-cache") >= 0 ||
 		at(u.calls, "docker network connect boks-convex") >= 0 || at(u.calls, "docker network connect boks-a") < 0 {
 		t.Errorf("want only boks-a joined for a, not the networks it uses: %v %v", err, u.calls)
+	}
+	// A proxy started by an earlier boks on the shared network is not on boks: a route to a container
+	// there makes it join.
+	v := &fake{state: "running", out: routes()}
+	v.out[networksOf] = "boks-test,boks-a"
+	if err := Boot(context.Background(), v, io.Discard, "img"); err != nil || at(v.calls, "docker network connect boks boks-proxy") < 0 {
+		t.Errorf("want boks joined for b: %v %v", err, v.calls)
 	}
 	// A proxy on every network its routes need joins none again.
 	g := &fake{state: "running", out: routes()}

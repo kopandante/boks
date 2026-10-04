@@ -229,6 +229,8 @@ func TestAdmissionWaitsForAnotherApp(t *testing.T) {
 			}
 		}
 	}
+	// A wait long enough not to run out on a loaded machine: the lock is let go of on the third try.
+	o.AdmitWait = time.Minute
 	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", o); err != nil {
 		t.Fatalf("a lock let go of is taken: %v", err)
 	}

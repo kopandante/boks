@@ -186,7 +186,9 @@ func reattach(ctx context.Context, r remote.Runner, log io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("reading the proxy's routes to put it on their networks: %w", err)
 	}
-	seen, joined := map[string]bool{}, map[string]bool{Network: true}
+	// What the proxy is on is what docker says, not what boks starts it on: one started by an
+	// earlier boks sits on the network apps shared then.
+	seen, joined := map[string]bool{}, map[string]bool{}
 	for _, n := range on {
 		joined[n] = true
 	}
