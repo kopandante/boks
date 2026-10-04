@@ -385,34 +385,6 @@ func TestRevivalIsConfirmed(t *testing.T) {
 	}
 }
 
-// Storage the serving release wrote with one writer is still on the volume, whatever the new config
-// says: a deploy over a stop-first release is stop-first.
-func TestTheServingReleaseCanAskForStopFirst(t *testing.T) {
-	f := stopFirstFake(t)
-	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
-	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version":2,"id":"demo-v1-1","replace":"stop-first"}`
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	if f.callAt("docker stop demo-v1-1") < 0 || f.callAt("docker stop demo-v1-1") > f.callAt("docker run") {
-		t.Errorf("want the old copy stopped before the new one starts: %v", f.calls)
-	}
-	// The new release records its own mode: the next deploy over it may overlap.
-	if !strings.Contains(f.uploads[".boks/demo/releases/"+newCopy+".json"], `"replace": "overlap"`) {
-		t.Errorf("the snapshot keeps the config's mode: %s", f.uploads[".boks/demo/releases/"+newCopy+".json"])
-	}
-
-	g := stopFirstFake(t)
-	g.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
-	g.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version":2,"id":"demo-v1-1","replace":"overlap"}`
-	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	if g.callAt("docker stop demo-v1-1") < g.callAt("docker run") {
-		t.Errorf("with both sides on overlap the old copy goes only after the switch: %v", g.calls)
-	}
-}
-
 // demoReleases is a server where demo-v2-2 is current and running and demo-v1-1 is the release
 // before it; the snapshot of demo-v1-1 is the one given.
 func demoReleases(t *testing.T, v1 string) *fake {
@@ -470,29 +442,6 @@ func TestRollbackStopsFirstWhenEitherSideAsks(t *testing.T) {
 		if stopped != c.stopFirst {
 			t.Errorf("%s: want stop-first %v: %v", c.name, c.stopFirst, f.calls)
 		}
-	}
-}
-
-// A version 1 snapshot records no mode, but a release without ports was always replaced stop-first:
-// a worker that gains a port must not run beside its old copy on the first deploy that routes it.
-func TestAServingVersion1WorkerVotesStopFirst(t *testing.T) {
-	f := stopFirstFake(t)
-	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
-	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version":1,"id":"demo-v1-1","ports":[]}`
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	if f.callAt("docker stop demo-v1-1") < 0 || f.callAt("docker stop demo-v1-1") > f.callAt("docker run") {
-		t.Errorf("want the old worker stopped before the new copy starts: %v", f.calls)
-	}
-	g := stopFirstFake(t)
-	g.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
-	g.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version":1,"id":"demo-v1-1","ports":[{"name":"web","port":3000,"host":"demo.example.com"}]}`
-	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	if g.callAt("docker stop demo-v1-1") < g.callAt("docker run") {
-		t.Errorf("a version 1 routed release overlapped, and still does: %v", g.calls)
 	}
 }
 
@@ -611,27 +560,6 @@ func TestUnlockReportsAnAppLockItCouldNotRemove(t *testing.T) {
 	}
 }
 
-// The serving release's snapshot is a vote on whether two copies may share its volume; one that
-// cannot be read — a dropped connection, a format this binary does not know — refuses the deploy
-// instead of counting as a vote for overlap.
-func TestAnUnreadableServingReleaseRefuses(t *testing.T) {
-	for name, broke := range map[string]func(*fake){
-		"unreadable": func(f *fake) { f.fail["cat .boks/demo/releases/demo-v1-1.json"] = errors.New("connection reset") },
-		"newer":      func(f *fake) { f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version":99,"id":"demo-v1-1"}` },
-	} {
-		f := stopFirstFake(t)
-		f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
-		broke(f)
-		err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
-		if err == nil || !strings.Contains(err.Error(), "cannot tell how the serving release may be replaced") {
-			t.Errorf("%s: want a refusal, got %v", name, err)
-		}
-		if f.has("docker run") || f.has("docker stop") || len(f.appends) != 0 {
-			t.Errorf("%s: nothing may change: %v", name, f.calls)
-		}
-	}
-}
-
 // docker has no stats for a container stuck restarting and prints `--`; that container's use is
 // unknown, counted as nothing, rather than blocking every deploy on the server.
 func TestAContainerWithoutStatsCountsItsWholeLimit(t *testing.T) {
@@ -703,24 +631,6 @@ func TestAFailedStartLeavesAnotherAppsContainerAlone(t *testing.T) {
 	}
 }
 
-// An operation that never finished may have left running a release current does not name, so the
-// next replacement stops what runs first rather than trust the recorded mode.
-func TestAnUnfinishedOperationReplacesStopFirst(t *testing.T) {
-	f := stopFirstFake(t)
-	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
-	f.out["cat .boks/demo/releases/demo-v1-1.json"] = servingOverlap
-	f.out["sh -c cat '.boks/demo/journal.jsonl'"] = `{"op":"1","action":"rollback","to":"demo-v0-1","started_at":"2026-10-01T00:00:00Z"}` + "\n"
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	if f.callAt("docker stop demo-v1-1") < 0 || f.callAt("docker stop demo-v1-1") > f.callAt("docker run") {
-		t.Errorf("want stop-first after an unfinished operation: %v", f.calls)
-	}
-	if !strings.Contains(f.appends[journal], `"result":"abandoned"`) {
-		t.Errorf("the open entry is still closed as abandoned: %q", f.appends[journal])
-	}
-}
-
 // A leftover of this app that cannot be removed is taken back once, then waited for like any lock.
 func TestAnUnremovableLeftoverIsNotRetriedForever(t *testing.T) {
 	f := routedFake(t, nil)
@@ -740,5 +650,51 @@ func TestAnUnremovableLeftoverIsNotRetriedForever(t *testing.T) {
 	}
 	if tries != 1 {
 		t.Errorf("want one take-back, got %d", tries)
+	}
+}
+
+// The copies on the server say how they may be replaced, by the label they were started with — not
+// the journal's idea of what serves: a stop-first copy that started and was never recorded still
+// writes its volume. With every copy on overlap, overlap it is; the new copy records its own mode.
+func TestTheRunningCopiesCanAskForStopFirst(t *testing.T) {
+	f := stopFirstFake(t)
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t, webPort) + "\tstop-first\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.callAt("docker stop demo-v1-1") < 0 || f.callAt("docker stop demo-v1-1") > f.callAt("docker run") {
+		t.Errorf("want the old copy stopped before the new one starts: %v", f.calls)
+	}
+	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, "--label boks.replace=overlap") {
+		t.Errorf("the new copy carries its own mode: %s", run)
+	}
+
+	g := stopFirstFake(t)
+	g.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t, webPort) + "\toverlap\n"
+	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if g.callAt("docker stop demo-v1-1") < g.callAt("docker run") {
+		t.Errorf("with every side on overlap the old copy goes only after the switch: %v", g.calls)
+	}
+}
+
+// A copy started before the label existed is judged by its shape: one started without routes was
+// always replaced stop-first, so a worker that gains a port is not run beside its old copy.
+func TestAnUnlabelledCopyIsJudgedByItsShape(t *testing.T) {
+	f := stopFirstFake(t)
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t[]\n"
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.callAt("docker stop demo-v1-1") < 0 || f.callAt("docker stop demo-v1-1") > f.callAt("docker run") {
+		t.Errorf("want the old worker stopped first: %v", f.calls)
+	}
+	g := stopFirstFake(t) // labelled with its ports, no replace label: a routed copy that overlapped
+	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if g.callAt("docker stop demo-v1-1") < g.callAt("docker run") {
+		t.Errorf("an unlabelled routed copy overlaps, as it did: %v", g.calls)
 	}
 }

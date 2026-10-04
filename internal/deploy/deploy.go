@@ -131,25 +131,10 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err != nil {
 		return err
 	}
-	// The release serving now has a say in how it is replaced: storage it wrote with one writer is
-	// still on the volume whatever the new config says, so either side asking for stop-first is enough.
-	from, err := release.Current(ctx, r, cfg.App)
-	if err != nil {
-		return err
-	}
-	servingAsks, err := servingStopFirst(ctx, r, cfg.App, from)
-	if err != nil {
-		return err
-	}
-	stopFirst := cfg.ReplaceMode() == config.ReplaceStopFirst || servingAsks
-	// An operation that never finished may have left running a release that `current` does not
-	// name — one started and serving whose recording failed — and what it asks for is unknown. Stopping
-	// whatever runs is the side that cannot put two writers on one volume.
-	open, _ := release.Unfinished(ctx, r, cfg.App)
-	if open != nil && !stopFirst {
-		fmt.Fprintf(log, "the last %s of %s never finished, so what runs now may not be %q: replacing stop-first\n", open.Action, cfg.App, from)
-		stopFirst = true
-	}
+	// The copies on the server have a say in how they are replaced, and it is read from them, not
+	// from what the journal believes is serving: a release that started and failed to be recorded
+	// still writes its volume. Either side asking for stop-first is enough.
+	stopFirst := cfg.ReplaceMode() == config.ReplaceStopFirst || anyStopFirst(old)
 	var live []string
 	if stopFirst {
 		if live, err = running(ctx, r, cfg.App); err != nil {
@@ -188,7 +173,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := checkMemory(ctx, r, log, cfg, live); err != nil {
 		return fmt.Errorf("%w\nnothing of the app was changed", err)
 	}
-	op, err := beginOperation(ctx, r, log, cfg, l.action, name, from, open, o.Now())
+	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
 	if err != nil {
 		return err
 	}
@@ -239,22 +224,6 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	retire(ctx, r, log, gone)
 	prune(ctx, r, log, cfg, l.tag)
 	return nil
-}
-
-// servingStopFirst reports whether the release serving now was put in place stop-first. A snapshot
-// that cannot be read is a refusal, not a vote for overlap: the release it describes may be the one
-// writing a single-writer volume, and a newer format may say so in a field this binary cannot see.
-func servingStopFirst(ctx context.Context, r remote.Runner, app, current string) (bool, error) {
-	if current == "" {
-		return false, nil
-	}
-	s, err := release.Load(ctx, r, app, current)
-	if err != nil {
-		return false, fmt.Errorf("cannot tell how the serving release may be replaced: %w", err)
-	}
-	// A version 1 snapshot records no mode, and its shape is what decided it: a release without
-	// ports was always replaced stop-first.
-	return s.Replace == config.ReplaceStopFirst || s.Replace == "" && len(s.Ports) == 0, nil
 }
 
 // replaceOverlap starts the new copy beside the old one and moves the routes to it; the proxy moves
@@ -780,15 +749,17 @@ func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, k
 // beginOperation opens the journal entry and, on the way, says whether the previous one was ever
 // closed. A deploy cut between switching routes and recording the release leaves no trace in
 // docker — the journal is the only place that knows.
-// from is the release serving now and open the operation left unfinished, both read by the caller.
-func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to, from string,
-	open *release.Entry, now time.Time) (operation, error) {
+func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to string, now time.Time) (operation, error) {
 	// The open entry is closed as abandoned once reported: otherwise every later deploy, however
 	// successful, would report the same interruption again.
-	if open != nil {
+	if open, err := release.Unfinished(ctx, r, cfg.App); err == nil && open != nil {
 		fmt.Fprintf(log, "warning: %s of %s started %s and never finished; this run replaces it\n",
 			open.Action, cfg.App, open.StartedAt.Format(time.RFC3339))
 		finish(ctx, r, log, cfg.App, open.Op, "abandoned", now)
+	}
+	from, err := release.Current(ctx, r, cfg.App)
+	if err != nil {
+		return operation{}, err
 	}
 	id, err := release.Begin(ctx, r, cfg.App, action, from, to, now)
 	return operation{id: id, from: from}, err
@@ -942,22 +913,45 @@ func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabl
 type container struct {
 	name  string
 	ports map[string]config.Port
+	// replace is the mode its release asks for, from its `boks.replace` label; empty on a copy
+	// started before the label existed.
+	replace string
+}
+
+// asksStopFirst reports whether this copy must not run beside the one replacing it. A copy without
+// the label was started by a boks that had no stop-first for routed apps, so its shape is what
+// decided: one started without routes was stopped first, one with them overlapped.
+func (c container) asksStopFirst() bool {
+	if c.replace != "" {
+		return c.replace == config.ReplaceStopFirst
+	}
+	return c.startedWithoutRoutes()
+}
+
+func anyStopFirst(cs []container) bool {
+	for _, c := range cs {
+		if c.asksStopFirst() {
+			return true
+		}
+	}
+	return false
 }
 
 func containers(ctx context.Context, r remote.Runner, app string) ([]container, error) {
 	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "label=boks.app="+app,
 		// `.Label "k"` looks a key up; `.Labels` is the flat comma-joined string and cannot be indexed.
-		"--format", "{{.Names}}\t{{.Label \"boks.ports\"}}")
+		"--format", "{{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}")
 	if err != nil {
 		return nil, err
 	}
 	var cs []container
 	for _, line := range strings.Split(out, "\n") {
-		name, label, _ := strings.Cut(strings.TrimSpace(line), "\t")
+		name, rest, _ := strings.Cut(strings.TrimSpace(line), "\t")
 		if name == "" {
 			continue
 		}
-		cs = append(cs, container{name: name, ports: parsePorts(label)})
+		label, replace, _ := strings.Cut(rest, "\t")
+		cs = append(cs, container{name: name, ports: parsePorts(label), replace: strings.TrimSpace(replace)})
 	}
 	return cs, nil
 }
@@ -1020,7 +1014,7 @@ func run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 func runArgs(cfg *config.Config, name, tag, ref, envPath string) []string {
 	a := []string{"docker", "run", "-d", "--name", name, "--network", cfg.Network,
 		"--restart", "unless-stopped", "--label", "boks.app=" + cfg.App, "--label", "boks.version=" + tag,
-		"--label", "boks.ports=" + portLabel(cfg.Ports)}
+		"--label", "boks.ports=" + portLabel(cfg.Ports), "--label", "boks.replace=" + cfg.ReplaceMode()}
 	if cfg.Memory != "" {
 		a = append(a, "--memory", cfg.Memory)
 	}

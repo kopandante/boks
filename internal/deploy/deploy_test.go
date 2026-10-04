@@ -209,15 +209,15 @@ func TestRunHappyPath(t *testing.T) {
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
 		"docker pull ghcr.io/x/y:v2",
-		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}",
-		"sh -c cat '.boks/demo/current' 2>/dev/null || true",
-		"sh -c cat '.boks/demo/journal.jsonl' 2>/dev/null || true",
+		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		proxyList,
 		admitTake("demo"),
+		"sh -c cat '.boks/demo/journal.jsonl' 2>/dev/null || true",
+		"sh -c cat '.boks/demo/current' 2>/dev/null || true",
 		"docker run -d --name demo-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
-			"--env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
+			"--label boks.replace=overlap --env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
 		// In overlap the server's admission ends once the container exists: the next deploy's
 		// memory check sees it from then on, and the health wait does not hold every other app up.
 		admitGive("demo"),
@@ -287,20 +287,19 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker network inspect boks",
 		"docker pull ghcr.io/x/bot:v2",
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
-		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}",
-		"sh -c cat '.boks/bot/current' 2>/dev/null || true",
-		"sh -c cat '.boks/bot/journal.jsonl' 2>/dev/null || true",
+		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
 		proxyProbe,
 		admitTake("bot"),
-		// The journal entry is opened before the first change on the server (the write is not a
-		// command, so it sits between these lines), and stopping the running copy is one: a run cut
-		// right after the stop must leave a trace.
+		// The journal entry is opened before the first change on the server, and stopping the
+		// running copy is one: a run cut right after the stop must leave a trace.
+		"sh -c cat '.boks/bot/journal.jsonl' 2>/dev/null || true",
+		"sh -c cat '.boks/bot/current' 2>/dev/null || true",
 		"docker stop bot-v1-1",
 		// The stop is confirmed by the container's state, not by the command having returned.
 		isRunningQuery + "bot-v1-1",
 		"docker run -d --name bot-v2-1700000000 --network boks --restart unless-stopped " +
-			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] " +
+			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] --label boks.replace=stop-first " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
 		// In stop-first the admission lasts until the new copy is up.

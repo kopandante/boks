@@ -48,7 +48,7 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 	// The replace mode is the one field where the release and today's config both have a say, and
 	// either asking for stop-first wins: the release may have written its volume with one writer, and
 	// the config may say that it does now — overlapping on the word of either side alone could put two
-	// writers on one volume. put adds the third voice, the release serving now. A version 1 snapshot
+	// writers on one volume. put adds the third voice, the copies running now. A version 1 snapshot
 	// says nothing, and its shape decides.
 	target.Replace = ""
 	if snapshot.Replace == config.ReplaceStopFirst || cfg.ReplaceMode() == config.ReplaceStopFirst {
