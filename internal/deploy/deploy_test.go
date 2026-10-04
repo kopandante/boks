@@ -215,6 +215,9 @@ func TestRunHappyPath(t *testing.T) {
 		boxesQuery,
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
+		// The proxy is on the networks its routes need: none here.
+		proxyNets,
+		proxyList,
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		proxyList,

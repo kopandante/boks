@@ -137,7 +137,8 @@ func RunArgs(image string) []string {
 		"-v", ConfigVolume + ":" + configPath, "-v", CertsVolume + ":/certs", image}
 }
 
-// Boot makes sure the proxy's network exists and the proxy container is running. Idempotent.
+// Boot makes sure the proxy's network exists, the proxy container is running and it is on the
+// networks its routes need. Idempotent.
 func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) error {
 	if err := ensureNetwork(ctx, r, log); err != nil {
 		return err
@@ -148,7 +149,6 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 	}
 	switch state {
 	case "running":
-		return nil
 	case "":
 		fmt.Fprintf(log, "proxy: starting %s (%s)\n", Container, image)
 		_, err = r.Run(ctx, RunArgs(image)...)
@@ -159,28 +159,37 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 	if err != nil {
 		return err
 	}
-	if err := awaitAnswer(ctx, r); err != nil {
-		return err
+	if state != "running" {
+		if err := awaitAnswer(ctx, r); err != nil {
+			return err
+		}
 	}
-	if state == "" {
-		reattach(ctx, r, log)
-	}
+	reattach(ctx, r, log)
 	return nil
 }
 
-// reattach puts a proxy that was just created back on the networks of the containers its routes
-// target. The routes outlive a removed proxy in its config volume, its networks do not: a new
-// container is on Network alone, and every route to an app on its own network — or on the network
-// apps shared before — would answer 502 until that app is deployed again. A stopped proxy that is
-// started again keeps its networks and needs none of this. Best effort: a target that is gone has
-// no network to join, and the next deploy of its app connects the proxy where it routes.
+// reattach puts the proxy on the networks of the containers its routes target that it is not on.
+// The routes outlive a removed proxy in its config volume, its networks do not: a new container is
+// on Network alone, and every route to an app on its own network — or on the network apps shared
+// before — would answer 502 until that app is deployed again. It runs on every boot, not only on
+// the one that created the proxy, so a boot cut short between the two is finished by the next. Best
+// effort: a target that is gone has no network to join, and the next deploy of its app connects the
+// proxy where it routes.
 func reattach(ctx context.Context, r remote.Runner, log io.Writer) {
+	on, err := networks(ctx, r)
+	if err != nil {
+		fmt.Fprintf(log, "warning: the proxy's networks could not be read, so none was joined: %v\n", err)
+		return
+	}
 	services, names, err := Services(ctx, r)
 	if err != nil {
-		fmt.Fprintf(log, "warning: the new proxy could not list its routes, so it joined no app network: %v\n", err)
+		fmt.Fprintf(log, "warning: the proxy could not list its routes, so it joined no app network: %v\n", err)
 		return
 	}
 	seen, joined := map[string]bool{}, map[string]bool{Network: true}
+	for _, n := range on {
+		joined[n] = true
+	}
 	for _, n := range names {
 		for _, t := range services[n].Targets {
 			c, _, _ := strings.Cut(t, ":")
@@ -241,11 +250,17 @@ func ensureNetwork(ctx context.Context, r remote.Runner, log io.Writer) error {
 
 // On reports whether the proxy is attached to network; no proxy is attached to none.
 func On(ctx context.Context, r remote.Runner, network string) (bool, error) {
+	on, err := networks(ctx, r)
+	return slices.Contains(on, network), err
+}
+
+// networks are the networks the proxy is attached to.
+func networks(ctx context.Context, r remote.Runner) ([]string, error) {
 	out, err := r.Run(ctx, "docker", "container", "ls", "-a", "--filter", "name=^"+Container+"$", "--format", "{{.Networks}}")
 	if err != nil {
-		return false, fmt.Errorf("checking the proxy's networks: %w", err)
+		return nil, fmt.Errorf("checking the proxy's networks: %w", err)
 	}
-	return slices.Contains(strings.Split(strings.TrimSpace(out), ","), network), nil
+	return strings.Split(strings.TrimSpace(out), ","), nil
 }
 
 // Connect attaches the proxy to an app's network, so that it can reach the containers it routes

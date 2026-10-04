@@ -250,8 +250,8 @@ func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 	if err == nil {
 		// The proxy joins before any route moves, so a failure here moved none: the new copy goes and
 		// the operation ends as failed rather than as one whose routes nobody can vouch for.
-		if err = joinProxy(ctx, r, log, cfg); err != nil {
-			discard(context.WithoutCancel(ctx), r, log, cfg.App, name)
+		if err = joinProxy(ctx, r, log, cfg); err != nil && !discard(context.WithoutCancel(ctx), r, log, cfg.App, name) {
+			err = fmt.Errorf("%w\n%s could not be confirmed removed: it routes nothing, and the next deploy retires it", err, name)
 		}
 	}
 	if err != nil {

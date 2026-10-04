@@ -166,6 +166,13 @@ func TestTheProxyJoinsTheAppsNetworkOnce(t *testing.T) {
 	if journalOpen(g, journal) || !strings.Contains(g.appends[journal], `"result":"failed"`) {
 		t.Errorf("no route moved, so the outcome is known: %q", g.appends[journal])
 	}
+	// A new copy that cannot be confirmed gone is named.
+	k := routedFake(t, nil)
+	k.fail["docker network connect"] = errors.New("network not found")
+	k.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\tdemo"
+	if err := Run(context.Background(), k, io.Discard, parse(t, onePort), "v2", fixed); err == nil || !strings.Contains(err.Error(), "could not be confirmed removed") {
+		t.Errorf("want the leftover named, got %v", err)
+	}
 	// Stop-first: the old copy comes back, and no route is sent back to where it never left.
 	h := stopFirstFake(t)
 	h.fail["docker network connect"] = errors.New("network not found")
