@@ -778,3 +778,26 @@ func TestRollbackLabelsTheReleasesOwnMode(t *testing.T) {
 		t.Errorf("want the release's own mode on the label: %s", run)
 	}
 }
+
+// A stop whose answer was lost — the connection dropped after docker took it — is asked again, which
+// waits for the shutdown to end; confirmed, it is a stop, and the deploy goes on rather than reviving
+// a copy that is still on its way down.
+func TestALostStopAnswerIsAskedAgain(t *testing.T) {
+	f := stopFirstFake(t)
+	stops := 0
+	f.onRun = func(cmd string) {
+		if cmd == "docker stop demo-v1-1" {
+			if stops++; stops == 1 {
+				f.fail["docker stop demo-v1-1"] = errors.New("connection reset")
+			} else {
+				delete(f.fail, "docker stop demo-v1-1")
+			}
+		}
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.has("docker start demo-v1-1") || !f.has("docker run") {
+		t.Errorf("a stop that completed on the second ask is a stop: %v", f.calls)
+	}
+}

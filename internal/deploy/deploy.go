@@ -434,7 +434,13 @@ func stopAll(ctx context.Context, r remote.Runner, log io.Writer, live []string)
 		fmt.Fprintf(log, "stop %s\n", c)
 		stopped = append(stopped, c)
 		if _, err := r.Run(ctx, "docker", "stop", c); err != nil {
-			return stopped, fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
+			// A failed call does not say the stop failed: the connection can drop after docker took it,
+			// and the container goes on shutting down. Bringing it back then would be a `docker start`
+			// that does nothing while it still runs, and it would die right after. Asked again, `docker
+			// stop` waits for that shutdown to end — and if it says so, the stop happened after all.
+			if _, again := r.Run(ctx, "docker", "stop", c); again != nil {
+				return stopped, fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
+			}
 		}
 		if up, err := isRunning(ctx, r, c); err != nil || up {
 			return stopped, fmt.Errorf("%s was not confirmed stopped (%v), so the new version was not started", c, stateOf(up, err))
