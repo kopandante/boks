@@ -241,8 +241,9 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 }
 
 // replaceOverlap starts the new copy beside the old one and moves the routes to it; the proxy moves
-// each route only once the new copy passes its health check. The server's admission ends as soon as
-// the container exists: from then on the memory check of the next deploy counts its limit.
+// each route only once the new copy passes its health check. The server's admission ends once the
+// container exists and the proxy is on its network (or the copy is gone again): from then on the
+// memory check of the next deploy counts its limit, and the proxy's networks are settled.
 func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options,
 	op operation, adm *admission, name string, old []container, plan map[string]string, routes held) error {
 	err := l.start(ctx, name)

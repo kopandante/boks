@@ -87,8 +87,10 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		owner := ownerApp(strings.TrimSpace(held))
 		// The caller holds this app's deploy lock, so a lock this app holds under another token is
 		// a leftover of an earlier run whose release did not get through: it is taken back.
-		// Once: a leftover that cannot be removed is waited for and named like any other lock.
-		if owner == app && !tookBack {
+		// Once: a leftover that cannot be removed is waited for and named like any other lock. A proxy
+		// boot outside any deploy holds no such lock — two of them can run at once — so its holder's
+		// lock is never taken back, only waited for.
+		if owner == app && app != proxyHolder && !tookBack {
 			fmt.Fprintf(log, "taking back the admission lock an earlier run of %s left behind\n", app)
 			removeAdmitLock(ctx, r, log, strings.TrimSpace(held))
 			tookBack = true
@@ -105,7 +107,11 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 			vanished = 0
 		}
 		if owner != "" && owner != waiting {
-			fmt.Fprintf(log, "waiting for the deploy of %s to finish admitting its container on this server\n", owner)
+			if owner == proxyHolder {
+				fmt.Fprintln(log, "waiting for a `boks proxy boot` or `boks cert` run to finish with the proxy on this server")
+			} else {
+				fmt.Fprintf(log, "waiting for the deploy of %s to finish admitting its container on this server\n", owner)
+			}
 			waiting = owner
 		}
 		if time.Now().After(deadline) {

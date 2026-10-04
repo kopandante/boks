@@ -358,8 +358,26 @@ func TestALeftoverProxyBootLockIsNamed(t *testing.T) {
 	f.out["sh -c readlink /tmp/boks.admit.lock"] = "_proxy.1699999999000000000"
 	o := fixed
 	o.Poll, o.AdmitWait = time.Millisecond, 5*time.Millisecond
-	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o)
+	var log strings.Builder
+	err := Run(context.Background(), f, &log, parse(t, onePort), "v2", o)
 	if err == nil || !strings.Contains(err.Error(), "`boks proxy boot` or `boks cert` run has held") {
 		t.Fatalf("want the proxy boot named, got %v", err)
+	}
+	if !strings.Contains(log.String(), "waiting for a `boks proxy boot` or `boks cert` run") {
+		t.Errorf("the wait names it too: %q", log.String())
+	}
+}
+
+// Two proxy boots outside any deploy can run at once (`boks cert renew` of two apps from cron), and
+// neither holds a deploy lock: one waits for the other rather than take its lock as a leftover.
+func TestAProxyBootWaitsForAnotherProxyBoot(t *testing.T) {
+	f := newFake()
+	f.fail["ln -sn"] = errors.New("File exists")
+	f.out["sh -c readlink /tmp/boks.admit.lock"] = "_proxy.1699999999000000000"
+	o := fixed
+	o.Poll, o.AdmitWait = time.Millisecond, 5*time.Millisecond
+	err := bootProxy(context.Background(), f, io.Discard, proxyHolder, "img", o)
+	if err == nil || f.has("sh -c [ ") || f.has("docker network inspect") {
+		t.Errorf("want a wait that ends in a refusal, the other boot's lock left alone: %v %v", err, f.calls)
 	}
 }
