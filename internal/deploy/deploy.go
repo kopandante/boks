@@ -107,8 +107,12 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	routed := len(cfg.Ports) > 0
+	name := ContainerName(cfg.App, l.tag, o.stamp())
+	if _, err := checkNetworks(ctx, r, cfg, name); err != nil {
+		return err
+	}
 	if routed {
-		if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
+		if err := proxy.Boot(ctx, r, log, cfg.ProxyImage); err != nil {
 			return err
 		}
 		// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
@@ -117,10 +121,6 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 			crt, _ := cert.ServerPaths(cfg.Cert)
 			return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
 		}
-	} else if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
-		// The proxy is what normally creates the network every app container joins; without it the
-		// network has to be made here, or the first deploy on a fresh server cannot start at all.
-		return err
 	}
 	if err := pull(ctx, r, log, l.ref, l.pull || missing(ctx, r, l.ref)); err != nil {
 		return err
@@ -164,7 +164,6 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	// The failure path of stop-first force-removes the new container by name, so that name must not
 	// already belong to an earlier copy: two deploys of one tag within a second would otherwise remove
 	// the very copy that was meant to come back.
-	name := ContainerName(cfg.App, l.tag, o.stamp())
 	if slices.Contains(names(old), name) {
 		return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
 	}
@@ -173,8 +172,18 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	defer adm.release(ctx)
+	// Asked again now that no other deploy is admitting a container: the first answer may be minutes old.
+	fresh, err := checkNetworks(ctx, r, cfg, name)
+	if err != nil {
+		return err
+	}
 	if err := checkMemory(ctx, r, log, cfg, live); err != nil {
 		return fmt.Errorf("%w\nnothing of the app was changed", err)
+	}
+	if fresh {
+		if err := makeNetwork(ctx, r, log, cfg); err != nil {
+			return err
+		}
 	}
 	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
 	if err != nil {
@@ -201,6 +210,8 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		}
 	} else if err := removeExcept(ctx, r, log, routes, nil); err != nil {
 		return keptOld(err, l.again, old)
+	} else if checked {
+		leaveProxy(ctx, r, log, cfg)
 	}
 	// A route named by an earlier boks is known to be this app's only by its targets, so while the
 	// proxy cannot be asked, the copies that may be such a target stay, stopped, until a deploy can
@@ -840,7 +851,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	}
 	snapshot := release.Snapshot{
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
-		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Network: cfg.Network,
+		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(),
 		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, Replace: cfg.ReplaceMode(),
 		Previous: op.from, CreatedAt: now,
 	}
@@ -1078,9 +1089,15 @@ func run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 }
 
 func runArgs(cfg *config.Config, name, tag, ref, envPath string) []string {
-	a := []string{"docker", "run", "-d", "--name", name, "--network", cfg.Network,
-		"--restart", "unless-stopped", "--label", "boks.app=" + cfg.App, "--label", "boks.version=" + tag,
-		"--label", "boks.ports=" + portLabel(cfg.Ports), "--label", "boks.replace=" + cfg.ReplaceMode()}
+	// The alias rides on the network the container starts on: it is how whoever shares that network
+	// reaches the app, under a name that outlives this container.
+	n := cfg.Networks()[0]
+	a := []string{"docker", "run", "-d", "--name", name, "--network", n.Name}
+	for _, alias := range n.Aliases {
+		a = append(a, "--network-alias", alias)
+	}
+	a = append(a, "--restart", "unless-stopped", "--label", "boks.app="+cfg.App, "--label", "boks.version="+tag,
+		"--label", "boks.ports="+portLabel(cfg.Ports), "--label", "boks.replace="+cfg.ReplaceMode())
 	if cfg.Memory != "" {
 		a = append(a, "--memory", cfg.Memory)
 	}
@@ -1121,6 +1138,9 @@ func service(cfg *config.Config, target string, p config.Port) proxy.Service {
 // ports whose routes had already moved when an error stopped it.
 func switchProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string, plan map[string]string) ([]config.Port, error) {
 	var done []config.Port
+	if err := joinProxy(ctx, r, log, cfg); err != nil {
+		return nil, err
+	}
 	for _, p := range cfg.Ports {
 		svc := service(cfg, name, p)
 		svc.Name = plan[p.Name]

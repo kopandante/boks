@@ -87,12 +87,16 @@ func (f *fake) wrote(path, content string, appended bool) error {
 func newFake() *fake {
 	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{},
 		stopped: map[string]bool{}}
-	f.out[proxyList] = "{}" // what kamal-proxy prints when it holds no services
-	f.out[digests] = "[]"   // an image that came from no registry; tests that need a digest override it
+	f.out[proxyList] = "{}"    // what kamal-proxy prints when it holds no services
+	f.out[digests] = "[]"      // an image that came from no registry; tests that need a digest override it
+	f.out[netOwner] = "absent" // the app's network is not made yet
 	return f
 }
 
 const (
+	netOwner  = "sh -c out=$(docker network inspect"
+	boxes     = "sh -c ids=$(docker ps -aq --no-trunc)"
+	proxyNets = "docker container ls -a --filter name=^boks-proxy$ --format {{.Networks}}"
 	proxyList = "docker exec boks-proxy kamal-proxy list --json"
 	digests   = "docker inspect --type image"
 )
@@ -206,21 +210,31 @@ func TestRunHappyPath(t *testing.T) {
 		"mkdir /tmp/boks-demo.lock",
 		`docker volume ls --quiet --filter name=^demo\.data$`,
 		"docker volume ls --quiet --filter name=^demo-data$",
+		// Whether the app's network is free for its alias is known before anything changes.
+		netOwnerQuery("boks-demo"),
+		boxesQuery,
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		proxyList,
 		admitTake("demo"),
+		// Asked again under the admission lock, then the network is made.
+		netOwnerQuery("boks-demo"),
+		boxesQuery,
+		"docker network create --label boks.app=demo boks-demo",
 		"sh -c cat '.boks/demo/journal.jsonl' 2>/dev/null || true",
 		"sh -c cat '.boks/demo/current' 2>/dev/null || true",
-		"docker run -d --name demo-v2-1700000000 --network boks --restart unless-stopped " +
+		"docker run -d --name demo-v2-1700000000 --network boks-demo --network-alias demo --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
 			"--label boks.replace=overlap --env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
 		// In overlap the server's admission ends once the container exists: the next deploy's
 		// memory check sees it from then on, and the health wait does not hold every other app up.
 		admitGive("demo"),
+		// The proxy joins the app's network right before the first route moves.
+		proxyNets,
+		"docker network connect boks-demo boks-proxy",
 		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s",
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
@@ -266,7 +280,7 @@ func quick() Options {
 // the proxy container exists is not one: an app that lost its ports has routes to drop.
 func touchesProxy(f *fake) bool {
 	for _, c := range f.calls {
-		if strings.Contains(c, proxy.Container) && c != proxyProbe {
+		if strings.Contains(c, proxy.Container) && c != proxyProbe && c != proxyNets {
 			return true
 		}
 	}
@@ -274,6 +288,14 @@ func touchesProxy(f *fake) bool {
 }
 
 const proxyProbe = "docker ps -a --filter name=^boks-proxy$ --format {{.State}}"
+
+const boxesQuery = boxes + ` || exit 1; [ -z "$ids" ] || exec docker inspect --format '{"id":{{json .Id}},"name":{{json .Name}},` +
+	`"hostname":{{json .Config.Hostname}},"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}}}' $ids`
+
+func netOwnerQuery(network string) string {
+	return netOwner + ` --format '{{json .Labels}}' '` + network + `' 2>&1) && echo "$out" || ` +
+		`case "$out" in *'No such network'*|*'network '*' not found'*) echo absent;; *) echo "$out" >&2; exit 1;; esac`
+}
 
 // An app with no routes is replaced in place: the proxy is never touched and the old container is
 // stopped BEFORE the new one starts, so two copies never drain the same queue at once.
@@ -284,13 +306,17 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 	}
 	want := []string{
 		"mkdir /tmp/boks-bot.lock",
-		"docker network inspect boks",
+		netOwnerQuery("boks-bot"),
+		boxesQuery,
 		"docker pull ghcr.io/x/bot:v2",
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
 		proxyProbe,
 		admitTake("bot"),
+		netOwnerQuery("boks-bot"),
+		boxesQuery,
+		"docker network create --label boks.app=bot boks-bot",
 		// The journal entry is opened before the first change on the server, and stopping the
 		// running copy is one: a run cut right after the stop must leave a trace.
 		"sh -c cat '.boks/bot/journal.jsonl' 2>/dev/null || true",
@@ -298,12 +324,14 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker stop bot-v1-1",
 		// The stop is confirmed by the container's state, not by the command having returned.
 		isRunningQuery + "bot-v1-1",
-		"docker run -d --name bot-v2-1700000000 --network boks --restart unless-stopped " +
+		"docker run -d --name bot-v2-1700000000 --network boks-bot --network-alias bot --restart unless-stopped " +
 			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] --label boks.replace=stop-first " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
 		// In stop-first the admission lasts until the new copy is up.
 		admitGive("bot"),
+		// No proxy routes to the app, so the proxy is not left on its network.
+		proxyNets,
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
 		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
 		"docker stop bot-v1-1",
@@ -319,12 +347,11 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 	}
 }
 
-// The proxy is what creates the network on the routed path. A server that only ever runs an app
-// without routes (Redis on a small box) has no proxy, so the deploy has to create the network
-// itself — or `docker run --network` fails on the very first deploy.
+// Every app makes its own network, and one without routes never boots the proxy: a server that only
+// runs such an app (Redis on a small box) has no proxy, and `docker run --network` would fail on the
+// very first deploy if nobody made the network.
 func TestRoutelessCreatesTheNetworkOnAFreshServer(t *testing.T) {
 	f := newFake()
-	f.fail["docker network inspect"] = errors.New("network boks not found")
 	f.out["docker image inspect"] = `["CMD-SHELL","true"]`
 	f.out["docker inspect --format"] = "healthy"
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v1", quick()); err != nil {
@@ -333,7 +360,7 @@ func TestRoutelessCreatesTheNetworkOnAFreshServer(t *testing.T) {
 	created, ran := -1, -1
 	for i, c := range f.calls {
 		switch {
-		case c == "docker network create boks":
+		case c == "docker network create --label boks.app=bot boks-bot":
 			created = i
 		case strings.HasPrefix(c, "docker run"):
 			ran = i
@@ -1215,7 +1242,7 @@ func TestDeployRecordsWhatItRan(t *testing.T) {
 	if snap.Version != release.FormatVersion || snap.ID != "demo-v2-1700000000" || snap.App != "demo" ||
 		snap.Image != "ghcr.io/x/y" || snap.Digest != "sha256:abc" || snap.Tag != "v2" ||
 		!reflect.DeepEqual(snap.Ports, cfg.Ports) || !reflect.DeepEqual(snap.Volumes, cfg.Volumes) ||
-		snap.Network != cfg.Network || !snap.TLS || !snap.CreatedAt.Equal(time.Unix(1700000000, 0)) ||
+		!reflect.DeepEqual(snap.Networks, []config.Network{{Name: "boks-demo", Aliases: []string{"demo"}}}) || snap.Network != "" || !snap.TLS || !snap.CreatedAt.Equal(time.Unix(1700000000, 0)) ||
 		snap.EnvPath != ".boks/demo/demo-v2-1700000000.env" {
 		t.Errorf("snapshot does not describe the release: %+v", snap)
 	}

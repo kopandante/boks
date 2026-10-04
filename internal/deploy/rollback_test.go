@@ -247,9 +247,10 @@ func TestRollbackToAnExplicitRelease(t *testing.T) {
 	if run < 0 || !strings.HasSuffix(f.calls[run], "-v demo.data:/data ghcr.io/x/y@sha256:one") || strings.Contains(f.calls[run], "cache") {
 		t.Errorf("want release v1 with its own mounts only, got %v", f.calls)
 	}
-	// The network is the server's: the proxy is on today's one, and the routes have to reach it.
-	if run >= 0 && !strings.Contains(f.calls[run], "--network boks ") {
-		t.Errorf("want today's network, got %s", f.calls[run])
+	// A release recorded before networks were (no version, a shared network named) comes back on the
+	// app's own network under its alias, not on the shared network it ran on.
+	if run >= 0 && !strings.Contains(f.calls[run], "--network boks-demo --network-alias demo ") {
+		t.Errorf("want the app's own network, got %s", f.calls[run])
 	}
 	if !f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1700000000:4000 --host old.example.com --forward-headers=false") {
 		t.Errorf("the route must be the recorded one, port and host: %v", f.calls)

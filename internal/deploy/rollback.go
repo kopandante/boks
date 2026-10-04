@@ -35,6 +35,10 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 	fmt.Fprintf(log, "rolling back to %s (%s)\n", id, ref)
 
 	target := restored(cfg, snapshot)
+	if snapshot.Version < 3 {
+		fmt.Fprintf(log, "warning: release %s was recorded when every app shared one network; it comes back on %s under the alias %s, "+
+			"not on %q, the network it ran on\n", id, config.AppNetwork(cfg.App), cfg.App, snapshot.Network)
+	}
 	if cfg.Memory != "" && target.Memory == "" {
 		fmt.Fprintf(log, "warning: release %s was recorded without a memory limit, so it runs without one and without the memory check; "+
 			"today's config asks for %s\n", id, cfg.Memory)
@@ -64,14 +68,17 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 // restored is what a rollback to snapshot runs with.
 func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	// The snapshot owns what belonged to the release; the current config still owns the server
-	// side of things — which proxy image runs and on which network, how long a deploy may take,
-	// which certificate the hosts are served with. Mixing them the other way would restore a
-	// release into a server that no longer exists: a container put on a network the proxy has
-	// since left could not be reached by its own routes.
+	// side of things — which proxy image runs, how long a deploy may take, which certificate the
+	// hosts are served with.
 	target := *cfg
 	target.Image = snapshot.Image
 	target.Ports = snapshot.Ports
 	target.Volumes = snapshot.Volumes
+	// The networks are the release's: it comes back where it was, not where today's config would put
+	// it. A snapshot from before version 3 ran on the network every app shared then; it comes back on
+	// the app's own network, under the app's alias, because the alias is the app's name for whoever
+	// reaches it, not a property of one release, and the shared network is what the alias replaced.
+	target.Attach = snapshot.Networks
 	// The limit is the release's too, absence included: a release recorded without one ran without one.
 	target.Memory = snapshot.Memory
 	// The replace mode is the one field where the release and today's config both have a say, and
@@ -98,6 +105,11 @@ func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id 
 		return "", err
 	}
 	target := restored(cfg, snapshot)
+	// A name already taken on the app's network would stop this server, so it is asked with the rest;
+	// the container's own name is the run's, not known yet.
+	if _, err := checkNetworks(ctx, r, target, ""); err != nil {
+		return "", err
+	}
 	if target.Memory == "" {
 		return id, nil
 	}
@@ -135,6 +147,9 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 	if err != nil {
 		return "", nil, fmt.Errorf("%w\n`boks releases` lists the release ids a rollback can return to", err)
 	}
+	if err := recordedNetworks(cfg.App, snapshot); err != nil {
+		return "", nil, fmt.Errorf("release %s cannot be reproduced: %w", id, err)
+	}
 	// A connection that drops is not a missing file: only an answer from the server says it is gone.
 	if snapshot.EnvPath != "" {
 		out, err := r.Run(ctx, "sh", "-c", "test -f "+remote.Quote(snapshot.EnvPath)+" && echo present || true")
@@ -147,4 +162,18 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 		}
 	}
 	return id, snapshot, nil
+}
+
+// recordedNetworks checks that a snapshot's networks can be put back as recorded. From version 3 on
+// a release names them; this boks puts a container on one network, the app's own, and a snapshot
+// naming none or more was damaged or written by another boks — today's networks would restore what
+// the release never ran with, and dropping the rest would restore less than it had.
+func recordedNetworks(app string, s *release.Snapshot) error {
+	if s.Version < 3 {
+		return nil
+	}
+	if len(s.Networks) != 1 || s.Networks[0].Name != config.AppNetwork(app) {
+		return fmt.Errorf("its snapshot names the networks %v, and a release of %s runs on %s alone", s.Networks, app, config.AppNetwork(app))
+	}
+	return nil
 }

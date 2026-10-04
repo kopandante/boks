@@ -246,7 +246,7 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 		return err
 	}
 	return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-		if err := proxy.Boot(ctx, r, out, cfg.Network, cfg.ProxyImage); err != nil {
+		if err := proxy.Boot(ctx, r, out, cfg.ProxyImage); err != nil {
 			return err
 		}
 		if err := cert.Install(ctx, r, out, cfg); err != nil {
@@ -276,7 +276,7 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 	switch args[0] {
 	case "boot":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return proxy.Boot(ctx, r, out, cfg.Network, cfg.ProxyImage)
+			return proxy.Boot(ctx, r, out, cfg.ProxyImage)
 		})
 	case "list":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {

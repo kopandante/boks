@@ -67,7 +67,7 @@ func (f *fake) Pipe(ctx context.Context, _ []byte, args ...string) (string, erro
 
 func TestBootIdempotent(t *testing.T) {
 	f := &fake{state: "running"}
-	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range f.calls {
@@ -79,7 +79,7 @@ func TestBootIdempotent(t *testing.T) {
 
 func TestBootStartsMissingProxy(t *testing.T) {
 	f := &fake{state: ""}
-	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
 	started := f.calls[len(f.calls)-2]
@@ -96,7 +96,7 @@ func TestBootStartsMissingProxy(t *testing.T) {
 func TestBootWaitsForAJustStartedProxyToAnswer(t *testing.T) {
 	answerPoll = time.Nanosecond
 	f := &fake{state: "", silent: 3}
-	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
 	asked := 0
@@ -110,14 +110,14 @@ func TestBootWaitsForAJustStartedProxyToAnswer(t *testing.T) {
 	}
 	answerWait = time.Millisecond
 	never := &fake{state: "exited", silent: 1 << 30}
-	if err := Boot(context.Background(), never, io.Discard, "boks", "img"); err == nil || !strings.Contains(err.Error(), "did not answer") {
+	if err := Boot(context.Background(), never, io.Discard, "img"); err == nil || !strings.Contains(err.Error(), "did not answer") {
 		t.Errorf("a proxy that never answers must fail Boot, got %v", err)
 	}
 }
 
 func TestBootRestartsStoppedProxy(t *testing.T) {
 	f := &fake{state: "exited"}
-	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
 	if f.calls[len(f.calls)-2] != "docker start boks-proxy" || f.calls[len(f.calls)-1] != answer {
@@ -145,7 +145,7 @@ func (l late) Pipe(ctx context.Context, _ []byte, args ...string) (string, error
 // The wait is bounded as a whole: an answer that comes after the bound is not one.
 func TestBootRejectsAnAnswerAfterTheBound(t *testing.T) {
 	answerWait, answerPoll = 5*time.Millisecond, time.Millisecond
-	if err := Boot(context.Background(), late{delay: 50 * time.Millisecond}, io.Discard, "boks", "img"); err == nil {
+	if err := Boot(context.Background(), late{delay: 50 * time.Millisecond}, io.Discard, "img"); err == nil {
 		t.Fatal("an answer after the bound must fail Boot")
 	}
 }
@@ -172,7 +172,7 @@ func (h hung) Pipe(ctx context.Context, _ []byte, args ...string) (string, error
 func TestBootCancelsACallThatHangs(t *testing.T) {
 	answerWait, answerPoll = 10*time.Millisecond, time.Millisecond
 	done := make(chan error, 1)
-	go func() { done <- Boot(context.Background(), hung{}, io.Discard, "boks", "img") }()
+	go func() { done <- Boot(context.Background(), hung{}, io.Discard, "img") }()
 	select {
 	case err := <-done:
 		if err == nil {

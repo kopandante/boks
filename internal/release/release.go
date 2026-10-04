@@ -27,8 +27,10 @@ import (
 // FormatVersion is written into every snapshot. The format is what has to outlive the move to
 // boksd, so a reader must be able to tell which shape it is looking at before it trusts a field.
 // Version 2 added the memory limit and the replace mode. A version 1 snapshot reads as what it ran:
-// no limit, and the replace mode its shape implied.
-const FormatVersion = 2
+// no limit, and the replace mode its shape implied. Version 3 added the networks the container
+// joined, with the aliases it answered to there; an older snapshot names the one network every app
+// shared then.
+const FormatVersion = 3
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -46,8 +48,13 @@ type Snapshot struct {
 	// CertDomains are the domains of the certificate the routes were deployed with; a host they
 	// cover was routed at that certificate rather than at kamal-proxy's autocert.
 	CertDomains []string `json:"cert_domains,omitempty"`
-	Network     string   `json:"network"`
-	EnvPath     string   `json:"env_path,omitempty"`
+	// Networks are the networks the container joined, the one it was started on first, with the
+	// aliases it answered to in each. Empty before version 3.
+	Networks []config.Network `json:"networks,omitempty"`
+	// Network is the network every app shared before version 3, which ran the container on it; a
+	// newer snapshot leaves it empty and names its networks in Networks.
+	Network string `json:"network,omitempty"`
+	EnvPath string `json:"env_path,omitempty"`
 	// Memory is the hard limit the release ran with, in the config's format; empty is none.
 	Memory string `json:"memory,omitempty"`
 	// Replace is the replace mode the release itself asks for — its config's, with the shape filled

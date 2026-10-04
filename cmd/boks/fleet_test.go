@@ -44,6 +44,9 @@ func fleet(t *testing.T, servers map[string]*recorder, clock func() time.Time) {
 	t.Cleanup(func() { connect, now = connect0, now0 })
 }
 
+// noNetwork is the check of the app's network, answered as docker does for one not made yet.
+const noNetwork = "sh -c out=$(docker network inspect"
+
 const twoServers = `
 app: bot
 image: ghcr.io/x/bot
@@ -58,6 +61,7 @@ func botServer(current, previous string) *recorder {
 		"cat .boks/bot/releases/" + current: `{"id":"` + current + `","previous":"` + previous + `"}`,
 		"cat .boks/bot/releases/bot-v1-1":   `{"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1","ports":[]}`,
 		"cat .boks/bot/releases/bot-v2-2":   `{"id":"bot-v2-2","app":"bot","image":"ghcr.io/x/bot","tag":"v2","ports":[]}`,
+		noNetwork:                           "absent",
 	}
 	return &recorder{server: s}
 }
@@ -104,8 +108,8 @@ func TestRollbackRefusesWhenAServerLacksTheRelease(t *testing.T) {
 // One deploy is one release id on every server, however long the first server takes: the clock
 // moves on between them, the stamp does not.
 func TestDeployNamesTheReleaseOnceForAllServers(t *testing.T) {
-	a := &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy"}}
-	b := &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy"}}
+	a := &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy", noNetwork: "absent"}}
+	b := &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy", noNetwork: "absent"}}
 	tick := time.Unix(1600000000, 0)
 	fleet(t, map[string]*recorder{"a": a, "b": b}, func() time.Time { tick = tick.Add(5 * time.Second); return tick })
 	if err := dispatch(context.Background(), parseConfig(t, twoServers), []string{"deploy", "v4"}, io.Discard); err != nil {
