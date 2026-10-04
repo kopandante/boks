@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kopandante/boks/internal/config"
+	"github.com/kopandante/boks/internal/proxy"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -35,6 +36,27 @@ type admission struct {
 	log   io.Writer
 	token string
 	held  bool
+}
+
+// proxyHolder holds the admission lock for a proxy boot outside any deploy (`boks proxy boot`, `boks
+// cert`). It is no app's name — those cannot start with an underscore — so no deploy takes the lock
+// back from it as its own leftover.
+const proxyHolder = "_proxy"
+
+// BootProxy starts the proxy if it is not running and puts it on the networks its routes need,
+// under the server's admission lock: the proxy and its networks are shared by every app on the
+// server, and the deploys that join or leave them take the same lock.
+func BootProxy(ctx context.Context, r remote.Runner, log io.Writer, image string) error {
+	return bootProxy(ctx, r, log, proxyHolder, image, Options{Now: time.Now})
+}
+
+func bootProxy(ctx context.Context, r remote.Runner, log io.Writer, holder, image string, o Options) error {
+	adm, err := admit(ctx, r, log, holder, o)
+	if err != nil {
+		return err
+	}
+	defer adm.release(ctx)
+	return proxy.Boot(ctx, r, log, image)
 }
 
 // admit takes the server's admission lock, waiting for another deploy to finish with it. The token
@@ -65,8 +87,10 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		owner := ownerApp(strings.TrimSpace(held))
 		// The caller holds this app's deploy lock, so a lock this app holds under another token is
 		// a leftover of an earlier run whose release did not get through: it is taken back.
-		// Once: a leftover that cannot be removed is waited for and named like any other lock.
-		if owner == app && !tookBack {
+		// Once: a leftover that cannot be removed is waited for and named like any other lock. A proxy
+		// boot outside any deploy holds no such lock — two of them can run at once — so its holder's
+		// lock is never taken back, only waited for.
+		if owner == app && app != proxyHolder && !tookBack {
 			fmt.Fprintf(log, "taking back the admission lock an earlier run of %s left behind\n", app)
 			removeAdmitLock(ctx, r, log, strings.TrimSpace(held))
 			tookBack = true
@@ -83,7 +107,11 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 			vanished = 0
 		}
 		if owner != "" && owner != waiting {
-			fmt.Fprintf(log, "waiting for the deploy of %s to finish admitting its container on this server\n", owner)
+			if owner == proxyHolder {
+				fmt.Fprintln(log, "waiting for a `boks proxy boot` or `boks cert` run to finish with the proxy on this server")
+			} else {
+				fmt.Fprintf(log, "waiting for the deploy of %s to finish admitting its container on this server\n", owner)
+			}
 			waiting = owner
 		}
 		if time.Now().After(deadline) {
@@ -91,6 +119,10 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 				return nil, fmt.Errorf("could not take the admission lock %s: %w", admitLock, err)
 			}
 			// Not having let go in this long does not prove the owner died, so the lock is not taken over.
+			if owner == proxyHolder {
+				return nil, fmt.Errorf("a `boks proxy boot` or `boks cert` run has held the admission lock %s for over %s; "+
+					"if none is running, `boks unlock` clears it", admitLock, wait)
+			}
 			return nil, fmt.Errorf("the deploy of %s has held the admission lock %s for over %s; "+
 				"if no deploy of %s is running, `boks unlock` in that app clears it", owner, admitLock, wait, owner)
 		}
@@ -123,9 +155,10 @@ func removeAdmitLock(ctx context.Context, r remote.Runner, log io.Writer, token 
 	best(ctx, r, log, "sh", "-c", "[ \"$(readlink "+admitLock+")\" = "+remote.Quote(token)+" ] && rm -f "+admitLock+" || true")
 }
 
-// unlockAdmission removes the admission lock when app holds it, and reports whether it did.
+// unlockAdmission removes the admission lock when app holds it, or a proxy boot outside any deploy
+// left it, and reports whether it did.
 func unlockAdmission(ctx context.Context, r remote.Runner, app string) (bool, error) {
-	out, err := r.Run(ctx, "sh", "-c", "case \"$(readlink "+admitLock+" 2>/dev/null)\" in "+app+".*) rm -f "+admitLock+" && echo freed;; esac")
+	out, err := r.Run(ctx, "sh", "-c", "case \"$(readlink "+admitLock+" 2>/dev/null)\" in "+app+".*|"+proxyHolder+".*) rm -f "+admitLock+" && echo freed;; esac")
 	return strings.TrimSpace(out) == "freed", err
 }
 

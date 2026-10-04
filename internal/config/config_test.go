@@ -20,7 +20,7 @@ func TestParseDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Network != DefaultNetwork || cfg.ProxyImage != DefaultProxyImage ||
+	if cfg.Network.Kind != 0 || cfg.ProxyImage != DefaultProxyImage ||
 		cfg.Keep != DefaultKeep || cfg.DeployTimeout != DefaultDeployTimeout {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
@@ -43,6 +43,33 @@ func TestParseRejects(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want error containing %q, got %v", in, want, err)
 		}
+	}
+}
+
+// Every app has its own network now, so a `network` key would go on saying something that is no
+// longer so: it is refused by name, empty or not, rather than left to mean nothing.
+func TestParseRefusesTheNetworkKey(t *testing.T) {
+	for _, v := range []string{"boks-test", `""`, "", "~"} {
+		_, err := Parse([]byte("app: demo\nimage: x\nservers: [a]\nnetwork: " + v + "\n"))
+		if err == nil || !strings.Contains(err.Error(), "own network boks-demo") {
+			t.Errorf("network: %s: want the refusal naming the app's network, got %v", v, err)
+		}
+	}
+}
+
+// The app's containers start on boks-<app> under the app's name; a recorded release's networks,
+// when a rollback sets them, are what they join instead.
+func TestNetworksAreTheAppsOwnUnlessRecorded(t *testing.T) {
+	cfg, err := Parse([]byte("app: demo\nimage: x\nservers: [a]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := cfg.Networks(); len(n) != 1 || n[0].Name != "boks-demo" || len(n[0].Aliases) != 1 || n[0].Aliases[0] != "demo" {
+		t.Errorf("want boks-demo with the alias demo, got %v", n)
+	}
+	cfg.Attach = []Network{{Name: "boks-demo", Aliases: []string{"api"}}}
+	if n := cfg.Networks(); len(n) != 1 || n[0].Aliases[0] != "api" {
+		t.Errorf("want the recorded networks, got %v", n)
 	}
 }
 

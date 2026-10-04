@@ -43,7 +43,9 @@ func TestDeployArgsMinimal(t *testing.T) {
 type fake struct {
 	calls  []string
 	state  string
-	silent int // how many times a just-started proxy does not answer yet
+	silent int               // how many times a just-started proxy does not answer yet
+	out    map[string]string // answers by command prefix
+	fail   map[string]error  // failures by command prefix
 }
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
@@ -56,10 +58,35 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 		f.silent--
 		return "", errors.New("dial unix /home/kamal-proxy/.config/kamal-proxy/kamal-proxy.sock: connect: no such file or directory")
 	}
+	for prefix, err := range f.fail {
+		if strings.HasPrefix(cmd, prefix) {
+			return "", err
+		}
+	}
+	for prefix, out := range f.out {
+		if strings.HasPrefix(cmd, prefix) {
+			return out, nil
+		}
+	}
+	if cmd == answer+" --json" {
+		return "{}", nil // a proxy that holds no routes
+	}
 	return "", nil
 }
 
 const answer = "docker exec boks-proxy kamal-proxy list"
+
+const networksOf = "docker container ls -a --filter name=^boks-proxy$ --format {{.Networks}}"
+
+// at is the position of the first call starting with prefix, or -1.
+func at(calls []string, prefix string) int {
+	for i, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
+}
 
 func (f *fake) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
 	return f.Run(ctx, args...)
@@ -67,7 +94,7 @@ func (f *fake) Pipe(ctx context.Context, _ []byte, args ...string) (string, erro
 
 func TestBootIdempotent(t *testing.T) {
 	f := &fake{state: "running"}
-	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range f.calls {
@@ -78,25 +105,95 @@ func TestBootIdempotent(t *testing.T) {
 }
 
 func TestBootStartsMissingProxy(t *testing.T) {
-	f := &fake{state: ""}
-	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+	f := &fake{state: "", out: map[string]string{answer + " --json": "{}"}}
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
-	started := f.calls[len(f.calls)-2]
-	if !strings.HasPrefix(started, "docker run -d --name boks-proxy") || !strings.HasSuffix(started, " img") {
-		t.Errorf("expected docker run, got %s", started)
-	}
-	if f.calls[len(f.calls)-1] != answer {
-		t.Errorf("Boot must wait for the proxy to answer: %v", f.calls)
+	started, answered := at(f.calls, "docker run -d --name boks-proxy --restart unless-stopped --network boks "), at(f.calls, answer)
+	if started < 0 || !strings.HasSuffix(f.calls[started], " img") || answered != started+1 {
+		t.Errorf("expected docker run, then the wait for an answer: %v", f.calls)
 	}
 }
+
+// A proxy created anew keeps its routes in its config volume but none of its networks: it joins
+// those of the containers its routes target — an app's own network, the network apps shared
+// before — once each.
+func TestANewProxyJoinsTheNetworksItsRoutesNeed(t *testing.T) {
+	f := &fake{state: "", out: routes()}
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(joins(f.calls), "\n"); got != "docker network connect boks-a boks-proxy\ndocker network connect boks-test boks-proxy" {
+		t.Errorf("want each target's network joined once, and not its own: %v", f.calls)
+	}
+	// A proxy on every network its routes need joins none again.
+	g := &fake{state: "running", out: routes()}
+	g.out[networksOf] = "boks,boks-a,boks-test"
+	if err := Boot(context.Background(), g, io.Discard, "img"); err != nil || len(joins(g.calls)) != 0 {
+		t.Errorf("the proxy is on its routes' networks already: %v %v", err, g.calls)
+	}
+	// A boot cut short after creating the proxy is finished by the next one, which finds it running.
+	k := &fake{state: "running", out: routes()}
+	k.out[networksOf] = "boks"
+	if err := Boot(context.Background(), k, io.Discard, "img"); err != nil || len(joins(k.calls)) != 2 || at(k.calls, "docker run") >= 0 {
+		t.Errorf("a running proxy missing its routes' networks joins them: %v %v", err, k.calls)
+	}
+}
+
+// A route to a container that is gone costs a warning: its app's deploy repairs it. Any other
+// failure — a target whose networks cannot be read, a join that fails, the routes or the proxy's own
+// networks unread — fails the boot, which would otherwise report a proxy that cannot reach a running
+// app as booted.
+func TestTheProxyBootFailsOnARouteItCannotReach(t *testing.T) {
+	gone := &fake{state: "running", out: routes()}
+	gone.out[inspectOf+"'a-v1-1'"] = "<gone>"
+	var log strings.Builder
+	if err := Boot(context.Background(), gone, &log, "img"); err != nil || !strings.Contains(log.String(), "a-v1-1, which is gone") ||
+		at(gone.calls, "docker network connect boks-test") < 0 {
+		t.Errorf("a gone target is a warning, the others still joined: %v %q %v", err, log.String(), gone.calls)
+	}
+	for name, fail := range map[string]map[string]error{
+		"a target unread": {inspectOf + "'a-v1-1'": errors.New("connection reset")},
+		"a join":          {"docker network connect boks-test": errors.New("network not found")},
+		"the routes":      {answer + " --json": errors.New("connection reset")},
+		"its networks":    {networksOf: errors.New("connection reset")},
+	} {
+		f := &fake{state: "running", out: routes(), fail: fail}
+		if err := Boot(context.Background(), f, io.Discard, "img"); err == nil {
+			t.Errorf("%s: want the boot to fail: %v", name, f.calls)
+		}
+	}
+}
+
+// routes is a proxy holding routes to a-v1-1 (on boks-a, through two ports) and b-v1-1 (on the
+// shared boks-test and on boks).
+func routes() map[string]string {
+	return map[string]string{
+		answer + " --json": `{"a.web":{"hosts":["a.example.com"],"targets":["a-v1-1:3000"]},` +
+			`"a.api":{"hosts":["api.example.com"],"targets":["a-v1-1:3001"]},"b.web":{"hosts":["b.example.com"],"targets":["b-v1-1:80"]}}`,
+		inspectOf + "'a-v1-1'": "boks-a ",
+		inspectOf + "'b-v1-1'": "boks-test boks ",
+	}
+}
+
+func joins(calls []string) []string {
+	var j []string
+	for _, c := range calls {
+		if strings.HasPrefix(c, "docker network connect ") {
+			j = append(j, c)
+		}
+	}
+	return j
+}
+
+const inspectOf = "sh -c out=$(docker container inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "
 
 // A proxy that was just started is not yet a proxy that answers: the deploy asks it for its
 // services right away, so Boot returns only once it does — or says it never did.
 func TestBootWaitsForAJustStartedProxyToAnswer(t *testing.T) {
 	answerPoll = time.Nanosecond
 	f := &fake{state: "", silent: 3}
-	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
 	asked := 0
@@ -110,17 +207,17 @@ func TestBootWaitsForAJustStartedProxyToAnswer(t *testing.T) {
 	}
 	answerWait = time.Millisecond
 	never := &fake{state: "exited", silent: 1 << 30}
-	if err := Boot(context.Background(), never, io.Discard, "boks", "img"); err == nil || !strings.Contains(err.Error(), "did not answer") {
+	if err := Boot(context.Background(), never, io.Discard, "img"); err == nil || !strings.Contains(err.Error(), "did not answer") {
 		t.Errorf("a proxy that never answers must fail Boot, got %v", err)
 	}
 }
 
 func TestBootRestartsStoppedProxy(t *testing.T) {
 	f := &fake{state: "exited"}
-	if err := Boot(context.Background(), f, io.Discard, "boks", "img"); err != nil {
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls[len(f.calls)-2] != "docker start boks-proxy" || f.calls[len(f.calls)-1] != answer {
+	if started := at(f.calls, "docker start boks-proxy"); started < 0 || at(f.calls, answer) != started+1 {
 		t.Errorf("expected docker start, then the wait for an answer, got %v", f.calls)
 	}
 }
@@ -145,7 +242,7 @@ func (l late) Pipe(ctx context.Context, _ []byte, args ...string) (string, error
 // The wait is bounded as a whole: an answer that comes after the bound is not one.
 func TestBootRejectsAnAnswerAfterTheBound(t *testing.T) {
 	answerWait, answerPoll = 5*time.Millisecond, time.Millisecond
-	if err := Boot(context.Background(), late{delay: 50 * time.Millisecond}, io.Discard, "boks", "img"); err == nil {
+	if err := Boot(context.Background(), late{delay: 50 * time.Millisecond}, io.Discard, "img"); err == nil {
 		t.Fatal("an answer after the bound must fail Boot")
 	}
 }
@@ -172,7 +269,7 @@ func (h hung) Pipe(ctx context.Context, _ []byte, args ...string) (string, error
 func TestBootCancelsACallThatHangs(t *testing.T) {
 	answerWait, answerPoll = 10*time.Millisecond, time.Millisecond
 	done := make(chan error, 1)
-	go func() { done <- Boot(context.Background(), hung{}, io.Discard, "boks", "img") }()
+	go func() { done <- Boot(context.Background(), hung{}, io.Discard, "img") }()
 	select {
 	case err := <-done:
 		if err == nil {

@@ -107,8 +107,12 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	routed := len(cfg.Ports) > 0
+	name := ContainerName(cfg.App, l.tag, o.stamp())
+	if _, err := checkNetworks(ctx, r, cfg, name); err != nil {
+		return err
+	}
 	if routed {
-		if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
+		if err := bootProxy(ctx, r, log, cfg.App, cfg.ProxyImage, o); err != nil {
 			return err
 		}
 		// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
@@ -117,10 +121,6 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 			crt, _ := cert.ServerPaths(cfg.Cert)
 			return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
 		}
-	} else if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
-		// The proxy is what normally creates the network every app container joins; without it the
-		// network has to be made here, or the first deploy on a fresh server cannot start at all.
-		return err
 	}
 	if err := pull(ctx, r, log, l.ref, l.pull || missing(ctx, r, l.ref)); err != nil {
 		return err
@@ -164,7 +164,6 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	// The failure path of stop-first force-removes the new container by name, so that name must not
 	// already belong to an earlier copy: two deploys of one tag within a second would otherwise remove
 	// the very copy that was meant to come back.
-	name := ContainerName(cfg.App, l.tag, o.stamp())
 	if slices.Contains(names(old), name) {
 		return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
 	}
@@ -173,8 +172,18 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	defer adm.release(ctx)
+	// Asked again now that no other deploy is admitting a container: the first answer may be minutes old.
+	fresh, err := checkNetworks(ctx, r, cfg, name)
+	if err != nil {
+		return err
+	}
 	if err := checkMemory(ctx, r, log, cfg, live); err != nil {
 		return fmt.Errorf("%w\nnothing of the app was changed", err)
+	}
+	if fresh {
+		if err := makeNetwork(ctx, r, log, cfg); err != nil {
+			return err
+		}
 	}
 	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
 	if err != nil {
@@ -224,17 +233,31 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := l.record(ctx, name, op); err != nil {
 		return unrecorded(err, l.again, name, old)
 	}
+	// Once the release is recorded: leaving waits for the server's admission lock, and a wait before
+	// the record would be one more window in which a cut run leaves the new version unrecorded.
+	if !routed && checked {
+		leaveProxy(ctx, r, log, cfg, o)
+	}
 	retire(ctx, r, log, gone)
 	prune(ctx, r, log, cfg, l.tag)
 	return nil
 }
 
 // replaceOverlap starts the new copy beside the old one and moves the routes to it; the proxy moves
-// each route only once the new copy passes its health check. The server's admission ends as soon as
-// the container exists: from then on the memory check of the next deploy counts its limit.
+// each route only once the new copy passes its health check. The server's admission ends once the
+// container exists and the proxy is on its network (or the copy is gone again): from then on the
+// memory check of the next deploy counts its limit, and the proxy's networks are settled.
 func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options,
 	op operation, adm *admission, name string, old []container, plan map[string]string, routes held) error {
 	err := l.start(ctx, name)
+	if err == nil {
+		// The proxy joins before any route moves, so a failure here moved none: the new copy goes and
+		// the operation ends as failed rather than as one whose routes nobody can vouch for. Under the
+		// admission lock, like every change to the proxy's networks.
+		if err = joinProxy(ctx, r, log, cfg); err != nil && !discard(context.WithoutCancel(ctx), r, log, cfg.App, name) {
+			err = fmt.Errorf("%w\n%s could not be confirmed removed: it routes nothing, and the next deploy retires it", err, name)
+		}
+	}
 	adm.release(ctx)
 	if err != nil {
 		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
@@ -281,6 +304,10 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	var switched []config.Port
 	switching := false
 	err = l.start(ctx, name)
+	if err == nil && len(cfg.Ports) > 0 {
+		// Before switching starts: a proxy that could not join moved no route.
+		err = joinProxy(ctx, r, log, cfg)
+	}
 	if err == nil {
 		if len(cfg.Ports) > 0 {
 			switching = true
@@ -840,7 +867,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	}
 	snapshot := release.Snapshot{
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
-		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Network: cfg.Network,
+		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(),
 		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, Replace: cfg.ReplaceMode(),
 		Previous: op.from, CreatedAt: now,
 	}
@@ -1078,9 +1105,15 @@ func run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 }
 
 func runArgs(cfg *config.Config, name, tag, ref, envPath string) []string {
-	a := []string{"docker", "run", "-d", "--name", name, "--network", cfg.Network,
-		"--restart", "unless-stopped", "--label", "boks.app=" + cfg.App, "--label", "boks.version=" + tag,
-		"--label", "boks.ports=" + portLabel(cfg.Ports), "--label", "boks.replace=" + cfg.ReplaceMode()}
+	// The alias rides on the network the container starts on: it is how whoever shares that network
+	// reaches the app, under a name that outlives this container.
+	n := cfg.Networks()[0]
+	a := []string{"docker", "run", "-d", "--name", name, "--network", n.Name}
+	for _, alias := range n.Aliases {
+		a = append(a, "--network-alias", alias)
+	}
+	a = append(a, "--restart", "unless-stopped", "--label", "boks.app="+cfg.App, "--label", "boks.version="+tag,
+		"--label", "boks.ports="+portLabel(cfg.Ports), "--label", "boks.replace="+cfg.ReplaceMode())
 	if cfg.Memory != "" {
 		a = append(a, "--memory", cfg.Memory)
 	}

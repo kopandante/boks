@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +20,11 @@ const (
 	Container    = "boks-proxy"
 	ConfigVolume = "boks-proxy-config"
 	CertsVolume  = "boks-certs"
-	configPath   = "/home/kamal-proxy/.config/kamal-proxy"
+	// Network is the proxy's own network, the one it is started on. Apps are not on it: each has its
+	// own, and the proxy joins those of the apps it routes to (Connect). A proxy started by an earlier
+	// boks may sit on another network, the one apps shared then, and is left there.
+	Network    = "boks"
+	configPath = "/home/kamal-proxy/.config/kamal-proxy"
 )
 
 // Service is one kamal-proxy route: host → target, with the health check the proxy
@@ -126,15 +131,17 @@ func DeployArgs(s Service) []string {
 	return a
 }
 
-func RunArgs(network, image string) []string {
+func RunArgs(image string) []string {
 	return []string{"docker", "run", "-d", "--name", Container, "--restart", "unless-stopped",
-		"--network", network, "-p", "80:80", "-p", "443:443",
+		"--network", Network, "-p", "80:80", "-p", "443:443",
 		"-v", ConfigVolume + ":" + configPath, "-v", CertsVolume + ":/certs", image}
 }
 
-// Boot makes sure the network exists and the proxy container is running. Idempotent.
-func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image string) error {
-	if err := EnsureNetwork(ctx, r, log, network); err != nil {
+// Boot makes sure the proxy's network exists, the proxy container is running and it is on the
+// networks its routes need. Idempotent. It changes state every app on the server shares — the proxy
+// and its networks — so the caller holds the server's admission lock, the one lock all of them take.
+func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) error {
+	if err := ensureNetwork(ctx, r, log); err != nil {
 		return err
 	}
 	state, err := containerState(ctx, r)
@@ -143,10 +150,9 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image st
 	}
 	switch state {
 	case "running":
-		return nil
 	case "":
 		fmt.Fprintf(log, "proxy: starting %s (%s)\n", Container, image)
-		_, err = r.Run(ctx, RunArgs(network, image)...)
+		_, err = r.Run(ctx, RunArgs(image)...)
 	default:
 		fmt.Fprintf(log, "proxy: container is %s, starting it\n", state)
 		_, err = r.Run(ctx, "docker", "start", Container)
@@ -154,7 +160,77 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, network, image st
 	if err != nil {
 		return err
 	}
-	return awaitAnswer(ctx, r)
+	if state != "running" {
+		if err := awaitAnswer(ctx, r); err != nil {
+			return err
+		}
+	}
+	return reattach(ctx, r, log)
+}
+
+// reattach puts the proxy on the networks of the containers its routes target that it is not on.
+// The routes outlive a removed proxy in its config volume, its networks do not: a new container is
+// on Network alone, and every route to an app on its own network — or on the network apps shared
+// before — would answer 502 until that app is deployed again. It runs on every boot, so a boot cut
+// short between creating the proxy and joining is finished by the next. A route whose target is
+// gone has no network to join and costs a warning; any other failure is the boot's, because a route
+// to a container that runs and cannot be reached is an outage the boot would otherwise report as a
+// success.
+func reattach(ctx context.Context, r remote.Runner, log io.Writer) error {
+	on, err := networks(ctx, r)
+	if err != nil {
+		return err
+	}
+	services, names, err := Services(ctx, r)
+	if err != nil {
+		return fmt.Errorf("reading the proxy's routes to put it on their networks: %w", err)
+	}
+	seen, joined := map[string]bool{}, map[string]bool{Network: true}
+	for _, n := range on {
+		joined[n] = true
+	}
+	for _, n := range names {
+		for _, t := range services[n].Targets {
+			c, _, _ := strings.Cut(t, ":")
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			nets, gone, err := targetNetworks(ctx, r, c)
+			if err != nil {
+				return fmt.Errorf("route %s targets %s, whose networks could not be read: %w", n, c, err)
+			}
+			if gone {
+				fmt.Fprintf(log, "warning: route %s targets %s, which is gone; deploying its app again repairs the route\n", n, c)
+				continue
+			}
+			for _, net := range nets {
+				if joined[net] {
+					continue
+				}
+				if err := Connect(ctx, r, log, net); err != nil {
+					return fmt.Errorf("route %s cannot reach %s: %w", n, c, err)
+				}
+				joined[net] = true
+			}
+		}
+	}
+	return nil
+}
+
+// targetNetworks are the networks container c is attached to. Only docker's own answer that there is
+// no such container counts as gone; any other failure is an error.
+func targetNetworks(ctx context.Context, r remote.Runner, c string) ([]string, bool, error) {
+	out, err := r.Run(ctx, "sh", "-c", "out=$(docker container inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "+
+		remote.Quote(c)+" 2>&1) && echo \"$out\" || case \"$out\" in *'No such container'*|*'No such object'*) echo '<gone>';; "+
+		"*) echo \"$out\" >&2; exit 1;; esac")
+	if err != nil {
+		return nil, false, err
+	}
+	if strings.TrimSpace(out) == "<gone>" {
+		return nil, true, nil
+	}
+	return strings.Fields(out), false, nil
 }
 
 // awaitAnswer waits for a proxy that was just started to open its command socket: the deploy
@@ -179,15 +255,44 @@ func awaitAnswer(ctx context.Context, r remote.Runner) error {
 
 var answerWait, answerPoll = 10 * time.Second, 250 * time.Millisecond
 
-// EnsureNetwork creates the shared Docker network unless it already exists. Idempotent. Every app
-// container is started on it, so an app that never boots the proxy (one without routes) needs it
-// on its own.
-func EnsureNetwork(ctx context.Context, r remote.Runner, log io.Writer, network string) error {
-	if _, err := r.Run(ctx, "docker", "network", "inspect", network); err == nil {
+// ensureNetwork creates the proxy's network unless it already exists. Idempotent.
+func ensureNetwork(ctx context.Context, r remote.Runner, log io.Writer) error {
+	if _, err := r.Run(ctx, "docker", "network", "inspect", Network); err == nil {
 		return nil
 	}
-	fmt.Fprintf(log, "creating network %s\n", network)
-	_, err := r.Run(ctx, "docker", "network", "create", network)
+	fmt.Fprintf(log, "creating network %s\n", Network)
+	_, err := r.Run(ctx, "docker", "network", "create", Network)
+	return err
+}
+
+// On reports whether the proxy is attached to network; no proxy is attached to none.
+func On(ctx context.Context, r remote.Runner, network string) (bool, error) {
+	on, err := networks(ctx, r)
+	return slices.Contains(on, network), err
+}
+
+// networks are the networks the proxy is attached to.
+func networks(ctx context.Context, r remote.Runner) ([]string, error) {
+	out, err := r.Run(ctx, "docker", "container", "ls", "-a", "--filter", "name=^"+Container+"$", "--format", "{{.Networks}}")
+	if err != nil {
+		return nil, fmt.Errorf("checking the proxy's networks: %w", err)
+	}
+	return strings.Split(strings.TrimSpace(out), ","), nil
+}
+
+// Connect attaches the proxy to an app's network, so that it can reach the containers it routes
+// to by name. The proxy joins only the networks of apps whose routes it holds: an app is reached
+// through the proxy, not the proxy through every app.
+func Connect(ctx context.Context, r remote.Runner, log io.Writer, network string) error {
+	fmt.Fprintf(log, "proxy: joining network %s\n", network)
+	_, err := r.Run(ctx, "docker", "network", "connect", network, Container)
+	return err
+}
+
+// Disconnect detaches the proxy from the network of an app it no longer routes to.
+func Disconnect(ctx context.Context, r remote.Runner, log io.Writer, network string) error {
+	fmt.Fprintf(log, "proxy: leaving network %s\n", network)
+	_, err := r.Run(ctx, "docker", "network", "disconnect", network, Container)
 	return err
 }
 

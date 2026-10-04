@@ -44,6 +44,9 @@ func fleet(t *testing.T, servers map[string]*recorder, clock func() time.Time) {
 	t.Cleanup(func() { connect, now = connect0, now0 })
 }
 
+// noNetwork is the check of the app's network, answered as docker does for one not made yet.
+const noNetwork = "sh -c out=$(docker network inspect"
+
 const twoServers = `
 app: bot
 image: ghcr.io/x/bot
@@ -58,6 +61,7 @@ func botServer(current, previous string) *recorder {
 		"cat .boks/bot/releases/" + current: `{"id":"` + current + `","previous":"` + previous + `"}`,
 		"cat .boks/bot/releases/bot-v1-1":   `{"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1","ports":[]}`,
 		"cat .boks/bot/releases/bot-v2-2":   `{"id":"bot-v2-2","app":"bot","image":"ghcr.io/x/bot","tag":"v2","ports":[]}`,
+		noNetwork:                           "absent",
 	}
 	return &recorder{server: s}
 }
@@ -104,8 +108,8 @@ func TestRollbackRefusesWhenAServerLacksTheRelease(t *testing.T) {
 // One deploy is one release id on every server, however long the first server takes: the clock
 // moves on between them, the stamp does not.
 func TestDeployNamesTheReleaseOnceForAllServers(t *testing.T) {
-	a := &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy"}}
-	b := &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy"}}
+	a := &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy", noNetwork: "absent"}}
+	b := &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy", noNetwork: "absent"}}
 	tick := time.Unix(1600000000, 0)
 	fleet(t, map[string]*recorder{"a": a, "b": b}, func() time.Time { tick = tick.Add(5 * time.Second); return tick })
 	if err := dispatch(context.Background(), parseConfig(t, twoServers), []string{"deploy", "v4"}, io.Discard); err != nil {
@@ -115,5 +119,29 @@ func TestDeployNamesTheReleaseOnceForAllServers(t *testing.T) {
 		if !s.ran("docker run -d --name bot-v4-1600000005 ") {
 			t.Errorf("server %s: want the release named by the command's one stamp: %v", name, s.calls)
 		}
+	}
+}
+
+// `boks proxy boot` changes what every app on the server shares — the proxy and its networks — so it
+// takes the server's admission lock around the boot, under a holder no deploy mistakes for its own.
+func TestProxyBootTakesTheAdmissionLock(t *testing.T) {
+	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running", "docker exec boks-proxy kamal-proxy list --json": "{}"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "boot"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	took, booted, gave := -1, -1, -1
+	for i, c := range a.calls {
+		switch {
+		case strings.HasPrefix(c, "ln -sn _proxy.") && took < 0:
+			took = i
+		case strings.HasPrefix(c, "docker ps -a --filter name=^boks-proxy$") && booted < 0:
+			booted = i
+		case strings.HasPrefix(c, "sh -c [ \"$(readlink /tmp/boks.admit.lock)\" = '_proxy."):
+			gave = i
+		}
+	}
+	if took < 0 || booted < took || gave < booted {
+		t.Errorf("want the lock taken, the proxy booted, the lock given back: %d %d %d %v", took, booted, gave, a.calls)
 	}
 }

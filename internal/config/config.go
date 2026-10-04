@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	DefaultNetwork       = "boks"
 	DefaultProxyImage    = "basecamp/kamal-proxy:v0.10.0"
 	DefaultKeep          = 3
 	DefaultDeployTimeout = "60s"
@@ -57,6 +56,29 @@ type Port struct {
 	HealthPort int    `yaml:"health_port" json:"health_port"`
 }
 
+// Network is a Docker network a container of the app joins, with the aliases it answers to there.
+// The json tags are load-bearing: a release snapshot stores the networks verbatim, and a rollback
+// reads them back to put the container where that release had it.
+type Network struct {
+	Name    string   `json:"name"`
+	Aliases []string `json:"aliases,omitempty"`
+}
+
+// AppNetwork is the network an app's containers are started on. The app's name is their alias in
+// it, so whoever shares the network reaches the app by name across deploys, while the container's
+// own name changes with every one.
+func AppNetwork(app string) string { return "boks-" + app }
+
+// Networks are the networks a container of the app joins, the one it is started on first. Attach,
+// when a rollback sets it, is what the release recorded; otherwise it is the app's own network,
+// with the app's name as the alias.
+func (c *Config) Networks() []Network {
+	if len(c.Attach) > 0 {
+		return c.Attach
+	}
+	return []Network{{Name: AppNetwork(c.App), Aliases: []string{c.App}}}
+}
+
 // Cert describes a certificate obtained by lego over DNS-01 — the case kamal-proxy's built-in
 // autocert cannot serve, because a wildcard has no HTTP-01 challenge. Hosts not covered by it
 // keep using autocert, so an app can mix both.
@@ -71,11 +93,14 @@ type Cert struct {
 
 // Config is the parsed boks.yml of one app.
 type Config struct {
-	Cert          *Cert             `yaml:"cert"`
-	App           string            `yaml:"app"`
-	Image         string            `yaml:"image"`
-	Servers       []string          `yaml:"servers"`
-	Network       string            `yaml:"network"`
+	Cert    *Cert    `yaml:"cert"`
+	App     string   `yaml:"app"`
+	Image   string   `yaml:"image"`
+	Servers []string `yaml:"servers"`
+	// Network is read only to refuse it: every app now has its own network, AppNetwork. A key that
+	// went on being accepted would keep meaning something it no longer does. A node rather than a
+	// string, because only a node tells a key written with no value (`network:`) from no key at all.
+	Network       yaml.Node         `yaml:"network"`
 	ProxyImage    string            `yaml:"proxy_image"`
 	EnvFile       string            `yaml:"env_file"`
 	Env           map[string]string `yaml:"env"`
@@ -89,7 +114,9 @@ type Config struct {
 	// Replace is how a new version takes over from the old one: ReplaceOverlap or ReplaceStopFirst.
 	// Empty means the default for the app's shape, which ReplaceMode tells.
 	Replace string `yaml:"replace"`
-	Dir     string `yaml:"-"`
+	// Attach overrides Networks with what a recorded release joined; never read from boks.yml.
+	Attach []Network `yaml:"-"`
+	Dir    string    `yaml:"-"`
 }
 
 // ReplaceMode is how this app's versions take turns. An app without routes has no traffic to hand
@@ -184,9 +211,6 @@ func isEmptyDocument(doc *yaml.Node) bool {
 }
 
 func (c *Config) applyDefaults() {
-	if c.Network == "" {
-		c.Network = DefaultNetwork
-	}
 	if c.ProxyImage == "" {
 		c.ProxyImage = DefaultProxyImage
 	}
@@ -207,6 +231,10 @@ func (c *Config) validate() error {
 	}
 	if len(c.Servers) == 0 {
 		return fmt.Errorf("servers: at least one is required")
+	}
+	if c.Network.Kind != 0 {
+		return fmt.Errorf("network: no longer set per app — each app runs on its own network %s, and the proxy joins it; "+
+			"remove the key", AppNetwork(c.App))
 	}
 	if c.Keep < 1 {
 		return fmt.Errorf("keep: must be at least 1")

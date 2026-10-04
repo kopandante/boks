@@ -3,7 +3,6 @@
 app: convex-lab
 image: ghcr.io/get-convex/convex-backend
 servers: [boks-lab]
-network: boks-test          # the network the experiment's boks-proxy already runs in
 env_file: .env
 env:
   DISABLE_BEACON: "true"
