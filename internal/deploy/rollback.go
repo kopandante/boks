@@ -27,32 +27,9 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 	}
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
 
-	if id == "" {
-		previous, err := release.Previous(ctx, r, cfg.App)
-		if err != nil {
-			return err
-		}
-		if previous == "" {
-			return fmt.Errorf("no earlier release of %s is recorded on this server; `boks releases` shows what there is", cfg.App)
-		}
-		id = previous
-	}
-	snapshot, err := release.Load(ctx, r, cfg.App, id)
+	id, snapshot, err := reproducible(ctx, r, cfg, id)
 	if err != nil {
-		return fmt.Errorf("%w\n`boks releases` lists the release ids a rollback can return to", err)
-	}
-	// Without its environment file the release cannot be reproduced, only approximated. Known
-	// before anything on the server changes, so the refusal leaves the running version alone.
-	// A connection that drops is not a missing file: only an answer from the server says it is gone.
-	if snapshot.EnvPath != "" {
-		out, err := r.Run(ctx, "sh", "-c", "test -f "+remote.Quote(snapshot.EnvPath)+" && echo present || true")
-		if err != nil {
-			return fmt.Errorf("checking the environment file of release %s: %w", id, err)
-		}
-		if strings.TrimSpace(out) != "present" {
-			return fmt.Errorf("the environment file of release %s is gone (%s): it was pruned or removed, "+
-				"so this release cannot be reproduced; deploy the tag again instead", id, snapshot.EnvPath)
-		}
+		return err
 	}
 	ref := snapshot.Reference()
 	fmt.Fprintf(log, "rolling back to %s (%s)\n", id, ref)
@@ -85,4 +62,45 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 			return nil
 		},
 	}, o)
+}
+
+// CheckRollback says, changing nothing, whether a rollback to id (empty: to the previous release)
+// can be done on this server. A command over several servers asks every one of them first: a
+// rollback that went through on the first and was refused on the second would leave the app
+// split across two versions.
+func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id string) error {
+	_, _, err := reproducible(ctx, r, cfg, id)
+	return err
+}
+
+// reproducible resolves the release a rollback returns to and makes sure it can be run as it was.
+// Without its environment file it could only be approximated, so that is a refusal — known
+// before anything on the server changes, which leaves the running version alone.
+func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id string) (string, *release.Snapshot, error) {
+	if id == "" {
+		previous, err := release.Previous(ctx, r, cfg.App)
+		if err != nil {
+			return "", nil, err
+		}
+		if previous == "" {
+			return "", nil, fmt.Errorf("no earlier release of %s is recorded on this server; `boks releases` shows what there is", cfg.App)
+		}
+		id = previous
+	}
+	snapshot, err := release.Load(ctx, r, cfg.App, id)
+	if err != nil {
+		return "", nil, fmt.Errorf("%w\n`boks releases` lists the release ids a rollback can return to", err)
+	}
+	// A connection that drops is not a missing file: only an answer from the server says it is gone.
+	if snapshot.EnvPath != "" {
+		out, err := r.Run(ctx, "sh", "-c", "test -f "+remote.Quote(snapshot.EnvPath)+" && echo present || true")
+		if err != nil {
+			return "", nil, fmt.Errorf("checking the environment file of release %s: %w", id, err)
+		}
+		if strings.TrimSpace(out) != "present" {
+			return "", nil, fmt.Errorf("the environment file of release %s is gone (%s): it was pruned or removed, "+
+				"so this release cannot be reproduced; deploy the tag again instead", id, snapshot.EnvPath)
+		}
+	}
+	return id, snapshot, nil
 }

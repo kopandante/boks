@@ -74,8 +74,9 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		if len(rest) != 1 {
 			return fmt.Errorf("deploy needs exactly one <tag>")
 		}
+		stamp := time.Now()
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return runDeploy(ctx, r, out, cfg, rest[0])
+			return runDeploy(ctx, r, out, cfg, rest[0], stamp)
 		})
 	case "rollback":
 		if len(rest) > 1 {
@@ -85,8 +86,18 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		if len(rest) == 1 {
 			id = rest[0]
 		}
+		// Every server is asked before any of them changes: a rollback refused halfway through the
+		// list would leave the app on two versions.
+		if len(cfg.Servers) > 1 {
+			for _, s := range cfg.Servers {
+				if err := deploy.CheckRollback(ctx, remote.SSH{Host: s}, cfg, id); err != nil {
+					return fmt.Errorf("%s: %w\nno server was rolled back", s, err)
+				}
+			}
+		}
+		stamp := time.Now()
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return deploy.Rollback(ctx, r, out, cfg, id, deploy.Options{})
+			return deploy.Rollback(ctx, r, out, cfg, id, deploy.Options{Stamp: stamp})
 		})
 	case "releases":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return releases(ctx, r, out, cfg) })
@@ -112,12 +123,12 @@ func each(ctx context.Context, cfg *config.Config, out io.Writer, fn action) err
 	return nil
 }
 
-func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string) error {
+func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string, stamp time.Time) error {
 	env, err := cfg.EnvContent()
 	if err != nil {
 		return err
 	}
-	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Env: env})
+	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Env: env, Stamp: stamp})
 }
 
 func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config) error {

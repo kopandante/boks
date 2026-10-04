@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The point of the journal: a rollback reproduces what actually ran — the image by digest, the
@@ -281,5 +282,34 @@ func TestRollbackPrunesReleasesBeyondKeep(t *testing.T) {
 	}
 	if !f.has("rm -f .boks/bot/releases/bot-v2-2.json") || f.has("rm -f .boks/bot/releases/bot-v1-1.json") {
 		t.Errorf("want the release left behind pruned and the restored one kept: %v", f.calls)
+	}
+}
+
+// A command over several servers names its releases with one stamp, so a release has one id
+// everywhere: the id `boks releases` prints for one server is the one `boks rollback` finds on all.
+func TestStampNamesTheRelease(t *testing.T) {
+	f := routedFake(t, nil)
+	o := fixed
+	o.Stamp = time.Unix(1600000000, 0)
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("docker run -d --name demo-v2-1600000000") || f.uploads[".boks/demo/current"] != "demo-v2-1600000000\n" {
+		t.Errorf("want the release named by the stamp, not by the clock: %v", f.calls)
+	}
+}
+
+// The check a multi-server rollback runs on every server first: it refuses where the release is
+// not recorded and changes nothing anywhere.
+func TestCheckRollbackChangesNothing(t *testing.T) {
+	f := botReleases("healthy")
+	if err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err != nil {
+		t.Fatalf("the previous release is there and reproducible: %v", err)
+	}
+	if err := CheckRollback(context.Background(), f, parse(t, noPorts), "bot-v9-9"); err == nil {
+		t.Error("want a refusal for a release this server does not have")
+	}
+	if f.has("docker") || f.has("mkdir") || len(f.uploads) > 0 || len(f.appends) > 0 {
+		t.Errorf("a check must not change the server: %v", f.calls)
 	}
 }

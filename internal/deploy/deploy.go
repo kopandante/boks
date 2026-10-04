@@ -21,8 +21,19 @@ import (
 type Options struct {
 	Env []byte
 	Now func() time.Time
+	// Stamp names this run's containers and releases; zero means Now. A command that goes over
+	// several servers passes one, so a release has the same id on each of them and `boks rollback
+	// <id>` means one release everywhere, not one that exists on a single server.
+	Stamp time.Time
 	// Poll is how often the health of a routeless app is checked; zero means once a second.
 	Poll time.Duration
+}
+
+func (o Options) stamp() time.Time {
+	if o.Stamp.IsZero() {
+		return o.Now()
+	}
+	return o.Stamp
 }
 
 var unsafe = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
@@ -109,7 +120,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err != nil {
 		return err
 	}
-	name := ContainerName(cfg.App, l.tag, o.Now())
+	name := ContainerName(cfg.App, l.tag, o.stamp())
 	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
 	if err != nil {
 		return err
@@ -202,7 +213,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	// The failure path below force-removes the container by name, so that name must not already
 	// belong to an earlier copy: two deploys of one tag within a second would otherwise remove the
 	// very copy that was meant to come back.
-	name := ContainerName(cfg.App, l.tag, o.Now())
+	name := ContainerName(cfg.App, l.tag, o.stamp())
 	for _, c := range names(old) {
 		if c == name {
 			return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
