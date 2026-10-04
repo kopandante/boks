@@ -35,11 +35,12 @@ func NewLogin(cfg *config.Config, lookup func(string) (string, bool)) (*Login, e
 	return &Login{Registry: cfg.Registry, Token: token}, nil
 }
 
-// registryLock serializes logins on a server. The credentials live in the one docker config of the
-// server's user, which every app deployed there shares: without it, one deploy's logout could land
-// between another's login and its pull. It is an flock, so a run that dies lets go of it with its
-// process and nothing has to clear it by hand.
-const registryLock = "/tmp/boks.registry.lock"
+// registryLock serializes logins on a server. The credentials live in the docker config of the
+// server's user, which every app deployed there as that user shares: without it, one deploy's logout
+// could land between another's login and its pull. So it lives where that config does — one lock per
+// docker config, the scope of what it guards — rather than in /tmp, shared by every user. It is an
+// flock, so a run that dies lets go of it with its process and nothing has to clear it by hand.
+const registryLock = "boks.registry.lock"
 
 // registryWait is how long a pull waits for another one to finish with the registry login.
 const registryWait = 10 * time.Minute
@@ -58,9 +59,11 @@ const registryWait = 10 * time.Minute
 // pull would hold the trap until the pull ended.
 func loginPull(l *Login, ref string) string {
 	host := remote.Quote(l.Host)
-	return "exec 9>>" + registryLock + " || exit 1\n" +
+	return "conf=${DOCKER_CONFIG:-$HOME/.docker}\n" +
+		"(umask 077 && mkdir -p \"$conf\") && exec 9>>\"$conf/" + registryLock + "\" || exit 1\n" +
 		"flock -w " + strconv.Itoa(int(registryWait.Seconds())) + " 9 || { echo " +
-		remote.Quote("boks: another pull has held the registry login "+registryLock+" for over "+registryWait.String()) + " >&2; exit 1; }\n" +
+		remote.Quote("boks: another pull has held the registry login ("+registryLock+" in the docker config) for over "+
+			registryWait.String()+"; nothing was logged in") + " >&2; exit 1; }\n" +
 		"pull= watch=\n" +
 		// A logout that fails leaves the token on the server, which is a failure of the pull even when
 		// the image came: the status says so, unless the pull had already failed and says it first.
@@ -103,7 +106,7 @@ func pullWithLogin(ctx context.Context, r remote.Runner, l *Login, ref string) e
 			return fmt.Errorf("%s refused the pull of %s with the token in %s (user %s): the token is wrong, expired, "+
 				"or has no access to this repository: %w\nnothing was changed on this server", l.Host, ref, l.TokenEnv, l.User, err)
 		}
-		return fmt.Errorf("pull %s logged in to %s: %w", ref, l.Host, err)
+		return fmt.Errorf("pull %s from %s: %w", ref, l.Host, err)
 	}
 	return nil
 }
@@ -150,11 +153,19 @@ func checkSecure(ctx context.Context, r remote.Runner, host string) error {
 	addrs := []string{name}
 	if net.ParseIP(name) == nil {
 		// Resolved where docker resolves it: the server, not the machine boks runs on.
-		res, err := r.Run(ctx, "sh", "-c", "getent ahosts "+remote.Quote(name)+" | awk '{print $1}' | sort -u")
-		if err != nil || strings.TrimSpace(res) == "" {
-			return fmt.Errorf("could not resolve %s on the server to check it against docker's insecure ranges: %v", name, err)
+		res, err := r.Run(ctx, "getent", "ahosts", name)
+		if err != nil {
+			return fmt.Errorf("could not resolve %s on the server to check it against docker's insecure ranges: %w", name, err)
 		}
-		addrs = strings.Fields(res)
+		addrs = nil
+		for _, line := range strings.Split(res, "\n") {
+			if f := strings.Fields(line); len(f) > 0 {
+				addrs = append(addrs, f[0])
+			}
+		}
+		if len(addrs) == 0 {
+			return fmt.Errorf("could not resolve %s on the server to check it against docker's insecure ranges: no address", name)
+		}
 	}
 	for _, cidr := range rc.InsecureRegistryCIDRs {
 		_, block, err := net.ParseCIDR(cidr)

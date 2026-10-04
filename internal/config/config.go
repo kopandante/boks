@@ -154,14 +154,16 @@ type Registry struct {
 // Token reads the registry's token from the environment through lookup (os.LookupEnv outside
 // tests). A token the config declares and the environment does not hold is a refusal (E6), and one
 // that is set but blank is the same thing: a login without a password would fail on the server, and
-// only after the deploy had begun.
+// only after the deploy had begun. Whitespace around it is dropped: no token has any, and a space or
+// \r pasted along with one would reach the registry, which turns it down as a wrong token.
 func (r *Registry) Token(lookup func(string) (string, bool)) (string, error) {
 	v, ok := lookup(r.TokenEnv)
 	if !ok {
 		return "", fmt.Errorf("registry.token_env: %s is not set in the environment boks runs in; "+
 			"export the token of %s under that name", r.TokenEnv, r.Host)
 	}
-	if strings.TrimSpace(v) == "" {
+	v = strings.TrimSpace(v)
+	if v == "" {
 		return "", fmt.Errorf("registry.token_env: %s is set but empty; it must hold the token of %s", r.TokenEnv, r.Host)
 	}
 	return v, nil
@@ -372,9 +374,10 @@ func (c *Config) validateRegistry() error {
 		return fmt.Errorf("registry.host: %q is not a registry host such as registry.depot.dev (lowercase, no scheme, optional :port)", r.Host)
 	}
 	// Docker talks plain HTTP to a registry on a loopback address unless told otherwise, so a token
-	// sent there would cross in clear — the case E2 rules out.
+	// sent there would cross in clear — the case E2 rules out. localhost never gets here: it has no
+	// dot, and the form above refuses it.
 	name, _, _ := strings.Cut(r.Host, ":")
-	if ip := net.ParseIP(name); name == "localhost" || ip != nil && ip.IsLoopback() {
+	if ip := net.ParseIP(name); ip != nil && ip.IsLoopback() {
 		return fmt.Errorf("registry.host: %q is a loopback address, which docker reaches over plain HTTP; HTTP registries are not supported", r.Host)
 	}
 	if !envNameRe.MatchString(r.TokenEnv) {

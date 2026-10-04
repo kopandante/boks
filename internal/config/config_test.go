@@ -329,8 +329,8 @@ func TestRegistryToken(t *testing.T) {
 	if _, err := r.Token(env(map[string]string{"DEPOT_TOKEN": " \n"})); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("blank: %v", err)
 	}
-	// The token goes to docker as it is: trimming could change a token that is valid with its bytes.
-	if v, err := r.Token(env(map[string]string{"DEPOT_TOKEN": "tok\n"})); err != nil || v != "tok\n" {
+	// A space or \r pasted with the token would reach the registry and read as a wrong token.
+	if v, err := r.Token(env(map[string]string{"DEPOT_TOKEN": " tok\r\n"})); err != nil || v != "tok" {
 		t.Errorf("set: %q, %v", v, err)
 	}
 }

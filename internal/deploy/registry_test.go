@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,9 +19,9 @@ import (
 )
 
 const (
-	loginCall    = "sh -c exec 9>>/tmp/boks.registry.lock"
+	loginCall    = "sh -c conf=${DOCKER_CONFIG:-$HOME/.docker}"
 	registryInfo = "docker info --format {{json .RegistryConfig}}"
-	resolveHost  = "sh -c getent ahosts"
+	resolveHost  = "getent ahosts registry.depot.dev"
 	depotToken   = "depot-secret-token"
 	// secureInfo is docker's answer on a server with the default settings: loopback is insecure, and
 	// nothing else.
@@ -44,7 +46,7 @@ func depotOptions(t *testing.T, cfg *config.Config) Options {
 func depotFake() *fake {
 	f := newFake()
 	f.out[registryInfo] = secureInfo
-	f.out[resolveHost] = "34.1.2.3"
+	f.out[resolveHost] = "34.1.2.3        STREAM registry.depot.dev\n34.1.2.3        DGRAM"
 	return f
 }
 
@@ -139,10 +141,11 @@ func TestAnInsecureRegistryGetsNoToken(t *testing.T) {
 		},
 		"in an insecure range": func(f *fake) {
 			f.out[registryInfo] = `{"InsecureRegistryCIDRs":["127.0.0.0/8","10.0.0.0/8"],"IndexConfigs":{}}`
-			f.out[resolveHost] = "34.1.2.3\n10.1.2.3"
+			f.out[resolveHost] = "34.1.2.3        STREAM registry.depot.dev\n10.1.2.3        STREAM"
 		},
 		"docker cannot say": func(f *fake) { f.fail[registryInfo] = errors.New("connection reset") },
-		"not resolved":      func(f *fake) { f.out[resolveHost] = "" },
+		"not resolved":      func(f *fake) { f.fail[resolveHost] = errors.New("getent: exit status 2: ") },
+		"no address":        func(f *fake) { f.out[resolveHost] = "" },
 	}
 	for name, setup := range cases {
 		f := depotFake()
@@ -170,7 +173,7 @@ func TestRollbackFetchesThroughTheSameLogin(t *testing.T) {
 	depotRelease := strings.Replace(v1Release, `"image":"ghcr.io/x/y"`, `"image":"registry.depot.dev/p"`, 1)
 	f := demoReleases(t, `{`+depotRelease+`,"digest":"sha256:old"}`)
 	f.out[registryInfo] = secureInfo
-	f.out[resolveHost] = "34.1.2.3"
+	f.out[resolveHost] = "34.1.2.3        STREAM registry.depot.dev\n34.1.2.3        DGRAM"
 	f.out["sh -c out=$(docker image inspect"] = "absent"
 	if err := Rollback(context.Background(), f, io.Discard, cfg, "", depotOptions(t, cfg)); err != nil {
 		t.Fatal(err)
@@ -219,7 +222,7 @@ echo "$*" >> "$DIR/log"
 case "$1" in
 login) cat > "$DIR/login-stdin"; echo "WARNING! stored unencrypted" >&2; [ "$LOGIN" = ok ] || exit 1 ;;
 pull) cat > "$DIR/pull-stdin"
-  case "$PULL" in fail) exit 3 ;; term) kill -TERM $PPID; sleep 1 ;; hang) exec sleep 30 ;; esac ;;
+  case "$PULL" in fail) exit 3 ;; term) kill -TERM $PPID; sleep 1 ;; hang) echo $$ > "$DIR/pull-pid"; exec sleep 30 ;; esac ;;
 logout) [ "$LOGOUT" = ok ] || exit 1 ;;
 esac
 `
@@ -239,6 +242,7 @@ esac
 		t.Run(shell, func(t *testing.T) {
 			runLoginScript(t, shell, dir, l)
 			runLoginScriptCut(t, shell, dir, l)
+			runLoginScriptTerm(t, shell, dir, l)
 		})
 	}
 }
@@ -253,9 +257,10 @@ func loginScript(shell, dir string, l *Login, login, pull, logout string) *exec.
 	os.Remove(filepath.Join(dir, "log"))
 	os.Remove(filepath.Join(dir, "pull-stdin"))
 	os.Remove(filepath.Join(dir, "flock-args"))
+	os.Remove(filepath.Join(dir, "pull-pid"))
 	cmd := exec.Command(shell, "-c", loginPull(l, "registry.depot.dev/p:v1"))
 	cmd.Stdin = bytes.NewReader([]byte(l.Token))
-	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "DIR=" + dir, "LOGIN=" + login, "PULL=" + pull, "LOGOUT=" + logout}
+	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "HOME=" + dir, "DIR=" + dir, "LOGIN=" + login, "PULL=" + pull, "LOGOUT=" + logout}
 	return cmd
 }
 
@@ -300,6 +305,10 @@ func runLoginScript(t *testing.T, shell, dir string, l *Login) {
 		}
 		if got, _ := os.ReadFile(filepath.Join(dir, "login-stdin")); string(got) != depotToken {
 			t.Errorf("%s: login read %q from stdin", name, got)
+		}
+		// The lock is the docker config's, beside the credentials it guards.
+		if _, err := os.Stat(filepath.Join(dir, ".docker", registryLock)); err != nil {
+			t.Errorf("%s: no lock in the docker config: %v", name, err)
 		}
 		if got, _ := os.ReadFile(filepath.Join(dir, "pull-stdin")); len(got) != 0 {
 			t.Errorf("%s: the pull read %q from stdin", name, got)
@@ -347,4 +356,54 @@ func runLoginScriptCut(t *testing.T, shell, dir string, l *Login) {
 	if d := time.Since(start); d > 10*time.Second {
 		t.Errorf("the logout came %s after the connection closed", d)
 	}
+	pullGone(t, dir)
+}
+
+// A signal to the script — the server's own shutdown, an operator's kill — stops a silent pull at
+// once and logs out, rather than after the pull would have ended.
+func runLoginScriptTerm(t *testing.T, shell, dir string, l *Login) {
+	cmd := loginScript(shell, dir, l, "ok", "hang", "ok")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "pull-pid")); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cmd.Process.Signal(syscall.SIGTERM)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		t.Fatalf("the script outlived SIGTERM by 10s: docker ran %q", dockerRan(dir))
+	}
+	if got := cmd.ProcessState.ExitCode(); got != 143 {
+		t.Errorf("exit %d after SIGTERM, want 143", got)
+	}
+	if got := dockerRan(dir); strings.Join(got, "|") != strings.Join([]string{wantLogin, wantPull, wantLogout}, "|") {
+		t.Errorf("docker ran %q, want the logout after the signal", got)
+	}
+	pullGone(t, dir)
+}
+
+// pullGone checks that the stand-in pull the script started is no longer running.
+func pullGone(t *testing.T, dir string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "pull-pid"))
+	if err != nil {
+		t.Fatalf("the pull never started: %v", err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	for i := 0; i < 40; i++ {
+		if syscall.Kill(pid, 0) != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	syscall.Kill(pid, syscall.SIGKILL)
+	t.Errorf("the pull (pid %d) was left running", pid)
 }
