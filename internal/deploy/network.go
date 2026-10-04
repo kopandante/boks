@@ -27,6 +27,10 @@ type box struct {
 	// nets are the networks it is attached to, with the aliases (and, on a Docker that reports them,
 	// the DNS names) it has on each.
 	nets map[string][]string
+	// running and health are its state: health is healthy, unhealthy or starting, and empty for an
+	// image without a HEALTHCHECK.
+	running bool
+	health  string
 }
 
 func (b box) on(network string) bool {
@@ -34,15 +38,21 @@ func (b box) on(network string) bool {
 	return ok
 }
 
-// answers reports whether b, on network, answers to name.
+// answers reports whether b, on network, answers to name. Docker's DNS ignores case, so a name
+// matches whatever its case.
 func (b box) answers(network, name string) bool {
-	return b.on(network) && (slices.Contains(b.base, name) || slices.Contains(b.nets[network], name))
+	return b.on(network) && (hasName(b.base, name) || hasName(b.nets[network], name))
+}
+
+func hasName(names []string, name string) bool {
+	return slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, name) })
 }
 
 // boxFormat prints one JSON object per container, so names and labels that hold tabs, spaces or
 // quotes still parse.
 const boxFormat = `{"id":{{json .Id}},"name":{{json .Name}},"hostname":{{json .Config.Hostname}},` +
-	`"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}}}`
+	`"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}},` +
+	`"running":{{json .State.Running}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}`
 
 // inventory lists every container on the server, stopped ones too: a stopped copy comes back with
 // its aliases. All of them rather than those docker's network filter returns, which is documented
@@ -69,14 +79,16 @@ func inventory(ctx context.Context, r remote.Runner) ([]box, error) {
 			continue
 		}
 		var c struct {
-			ID, Name, Hostname string
-			Labels             map[string]string
-			Networks           map[string]struct{ Aliases, DNSNames []string }
+			ID, Name, Hostname, Health string
+			Running                    bool
+			Labels                     map[string]string
+			Networks                   map[string]struct{ Aliases, DNSNames []string }
 		}
 		if err := json.Unmarshal([]byte(line), &c); err != nil {
 			return nil, fmt.Errorf("reading the containers on the server: %w", err)
 		}
-		b := box{name: strings.TrimPrefix(c.Name, "/"), owner: c.Labels["boks.app"], nets: map[string][]string{}}
+		b := box{name: strings.TrimPrefix(c.Name, "/"), owner: c.Labels["boks.app"], nets: map[string][]string{},
+			running: c.Running, health: c.Health}
 		if b.owner == "" {
 			b.owner = unlabelled(b.name)
 		}
@@ -123,6 +135,11 @@ func checkNetworks(ctx context.Context, r remote.Runner, cfg *config.Config, nam
 	if err := taken(boxes, n.Name, cfg.App, mine); err != nil {
 		return false, err
 	}
+	for i, dep := range cfg.Uses {
+		if err := checkUse(ctx, r, cfg, name, dep, cfg.Networks()[i+1], boxes); err != nil {
+			return false, err
+		}
+	}
 	if len(cfg.Ports) == 0 {
 		return !exists, nil
 	}
@@ -138,11 +155,58 @@ func checkNetworks(ctx context.Context, r remote.Runner, cfg *config.Config, nam
 		return false, err
 	}
 	for _, nm := range mine {
-		if nm != "" && slices.Contains(theirs, nm) {
+		if nm != "" && hasName(theirs, nm) {
 			return false, nameTaken(nm, n.Name, proxy.Container, proxyOwner, cfg.App)
 		}
 	}
 	return !exists, nil
+}
+
+// checkUse refuses, changing nothing, to put the container among an app it uses unless that app is
+// there to be reached: deployed by a boks that gives it its own network, every running copy that
+// answers to its name healthy, and no container of another owner answering to that name as well. A
+// consumer reaches it by alias, past the proxy, so the image's own HEALTHCHECK is the only evidence
+// that it answers, and an image without one is refused rather than taken on trust. The container's
+// own name must be free on that network too. Its network is never made here: an app that does not
+// have one is not deployed.
+func checkUse(ctx context.Context, r remote.Runner, cfg *config.Config, name, dep string, n config.Network, boxes []box) error {
+	refuse := func(why string, a ...any) error {
+		return fmt.Errorf("uses: %s: "+why+"; nothing was changed", append([]any{dep}, a...)...)
+	}
+	owner, exists, err := networkOwner(ctx, r, n.Name)
+	switch {
+	case err != nil:
+		return err
+	case !exists:
+		return refuse("network %s does not exist, so %s is not deployed on this server by this boks: deploy it first", n.Name, dep)
+	case owner != dep:
+		return refuse("network %s was not made by boks for %s (its boks.app label is %q)", n.Name, dep, owner)
+	}
+	serving := 0
+	for _, b := range boxes {
+		if !b.answers(n.Name, dep) {
+			continue
+		}
+		if b.owner != dep {
+			return nameTaken(dep, n.Name, b.name, b.owner, dep)
+		}
+		if !b.running {
+			continue
+		}
+		switch b.health {
+		case "healthy":
+			serving++
+		case "":
+			return refuse("%s has no HEALTHCHECK: %s reaches it by name, past the proxy, so only the image's own health check "+
+				"says it answers — add one to its image", b.name, cfg.App)
+		default:
+			return refuse("its copy %s is %s, and %s reaching %s by name could land on it", b.name, b.health, cfg.App, dep)
+		}
+	}
+	if serving == 0 {
+		return refuse("no running copy answers to %s on %s", dep, n.Name)
+	}
+	return taken(boxes, n.Name, cfg.App, []string{name})
 }
 
 // taken refuses names that a container of another owner already answers to on network.

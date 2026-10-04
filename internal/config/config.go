@@ -71,12 +71,17 @@ func AppNetwork(app string) string { return "boks-" + app }
 
 // Networks are the networks a container of the app joins, the one it is started on first. Attach,
 // when a rollback sets it, is what the release recorded; otherwise it is the app's own network,
-// with the app's name as the alias.
+// with the app's name as the alias, then the network of each app it uses, without an alias: the
+// container reaches them there, and none of them reaches it.
 func (c *Config) Networks() []Network {
 	if len(c.Attach) > 0 {
 		return c.Attach
 	}
-	return []Network{{Name: AppNetwork(c.App), Aliases: []string{c.App}}}
+	nets := []Network{{Name: AppNetwork(c.App), Aliases: []string{c.App}}}
+	for _, dep := range c.Uses {
+		nets = append(nets, Network{Name: AppNetwork(dep)})
+	}
+	return nets
 }
 
 // Cert describes a certificate obtained by lego over DNS-01 — the case kamal-proxy's built-in
@@ -114,6 +119,10 @@ type Config struct {
 	// Replace is how a new version takes over from the old one: ReplaceOverlap or ReplaceStopFirst.
 	// Empty means the default for the app's shape, which ReplaceMode tells.
 	Replace string `yaml:"replace"`
+	// Uses names the apps this one reaches. Its containers join their networks and reach each by the
+	// app's name, its alias there. It is membership, not access control: two apps that use one
+	// dependency share its network and see each other.
+	Uses []string `yaml:"uses"`
 	// Attach overrides Networks with what a recorded release joined; never read from boks.yml.
 	Attach []Network `yaml:"-"`
 	Dir    string    `yaml:"-"`
@@ -353,6 +362,18 @@ func (c *Config) validateLists() error {
 		if err := validateVolume(v); err != nil {
 			return err
 		}
+	}
+	seen := map[string]bool{}
+	for _, dep := range c.Uses {
+		switch {
+		case !nameRe.MatchString(dep):
+			return fmt.Errorf("uses: %q must be an app name matching %s", dep, nameRe)
+		case dep == c.App:
+			return fmt.Errorf("uses: %s is this app; an app reaches itself on its own network", dep)
+		case seen[dep]:
+			return fmt.Errorf("uses: %s is named twice", dep)
+		}
+		seen[dep] = true
 	}
 	return nil
 }
