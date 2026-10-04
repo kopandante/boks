@@ -231,8 +231,9 @@ func TestAnAppWithoutRoutesTakesTheProxyOffItsNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	removed, left := f.callAt("docker exec boks-proxy kamal-proxy remove bot.web"), f.callAt("docker network disconnect boks-bot boks-proxy")
-	if removed < 0 || left < removed {
-		t.Errorf("the proxy leaves once the app's last route is gone: %d %d %v", removed, left, f.calls)
+	recorded := f.writeAt(".boks/bot/current", "bot-v2")
+	if removed < 0 || left < removed || left < recorded {
+		t.Errorf("the proxy leaves once the app's last route is gone and the release is recorded: %d %d %d %v", removed, left, recorded, f.calls)
 	}
 	// A route that could not be removed keeps the proxy where it reaches the old copy.
 	k := routelessFake("healthy")

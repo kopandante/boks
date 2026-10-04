@@ -210,8 +210,6 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		}
 	} else if err := removeExcept(ctx, r, log, routes, nil); err != nil {
 		return keptOld(err, l.again, old)
-	} else if checked {
-		leaveProxy(ctx, r, log, cfg, o)
 	}
 	// A route named by an earlier boks is known to be this app's only by its targets, so while the
 	// proxy cannot be asked, the copies that may be such a target stay, stopped, until a deploy can
@@ -234,6 +232,11 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	}
 	if err := l.record(ctx, name, op); err != nil {
 		return unrecorded(err, l.again, name, old)
+	}
+	// Once the release is recorded: leaving waits for the server's admission lock, and a wait before
+	// the record would be one more window in which a cut run leaves the new version unrecorded.
+	if !routed && checked {
+		leaveProxy(ctx, r, log, cfg, o)
 	}
 	retire(ctx, r, log, gone)
 	prune(ctx, r, log, cfg, l.tag)

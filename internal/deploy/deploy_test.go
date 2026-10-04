@@ -347,12 +347,13 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
 		// In stop-first the admission lasts until the new copy is up.
 		admitGive("bot"),
-		// No proxy routes to the app, so the proxy is not left on its network — asked under the lock.
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
+		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
+		// Recorded: no proxy routes to the app, so the proxy is not left on its network — asked under
+		// the lock.
 		admitTake("bot"),
 		proxyNets,
 		admitGive("bot"),
-		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
-		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
 		"docker stop bot-v1-1",
 		"docker rm bot-v1-1",
 		"docker images ghcr.io/x/bot --format {{.Tag}} {{.ID}}",
