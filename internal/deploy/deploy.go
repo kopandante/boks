@@ -4,6 +4,7 @@ package deploy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -25,8 +26,12 @@ type Options struct {
 	// several servers passes one, so a release has the same id on each of them and `boks rollback
 	// <id>` means one release everywhere, not one that exists on a single server.
 	Stamp time.Time
-	// Poll is how often the health of a routeless app is checked; zero means once a second.
+	// Poll is how often the health of a routeless app is checked, and the server's admission lock
+	// tried again; zero means once a second.
 	Poll time.Duration
+	// AdmitWait is how long to wait for another deploy on the server to finish admitting its
+	// container; zero means five minutes.
+	AdmitWait time.Duration
 }
 
 func (o Options) stamp() time.Time {
@@ -85,106 +90,33 @@ type launch struct {
 
 // put runs l on a server whose lock the caller holds. cfg is what l runs with: the current config
 // for a deploy, the recorded release over the current server side for a rollback.
+//
+// There is one flow for every shape of app, and the replace mode is the one fork in it. Overlap
+// starts the new copy beside the old and lets the proxy move each route once the new copy passes
+// its health check. Stop-first stops the copies that are running before the new one starts, and
+// brings them back if it never comes up — the only shape an app without routes can take (two
+// copies of a worker would drain one queue twice), and the one storage with a single writer needs
+// (two copies on one SQLite volume can corrupt it).
 func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options) error {
 	// Before anything on the server changes, the proxy included: a deploy that has to be refused
 	// for its data must leave the server as it found it.
 	if err := checkLegacyVolumes(ctx, r, cfg); err != nil {
 		return err
 	}
-	if len(cfg.Ports) == 0 {
-		return runRouteless(ctx, r, log, cfg, l, o)
-	}
-	if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
-		return err
-	}
-	// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
-	// the deploy or, worse, makes it accept and then fail every TLS handshake for that host.
-	if covered(cfg) && !cert.Installed(ctx, r, cfg) {
-		crt, _ := cert.ServerPaths(cfg.Cert)
-		return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
-	}
-	if err := pull(ctx, r, log, l.ref, l.pull); err != nil {
-		return err
-	}
-	old, err := containers(ctx, r, cfg.App)
-	if err != nil {
-		return err
-	}
-	// Which service carries each port depends on what the proxy holds right now, so it is read
-	// before anything starts: a deploy that cannot tell must not begin.
-	held, err := readRoutes(ctx, r, cfg, names(old))
-	if err != nil {
-		return err
-	}
-	plan, err := held.plan(cfg)
-	if err != nil {
-		return err
-	}
-	name := ContainerName(cfg.App, l.tag, o.stamp())
-	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
-	if err != nil {
-		return err
-	}
-	if err := l.start(ctx, name); err != nil {
-		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
-		return err
-	}
-	switched, err := switchProxy(ctx, r, log, cfg, name, plan)
-	if err != nil {
-		revert(ctx, r, log, cfg, plan, switched, old)
-		// The entry stays open: a command that failed may still have switched its route on the
-		// proxy (the connection can drop after the proxy acted), so how this ended is not known,
-		// and the journal is what tells the next run that an operation never finished.
-		return fmt.Errorf("%w\nnew container %s is left running for inspection; the route that failed may still have switched to it, "+
-			"so see the revert/warning lines above and `boks proxy list` for where traffic goes now — the operation stays open in the journal", err, name)
-	}
-	// Routing a host at a certificate path makes the proxy read that file, so the deploy is a
-	// load: record it, or `cert status` will keep claiming a reload is owed.
-	if covered(cfg) {
-		if err := cert.MarkLoaded(ctx, r, cfg); err != nil {
-			fmt.Fprintf(log, "warning: could not record the loaded certificate: %v\n", err)
+	routed := len(cfg.Ports) > 0
+	if routed {
+		if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
+			return err
 		}
-	}
-	if err := settle(ctx, r, log, cfg, name, plan, held); err != nil {
-		return keptOld(err, l.again, old)
-	}
-	if err := l.record(ctx, name, op); err != nil {
-		return unrecorded(err, l.again, name, old)
-	}
-	retire(ctx, r, log, names(old))
-	prune(ctx, r, log, cfg, l.tag)
-	return nil
-}
-
-// unrecorded reports a deploy whose new version is up but could not be written down. Retiring the
-// previous containers would then delete the last trace of what ran before, while the server's
-// memory still names that release as current; they stay until a deploy is recorded.
-func unrecorded(err error, again, name string, old []container) error {
-	return fmt.Errorf("the new version %s is up, but boks could not record it: %w\n"+
-		"the previous containers %v were not removed; run `%s` again to record a release", name, err, names(old), again)
-}
-
-// keptOld reports a deploy whose new version is up but whose routes could not be brought in line
-// with the config. The previous containers are not retired: a stale route that is still there then
-// reaches a container that still exists, rather than one this deploy deleted.
-func keptOld(err error, again string, old []container) error {
-	return fmt.Errorf("the new version is up, but bringing the proxy's routes in line with the config failed: %w\n"+
-		"the previous containers %v were not removed, so no route points at a deleted container — but a route left over may still answer "+
-		"with an error; check `boks proxy list` and run `%s` again",
-		err, names(old), again)
-}
-
-// runRouteless deploys an app that publishes nothing — a bot, a worker. Two differences from the
-// routed path, both forced by the absence of a route. There is no traffic to switch, so the proxy
-// is not booted at all; and overlapping the two versions would mean two live copies draining the
-// same queue, so the old container is stopped BEFORE the new one starts and brought back if the
-// new one never becomes healthy. Only the copies that were actually running are stopped and
-// brought back: a container left stopped by an earlier deploy must stay stopped, or a failed
-// deploy would end with two copies where there was one.
-func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options) error {
-	// The proxy is what normally creates the network every app container joins; without it the
-	// network has to be made here, or the first deploy on a fresh server cannot start at all.
-	if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
+		// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
+		// the deploy or, worse, makes it accept and then fail every TLS handshake for that host.
+		if covered(cfg) && !cert.Installed(ctx, r, cfg) {
+			crt, _ := cert.ServerPaths(cfg.Cert)
+			return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
+		}
+	} else if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
+		// The proxy is what normally creates the network every app container joins; without it the
+		// network has to be made here, or the first deploy on a fresh server cannot start at all.
 		return err
 	}
 	if err := pull(ctx, r, log, l.ref, l.pull); err != nil {
@@ -192,69 +124,82 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	}
 	// Whether the image declares a HEALTHCHECK is known before anything is touched. A deploy that
 	// is bound to be refused must not first take the running copy down.
-	if declaresNoHealthcheck(ctx, r, l.ref) {
+	if !routed && declaresNoHealthcheck(ctx, r, l.ref) {
 		return noHealthcheck(cfg)
 	}
 	old, err := containers(ctx, r, cfg.App)
 	if err != nil {
 		return err
 	}
-	live, err := running(ctx, r, cfg.App)
+	// The release serving now has a say in how it is replaced: storage it wrote with one writer is
+	// still on the volume whatever the new config says, so either side asking for stop-first is enough.
+	from, err := release.Current(ctx, r, cfg.App)
 	if err != nil {
 		return err
 	}
-	// Removing every port does not remove the routes the app had: they would keep answering, with
-	// a 502, from the container retire is about to delete. They are read before anything is
-	// stopped, so a proxy that cannot answer fails the deploy while nothing has changed yet.
-	stale, checked, err := ownRoutes(ctx, r, cfg, names(old))
-	if err != nil {
+	stopFirst := cfg.ReplaceMode() == config.ReplaceStopFirst || servingStopFirst(ctx, r, log, cfg.App, from)
+	var live []string
+	if stopFirst {
+		if live, err = running(ctx, r, cfg.App); err != nil {
+			return err
+		}
+	}
+	// Which service carries each port depends on what the proxy holds right now, so it is read
+	// before anything starts: a deploy that cannot tell must not begin. An app that no longer
+	// publishes a port still has the routes it had: they would keep answering, with a 502, from the
+	// container retire is about to delete.
+	var routes held
+	var plan map[string]string
+	checked := true
+	if routed {
+		if routes, err = readRoutes(ctx, r, cfg, names(old)); err != nil {
+			return err
+		}
+		if plan, err = routes.plan(cfg); err != nil {
+			return err
+		}
+	} else if routes, checked, err = ownRoutes(ctx, r, cfg, names(old)); err != nil {
 		return err
 	}
-	// The failure path below force-removes the container by name, so that name must not already
-	// belong to an earlier copy: two deploys of one tag within a second would otherwise remove the
-	// very copy that was meant to come back.
+	// The failure path of stop-first force-removes the new container by name, so that name must not
+	// already belong to an earlier copy: two deploys of one tag within a second would otherwise remove
+	// the very copy that was meant to come back.
 	name := ContainerName(cfg.App, l.tag, o.stamp())
-	for _, c := range names(old) {
-		if c == name {
-			return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
-		}
+	if slices.Contains(names(old), name) {
+		return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
 	}
-	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
+	adm, err := admit(ctx, r, log, cfg.App, o)
 	if err != nil {
 		return err
 	}
-	var stopped []string
-	for _, c := range live {
-		fmt.Fprintf(log, "stop %s\n", c)
-		// The stop is the guarantee that two copies never run at once, not cleanup: if it fails,
-		// the new copy must not start. `docker start` of a container that is still running is a
-		// no-op, so the one that failed to stop is safe to include in the revival.
-		stopped = append(stopped, c)
-		if _, err := r.Run(ctx, "docker", "stop", c); err != nil {
-			revive(ctx, r, log, stopped)
-			finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
-			return fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
-		}
-	}
-	err = l.start(ctx, name)
-	if err == nil {
-		err = waitHealthy(ctx, r, log, cfg, name, o.Poll)
-	}
-	if err != nil {
-		// A failed `docker run` may still have created the container, and a failed stop may have
-		// left it running. The old copy comes back only once the new one is verifiably gone;
-		// otherwise both would run at once, which is the one outcome this path exists to prevent.
-		// The entry closes only after the cleanup, so a run cut during it stays visibly unfinished.
-		if !discard(ctx, r, log, name) {
-			finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
-			return fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
-				err, name, stopped)
-		}
-		revive(ctx, r, log, stopped)
-		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
+	defer adm.release(ctx)
+	if err := checkMemory(ctx, r, log, cfg, live); err != nil {
 		return err
 	}
-	if err := removeExcept(ctx, r, log, stale, nil); err != nil {
+	op, err := beginOperation(ctx, r, log, cfg, l.action, name, from, o.Now())
+	if err != nil {
+		return err
+	}
+	if stopFirst {
+		err = replaceStopFirst(ctx, r, log, cfg, l, o, op, adm, name, old, live, plan)
+	} else {
+		err = replaceOverlap(ctx, r, log, cfg, l, o, op, adm, name, old, plan)
+	}
+	if err != nil {
+		return err
+	}
+	if routed {
+		// Routing a host at a certificate path makes the proxy read that file, so the deploy is a
+		// load: record it, or `cert status` will keep claiming a reload is owed.
+		if covered(cfg) {
+			if err := cert.MarkLoaded(ctx, r, cfg); err != nil {
+				fmt.Fprintf(log, "warning: could not record the loaded certificate: %v\n", err)
+			}
+		}
+		if err := settle(ctx, r, log, cfg, name, plan, routes); err != nil {
+			return keptOld(err, l.again, old)
+		}
+	} else if err := removeExcept(ctx, r, log, routes, nil); err != nil {
 		return keptOld(err, l.again, old)
 	}
 	// A route named by an earlier boks is known to be this app's only by its targets, so while the
@@ -282,6 +227,124 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	retire(ctx, r, log, gone)
 	prune(ctx, r, log, cfg, l.tag)
 	return nil
+}
+
+// servingStopFirst reports whether the release serving now was put in place stop-first. A snapshot
+// that cannot be read leaves the decision to the incoming side, which is what boks did before it
+// recorded the mode at all.
+func servingStopFirst(ctx context.Context, r remote.Runner, log io.Writer, app, current string) bool {
+	if current == "" {
+		return false
+	}
+	s, err := release.Load(ctx, r, app, current)
+	if err != nil {
+		fmt.Fprintf(log, "warning: could not read how the serving release %s was replaced, so the config decides: %v\n", current, err)
+		return false
+	}
+	return s.Replace == config.ReplaceStopFirst
+}
+
+// replaceOverlap starts the new copy beside the old one and moves the routes to it; the proxy moves
+// each route only once the new copy passes its health check. The server's admission ends as soon as
+// the container exists: from then on the memory check of the next deploy counts its limit.
+func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options,
+	op operation, adm *admission, name string, old []container, plan map[string]string) error {
+	err := l.start(ctx, name)
+	adm.release(ctx)
+	if err != nil {
+		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
+		return err
+	}
+	switched, err := switchProxy(ctx, r, log, cfg, name, plan)
+	if err != nil {
+		revert(ctx, r, log, cfg, plan, switched, old)
+		// The entry stays open: a command that failed may still have switched its route on the
+		// proxy (the connection can drop after the proxy acted), so how this ended is not known,
+		// and the journal is what tells the next run that an operation never finished.
+		return fmt.Errorf("%w\nnew container %s is left running for inspection; the route that failed may still have switched to it, "+
+			"so see the revert/warning lines above and `boks proxy list` for where traffic goes now — the operation stays open in the journal", err, name)
+	}
+	return nil
+}
+
+// replaceStopFirst stops the copies that are running, starts the new one and waits for it to come
+// up: by its own HEALTHCHECK without routes, through the proxy's health check of every route with
+// them, so no route moves before the new copy answers. When it never comes up, it is removed and
+// the stopped copies are brought back — and only those: a container left stopped by an earlier
+// deploy must stay stopped, or a failed deploy would end with two copies where there was one. The
+// server's admission is held until the app is settled one way or the other, because until then
+// its memory is in flux: the old copies' share is free, the new copy's is not yet taken.
+func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options,
+	op operation, adm *admission, name string, old []container, live []string, plan map[string]string) error {
+	defer adm.release(ctx)
+	// Cleanup runs to the end even when the run is cancelled: a half-done revival is how two copies,
+	// or none, end up running.
+	cleanup := context.WithoutCancel(ctx)
+	stopped, err := stopAll(ctx, r, log, live)
+	if err == nil && len(stopped) > 0 {
+		// Measured again, now that the old copies are down: what they gave back is a fact, not the
+		// estimate the first check went by.
+		err = checkMemory(ctx, r, log, cfg, nil)
+	}
+	if err != nil {
+		err = errors.Join(err, revive(cleanup, r, log, stopped))
+		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
+		return err
+	}
+	var switched []config.Port
+	switching := false
+	err = l.start(ctx, name)
+	if err == nil {
+		if len(cfg.Ports) > 0 {
+			switching = true
+			switched, err = switchProxy(ctx, r, log, cfg, name, plan)
+		} else {
+			err = waitHealthy(ctx, r, log, cfg, name, o.Poll)
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	// A failed `docker run` may still have created the container, and a failed stop may have left it
+	// running. The old copy comes back only once the new one is verifiably gone; otherwise both would
+	// run at once, which is the one outcome this mode exists to prevent. The entry closes only after
+	// the cleanup, so a run cut during it stays visibly unfinished.
+	if !discard(cleanup, r, log, name) {
+		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
+		return fmt.Errorf("%w\n%s could not be confirmed removed, so %v were left stopped rather than risk two copies running at once: remove it, then `docker start` them",
+			err, name, stopped)
+	}
+	err = errors.Join(err, revive(cleanup, r, log, stopped))
+	// Until a route switch was attempted, no route changed and the outcome is known.
+	if !switching {
+		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
+		return err
+	}
+	// The routes go back to the copy that is running again — the ones that moved and the one whose
+	// switch failed, which may have moved all the same. The proxy health-checks that copy before it
+	// moves a route, so a copy that did not come back keeps its routes where they are.
+	attempted := cfg.Ports[:min(len(switched)+1, len(cfg.Ports))]
+	revert(cleanup, r, log, cfg, plan, attempted, among(old, stopped))
+	return fmt.Errorf("%w\n%s was removed and %v brought back; the routes were moved back to them as the lines above say — "+
+		"check `boks proxy list`: the operation stays open in the journal", err, name, stopped)
+}
+
+// unrecorded reports a deploy whose new version is up but could not be written down. Retiring the
+// previous containers would then delete the last trace of what ran before, while the server's
+// memory still names that release as current; they stay until a deploy is recorded.
+func unrecorded(err error, again, name string, old []container) error {
+	return fmt.Errorf("the new version %s is up, but boks could not record it: %w\n"+
+		"the previous containers %v were not removed; run `%s` again to record a release", name, err, names(old), again)
+}
+
+// keptOld reports a deploy whose new version is up but whose routes could not be brought in line
+// with the config. The previous containers are not retired: a stale route that is still there then
+// reaches a container that still exists, rather than one this deploy deleted.
+func keptOld(err error, again string, old []container) error {
+	return fmt.Errorf("the new version is up, but bringing the proxy's routes in line with the config failed: %w\n"+
+		"the previous containers %v were not removed, so no route points at a deleted container — but a route left over may still answer "+
+		"with an error; check `boks proxy list` and run `%s` again",
+		err, names(old), again)
 }
 
 // startedWithoutRoutes reports a copy whose label records an empty list of ports — one started on
@@ -335,12 +398,79 @@ func running(ctx context.Context, r remote.Runner, app string) ([]string, error)
 	return live, nil
 }
 
-// revive restarts the containers that were stopped to make room for a deploy that then failed.
-func revive(ctx context.Context, r remote.Runner, log io.Writer, stopped []string) {
-	for _, c := range stopped {
-		fmt.Fprintf(log, "restart %s (the new version did not come up)\n", c)
-		best(ctx, r, log, "docker", "start", c)
+// stopAll stops the running copies before a new one starts, and returns the ones it touched. The
+// stop is the guarantee that two copies never run at once, not cleanup: a copy that did not stop,
+// or did not confirm it stopped, keeps the new one from starting. `docker stop` returns once the
+// container is down, and its state says so; an answer other than "not running" is not taken as one.
+// The copy that failed is among those returned: `docker start` of a container that is still running
+// is a no-op, so it is safe to bring back with the rest.
+func stopAll(ctx context.Context, r remote.Runner, log io.Writer, live []string) ([]string, error) {
+	var stopped []string
+	for _, c := range live {
+		fmt.Fprintf(log, "stop %s\n", c)
+		stopped = append(stopped, c)
+		if _, err := r.Run(ctx, "docker", "stop", c); err != nil {
+			return stopped, fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
+		}
+		if up, err := isRunning(ctx, r, c); err != nil || up {
+			return stopped, fmt.Errorf("%s was not confirmed stopped (%v), so the new version was not started", c, stateOf(up, err))
+		}
 	}
+	return stopped, nil
+}
+
+// isRunning asks docker whether container c is running; an answer other than true or false is an error.
+func isRunning(ctx context.Context, r remote.Runner, c string) (bool, error) {
+	out, err := r.Run(ctx, "docker", "container", "inspect", "--format", "{{.State.Running}}", c)
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(out) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf("unexpected state %q", out)
+}
+
+func stateOf(up bool, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	if up {
+		return "still running"
+	}
+	return "not running"
+}
+
+// revive restarts the containers that were stopped to make room for a deploy that then failed, and
+// says which of them are not running afterwards: one `docker start` that returned is not a copy
+// that is back.
+func revive(ctx context.Context, r remote.Runner, log io.Writer, stopped []string) error {
+	var down []string
+	for _, c := range stopped {
+		fmt.Fprintf(log, "restart %s\n", c)
+		best(ctx, r, log, "docker", "start", c)
+		if up, err := isRunning(ctx, r, c); err != nil || !up {
+			down = append(down, c)
+		}
+	}
+	if len(down) > 0 {
+		return fmt.Errorf("%v did not come back up: check them with `docker ps -a` and `docker start` them", down)
+	}
+	return nil
+}
+
+// among is the containers of old that are named in these names.
+func among(old []container, these []string) []container {
+	var out []container
+	for _, c := range old {
+		if slices.Contains(these, c.name) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // healthFormat asks for the health of a container and says `none` when the image declares no
@@ -616,17 +746,14 @@ func removeExcept(ctx context.Context, r remote.Runner, log io.Writer, h held, k
 // beginOperation opens the journal entry and, on the way, says whether the previous one was ever
 // closed. A deploy cut between switching routes and recording the release leaves no trace in
 // docker — the journal is the only place that knows.
-func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to string, now time.Time) (operation, error) {
+// from is the release serving now, which the caller has read.
+func beginOperation(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, action, to, from string, now time.Time) (operation, error) {
 	// The open entry is closed as abandoned once reported: otherwise every later deploy, however
 	// successful, would report the same interruption again.
 	if open, err := release.Unfinished(ctx, r, cfg.App); err == nil && open != nil {
 		fmt.Fprintf(log, "warning: %s of %s started %s and never finished; this run replaces it\n",
 			open.Action, cfg.App, open.StartedAt.Format(time.RFC3339))
 		finish(ctx, r, log, cfg.App, open.Op, "abandoned", now)
-	}
-	from, err := release.Current(ctx, r, cfg.App)
-	if err != nil {
-		return operation{}, err
 	}
 	id, err := release.Begin(ctx, r, cfg.App, action, from, to, now)
 	return operation{id: id, from: from}, err
@@ -656,7 +783,8 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	snapshot := release.Snapshot{
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
 		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Network: cfg.Network,
-		EnvPath: envFile(cfg.App, name, env), Previous: op.from, CreatedAt: now,
+		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, Replace: cfg.ReplaceMode(),
+		Previous: op.from, CreatedAt: now,
 	}
 	if cfg.Cert != nil {
 		snapshot.CertDomains = cfg.Cert.Domains
@@ -738,14 +866,22 @@ func lock(ctx context.Context, r remote.Runner, app string) error {
 	return nil
 }
 
+// unlock ends a run's hold on the app. The run has already given the admission lock back.
 func unlock(ctx context.Context, r remote.Runner, log io.Writer, app string) {
-	if err := Unlock(ctx, r, app); err != nil {
+	if _, err := r.Run(ctx, "rmdir", lockPath(app)); err != nil {
 		fmt.Fprintf(log, "warning: could not release %s: %v\n", lockPath(app), err)
 	}
 }
 
+// Unlock clears the app's deploy lock, and the server's admission lock when this app holds it: a
+// deploy that died while admitting its container leaves both behind. Admission held by another app
+// is left alone.
 func Unlock(ctx context.Context, r remote.Runner, app string) error {
+	freed, admErr := unlockAdmission(ctx, r, app)
 	_, err := r.Run(ctx, "rmdir", lockPath(app))
+	if err != nil && admErr == nil && freed {
+		return nil
+	}
 	return err
 }
 
@@ -843,6 +979,9 @@ func runArgs(cfg *config.Config, name, tag, ref, envPath string) []string {
 	a := []string{"docker", "run", "-d", "--name", name, "--network", cfg.Network,
 		"--restart", "unless-stopped", "--label", "boks.app=" + cfg.App, "--label", "boks.version=" + tag,
 		"--label", "boks.ports=" + portLabel(cfg.Ports)}
+	if cfg.Memory != "" {
+		a = append(a, "--memory", cfg.Memory)
+	}
 	if envPath != "" {
 		a = append(a, "--env-file", envPath)
 	}

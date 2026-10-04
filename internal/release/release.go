@@ -26,7 +26,9 @@ import (
 
 // FormatVersion is written into every snapshot. The format is what has to outlive the move to
 // boksd, so a reader must be able to tell which shape it is looking at before it trusts a field.
-const FormatVersion = 1
+// Version 2 added the memory limit and the replace mode. A version 1 snapshot reads as what it ran:
+// no limit, and the replace mode its shape implied.
+const FormatVersion = 2
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -46,6 +48,11 @@ type Snapshot struct {
 	CertDomains []string `json:"cert_domains,omitempty"`
 	Network     string   `json:"network"`
 	EnvPath     string   `json:"env_path,omitempty"`
+	// Memory is the hard limit the release ran with, in the config's format; empty is none.
+	Memory string `json:"memory,omitempty"`
+	// Replace is the replace mode the release was put in place with — the effective one, so an app
+	// without routes records stop-first. Empty in a version 1 snapshot.
+	Replace string `json:"replace,omitempty"`
 	// Previous is the release that was serving when this one was deployed: where a rollback
 	// without an id returns, and what Prune keeps. Empty for a first deploy, and in snapshots
 	// written before the field.
@@ -102,6 +109,12 @@ func Load(ctx context.Context, r remote.Runner, app, id string) (*Snapshot, erro
 	var s Snapshot
 	if err := json.Unmarshal([]byte(out), &s); err != nil {
 		return nil, fmt.Errorf("release %s of %s: %w", id, app, err)
+	}
+	// A newer format has fields this binary would silently drop — a replace mode among them, and
+	// running a stop-first release with overlap puts two writers on one volume.
+	if s.Version > FormatVersion {
+		return nil, fmt.Errorf("release %s of %s was recorded by a newer boks (snapshot format %d, this one reads up to %d): upgrade boks",
+			id, app, s.Version, FormatVersion)
 	}
 	return &s, nil
 }

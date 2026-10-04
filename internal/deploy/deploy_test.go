@@ -26,6 +26,12 @@ type fake struct {
 	writes []write
 	// pipeFail, when set, decides whether the write of content to path fails.
 	pipeFail func(path, content string) error
+	// stopped is what `docker stop` and `docker start` did, so asking whether a container is running
+	// answers as docker would: not after a stop, yes after a start, and yes before either.
+	stopped map[string]bool
+	// onRun, when set, sees every command as it runs, before its answer is looked up: a test can
+	// change what the server says from then on.
+	onRun func(cmd string)
 }
 
 type write struct {
@@ -79,7 +85,8 @@ func (f *fake) wrote(path, content string, appended bool) error {
 }
 
 func newFake() *fake {
-	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{}}
+	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{},
+		stopped: map[string]bool{}}
 	f.out[proxyList] = "{}" // what kamal-proxy prints when it holds no services
 	f.out[digests] = "[]"   // an image that came from no registry; tests that need a digest override it
 	return f
@@ -93,6 +100,9 @@ const (
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	f.calls = append(f.calls, cmd)
+	if f.onRun != nil {
+		f.onRun(cmd)
+	}
 	for prefix, err := range f.fail {
 		if strings.HasPrefix(cmd, prefix) {
 			return "", err
@@ -103,7 +113,26 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 			return out, nil
 		}
 	}
+	switch c := args[len(args)-1]; {
+	case strings.HasPrefix(cmd, "docker stop "):
+		f.stopped[c] = true
+	case strings.HasPrefix(cmd, "docker start "):
+		f.stopped[c] = false
+	case strings.HasPrefix(cmd, isRunningQuery):
+		return map[bool]string{true: "false", false: "true"}[f.stopped[c]], nil
+	}
 	return "", nil
+}
+
+const isRunningQuery = "docker container inspect --format {{.State.Running}} "
+
+// admitTake and admitGive are the commands that take and give back the server's admission lock for
+// a run of app at the fixed time.
+func admitTake(app string) string {
+	return "ln -sn " + app + ".1700000000000000000 /tmp/boks.admit.lock"
+}
+func admitGive(app string) string {
+	return `sh -c [ "$(readlink /tmp/boks.admit.lock)" = '` + app + `.1700000000000000000' ] && rm -f /tmp/boks.admit.lock || true`
 }
 
 // Pipe records what an upload would have written: the deploy's env-file goes through
@@ -181,13 +210,17 @@ func TestRunHappyPath(t *testing.T) {
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}",
-		proxyList,
-		"sh -c cat '.boks/demo/journal.jsonl' 2>/dev/null || true",
 		"sh -c cat '.boks/demo/current' 2>/dev/null || true",
+		proxyList,
+		admitTake("demo"),
+		"sh -c cat '.boks/demo/journal.jsonl' 2>/dev/null || true",
 		"docker run -d --name demo-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
 			"--env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
+		// In overlap the server's admission ends once the container exists: the next deploy's
+		// memory check sees it from then on, and the health wait does not hold every other app up.
+		admitGive("demo"),
 		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --tls --health-check-path /up --deploy-timeout 60s",
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
@@ -255,17 +288,22 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker pull ghcr.io/x/bot:v2",
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}",
+		"sh -c cat '.boks/bot/current' 2>/dev/null || true",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
 		proxyProbe,
+		admitTake("bot"),
 		// The journal entry is opened before the first change on the server, and stopping the
 		// running copy is one: a run cut right after the stop must leave a trace.
 		"sh -c cat '.boks/bot/journal.jsonl' 2>/dev/null || true",
-		"sh -c cat '.boks/bot/current' 2>/dev/null || true",
 		"docker stop bot-v1-1",
+		// The stop is confirmed by the container's state, not by the command having returned.
+		isRunningQuery + "bot-v1-1",
 		"docker run -d --name bot-v2-1700000000 --network boks --restart unless-stopped " +
 			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
+		// In stop-first the admission lasts until the new copy is up.
+		admitGive("bot"),
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
 		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
 		"docker stop bot-v1-1",

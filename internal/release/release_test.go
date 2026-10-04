@@ -198,7 +198,7 @@ func TestSaveWritesTheFormatVersion(t *testing.T) {
 	if err := Save(context.Background(), f, Snapshot{ID: "demo-v1-1", App: "demo"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(f.writes[".boks/demo/releases/demo-v1-1.json"], `"version": 1`) {
+	if !strings.Contains(f.writes[".boks/demo/releases/demo-v1-1.json"], `"version": 2`) {
 		t.Errorf("a snapshot must say which format it is: %s", f.writes[".boks/demo/releases/demo-v1-1.json"])
 	}
 }
@@ -268,5 +268,36 @@ func TestPreviousIsNothingWhenThePredecessorWasPruned(t *testing.T) {
 	f.out["cat .boks/demo/releases/demo-v3-3.json"] = `{"id":"demo-v3-3","previous":"demo-v1-1"}`
 	if prev, err := Previous(context.Background(), f, "demo"); err != nil || prev != "" {
 		t.Errorf("want no previous release, got %q (%v)", prev, err)
+	}
+}
+
+// The memory limit and the replace mode are part of what a release ran, so they survive the trip.
+func TestSnapshotKeepsTheLimitAndTheReplaceMode(t *testing.T) {
+	f := newFake()
+	s := Snapshot{ID: "demo-v2-2", App: "demo", Memory: "512m", Replace: "stop-first"}
+	if err := Save(context.Background(), f, s); err != nil {
+		t.Fatal(err)
+	}
+	f.out["cat .boks/demo/releases/demo-v2-2.json"] = f.writes[".boks/demo/releases/demo-v2-2.json"]
+	got, err := Load(context.Background(), f, "demo", "demo-v2-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Memory != "512m" || got.Replace != "stop-first" {
+		t.Errorf("limit and replace mode lost: %+v", got)
+	}
+}
+
+// A snapshot of a newer format may carry fields this binary does not know — a replace mode that
+// keeps two writers off one volume among them — so it is refused rather than run without them.
+func TestLoadRefusesANewerFormat(t *testing.T) {
+	f := newFake()
+	f.out["cat .boks/demo/releases/demo-v9-9.json"] = `{"version": 3, "id": "demo-v9-9", "app": "demo"}`
+	if _, err := Load(context.Background(), f, "demo", "demo-v9-9"); err == nil || !strings.Contains(err.Error(), "newer boks") {
+		t.Fatalf("want a refusal naming a newer boks, got %v", err)
+	}
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version": 1, "id": "demo-v1-1", "app": "demo"}`
+	if _, err := Load(context.Background(), f, "demo", "demo-v1-1"); err != nil {
+		t.Fatalf("an older format is still read: %v", err)
 	}
 }
