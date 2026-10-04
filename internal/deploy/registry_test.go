@@ -235,6 +235,9 @@ func TestTheLoginScriptLogsOutWhateverHappens(t *testing.T) {
 		// A logout that fails leaves the token behind, so it fails the script; a failed pull keeps its status.
 		{name: "logout failed", logout: "fail", status: 1, ran: all, says: "docker logout registry.depot.dev failed"},
 		{name: "pull and logout failed", pull: "fail", logout: "fail", status: 3, ran: all, says: "docker logout registry.depot.dev failed"},
+		// docker logout says 0 even when it could not write the config back: the token still there is
+		// what counts.
+		{name: "logout kept the token", logout: "kept", status: 1, ran: all, says: "docker logout registry.depot.dev failed"},
 		// boks going away closes the connection; nothing else would make a silent pull notice.
 		{name: "connection cut", pull: "hang", act: "cut", status: -1, ran: all},
 		{name: "SIGTERM", pull: "hang", act: "term", status: 143, ran: all},
@@ -260,7 +263,8 @@ const (
 	wantLogout = "logout registry.depot.dev"
 )
 
-// scriptCase is one outcome of the login script. The stand-ins succeed unless told "fail"; a pull
+// scriptCase is one outcome of the login script. The stand-ins succeed unless told "fail" (a logout
+// told "kept" says 0 and leaves the credentials in the config, as docker does on a full disk); a pull
 // told "hang" sits silent until stopped, a flock told "wait" takes a second, and act is what happens
 // to the script meanwhile: "cut" closes its connection, "term" signals it.
 type scriptCase struct {
@@ -276,10 +280,12 @@ type scriptCase struct {
 const fakeDocker = `#!/bin/sh
 echo "$*" >> "$DIR/log"
 case "$1" in
-login) cat > "$DIR/login-stdin"; echo "WARNING! stored unencrypted" >&2; [ "$LOGIN" != fail ] ;;
+login) cat > "$DIR/login-stdin"; echo "WARNING! stored unencrypted" >&2; [ "$LOGIN" != fail ] || exit 1
+  printf '{"auths":{"registry.depot.dev":{"auth":"eC10b2tlbg=="}}}' > "$CONF/config.json" ;;
 pull) echo $$ > "$DIR/pull-pid"
   case "$PULL" in fail) exit 3 ;; hang) exec sleep 30 ;; esac ;;
-logout) [ "$LOGOUT" != fail ] ;;
+logout) case "$LOGOUT" in fail) exit 1 ;; kept) exit 0 ;; esac
+  printf '{"auths":{}}' > "$CONF/config.json" ;;
 esac
 `
 
@@ -307,6 +313,7 @@ func runScript(t *testing.T, shell string, c scriptCase) {
 		conf = filepath.Join(dir, c.dockerConfig)
 		cmd.Env = append(cmd.Env, "DOCKER_CONFIG="+conf)
 	}
+	cmd.Env = append(cmd.Env, "CONF="+conf)
 	// Its own process group, so whatever the script leaves behind can be stopped after a failure.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stderr bytes.Buffer

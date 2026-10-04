@@ -71,8 +71,11 @@ func loginPull(l *Login, ref string) string {
 		"pull= watch=\n" +
 		// A logout that fails leaves the token on the server, which is a failure of the pull even when
 		// the image came: the status says so, unless the pull had already failed and says it first.
+		// docker logout exits 0 even when it could not write the config back (a disk the pull filled),
+		// so the config is asked too: the host must be gone from it.
 		"logout() { st=$?; [ -z \"$pull\" ] || kill \"$pull\" 2>/dev/null; [ -z \"$watch\" ] || kill \"$watch\" 2>/dev/null\n" +
-		"  docker logout " + host + " >/dev/null 2>&1 && return; echo " +
+		"  docker logout " + host + " >/dev/null 2>&1 && ! grep -qF " + remote.Quote(`"`+l.Host+`":`) +
+		" \"$conf/config.json\" 2>/dev/null && return; echo " +
 		remote.Quote("boks: docker logout "+l.Host+" failed, so the token may be left in the docker config of this "+
 			"server; run `docker logout "+l.Host+"` there") + " >&2; [ \"$st\" -ne 0 ] || exit 1; }\n" +
 		"trap logout EXIT\n" +
