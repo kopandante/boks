@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -115,5 +117,19 @@ func TestDeployNamesTheReleaseOnceForAllServers(t *testing.T) {
 		if !s.ran("docker run -d --name bot-v4-1600000005 ") {
 			t.Errorf("server %s: want the release named by the command's one stamp: %v", name, s.calls)
 		}
+	}
+}
+
+// The first interrupt cancels the run's context — so its cleanup runs — instead of killing it.
+func TestAnInterruptCancelsTheRun(t *testing.T) {
+	ctx, stop := interruptible(context.Background())
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the interrupt did not cancel the context")
 	}
 }
