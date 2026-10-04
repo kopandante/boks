@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/kopandante/boks/internal/cert"
@@ -44,20 +42,6 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// interruptible turns the first Ctrl-C or SIGTERM into a cancelled context instead of an exit, so a
-// deploy cut short still runs its cleanup — gives back the server's admission lock and the app's
-// deploy lock, closes or leaves open its journal entry, brings stopped copies back. Without it the
-// process dies on the spot, and a lock every app on the server shares stays behind. A second signal
-// ends the process as before, for a cleanup that hangs.
-func interruptible(parent context.Context) (context.Context, context.CancelFunc) {
-	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-ctx.Done()
-		stop()
-	}()
-	return ctx, stop
-}
-
 func run(args []string, out, errw io.Writer) int {
 	fs := flag.NewFlagSet("boks", flag.ContinueOnError)
 	fs.SetOutput(errw)
@@ -74,9 +58,7 @@ func run(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "error:", err)
 		return 1
 	}
-	ctx, stop := interruptible(context.Background())
-	defer stop()
-	if err := dispatch(ctx, cfg, fs.Args(), out); err != nil {
+	if err := dispatch(context.Background(), cfg, fs.Args(), out); err != nil {
 		fmt.Fprintln(errw, "error:", err)
 		return 1
 	}
