@@ -57,8 +57,12 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		if err == nil {
 			return &admission{r: r, log: log, token: token, held: true}, nil
 		}
-		owner, _ := r.Run(ctx, "sh", "-c", "readlink "+admitLock+" 2>/dev/null || true")
-		owner = ownerApp(strings.TrimSpace(owner))
+		held, _ := r.Run(ctx, "sh", "-c", "readlink "+admitLock+" 2>/dev/null || true")
+		// The link may be this run's own: `ln` succeeded and only its answer was lost on the way back.
+		if strings.TrimSpace(held) == token {
+			return &admission{r: r, log: log, token: token, held: true}, nil
+		}
+		owner := ownerApp(strings.TrimSpace(held))
 		if owner != "" && owner != waiting {
 			fmt.Fprintf(log, "waiting for the deploy of %s to finish admitting its container on this server\n", owner)
 			waiting = owner
@@ -140,8 +144,8 @@ func checkMemory(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 	terms := fmt.Sprintf("MemAvailable %s + %s used by the copies being stopped − %s other containers may still grow into − %s reserve",
 		size(avail), size(freed), size(promised), size(memoryReserve))
 	if need > free {
-		return fmt.Errorf("preliminary memory check: %s needs %s but %s is free (%s); this is a preliminary check, not a guarantee against OOM, "+
-			"and it refused before anything changed — lower `memory`, or free memory on the server", cfg.App, cfg.Memory, size(max(free, 0)), terms)
+		return fmt.Errorf("preliminary memory check: %s needs %s but %s is free (%s); this is a preliminary check, not a guarantee against OOM; "+
+			"lower `memory`, or free memory on the server", cfg.App, cfg.Memory, size(max(free, 0)), terms)
 	}
 	fmt.Fprintf(log, "memory: %s of %s free by the preliminary check (%s)\n", cfg.Memory, size(free), terms)
 	return nil

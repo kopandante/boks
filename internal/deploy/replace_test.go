@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kopandante/boks/internal/config"
+	"github.com/kopandante/boks/internal/proxy"
 	"github.com/kopandante/boks/internal/release"
 )
 
@@ -147,8 +148,8 @@ func TestStopFirstRefusesWhenTheStopFreedTooLittle(t *testing.T) {
 		}
 	}
 	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst+"memory: 512m\n"), "v2", fixed)
-	if err == nil || !strings.Contains(err.Error(), "preliminary memory check") {
-		t.Fatalf("want a refusal after the stop, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "preliminary memory check") || !strings.Contains(err.Error(), "measured after the old copies stopped") {
+		t.Fatalf("want a refusal after the stop that says so, got %v", err)
 	}
 	if f.has("docker run") {
 		t.Errorf("the new copy must not start: %v", f.calls)
@@ -529,5 +530,43 @@ func TestStopFirstLeftoverAfterASwitchLeavesTheJournalOpen(t *testing.T) {
 	}
 	if !journalOpen(f, journal) {
 		t.Errorf("the entry must stay open: %q", f.appends[journal])
+	}
+}
+
+// With two copies of the app running (an overlap deploy that failed and left its copy), a route goes
+// back to the copy the proxy sent it to before this run, not nowhere.
+func TestARouteGoesBackToTheCopyThatServedIt(t *testing.T) {
+	routes := map[string]proxy.Listed{
+		"demo.web":     {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
+		"demo.actions": {Hosts: []string{"actions.example.com"}, Targets: []string{"demo-v1-1:3001"}},
+	}
+	two := "demo-v1-1\t" + ports(t, webPort, actionsPort) + "\ndemo-v1-2\t" + ports(t, webPort, actionsPort) + "\n"
+	for _, mode := range []string{"overlap", "stop-first"} {
+		f := routedFake(t, routes)
+		f.out["docker ps -a --filter label=boks.app=demo"] = two
+		f.out["docker ps --filter label=boks.app=demo"] = "demo-v1-1\ndemo-v1-2\n"
+		f.fail[deployVia+"demo.actions --target "+newCopy] = errors.New("unhealthy")
+		if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts+"replace: "+mode+"\n"), "v2", fixed); err == nil {
+			t.Fatalf("%s: want an error", mode)
+		}
+		if !f.has(deployVia+"demo.web --target demo-v1-1:3000") || f.has(deployVia+"demo.web --target demo-v1-2") {
+			t.Errorf("%s: the route must go back to demo-v1-1, which served it: %v", mode, f.calls)
+		}
+	}
+}
+
+// `ln` that succeeded but whose answer was lost leaves this run's own token in the link: the run
+// owns the lock, rather than waiting for itself and leaving every app blocked.
+func TestAdmissionRecognizesItsOwnLock(t *testing.T) {
+	f := routedFake(t, nil)
+	f.fail["ln -sn"] = errors.New("connection reset")
+	f.out["sh -c readlink /tmp/boks.admit.lock"] = "demo.1700000000000000000"
+	o := fixed
+	o.Poll, o.AdmitWait = time.Millisecond, 5*time.Millisecond
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has(admitGive("demo")) {
+		t.Errorf("the lock it owns is given back: %v", f.calls)
 	}
 }

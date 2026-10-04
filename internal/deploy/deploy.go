@@ -174,16 +174,16 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	}
 	defer adm.release(ctx)
 	if err := checkMemory(ctx, r, log, cfg, live); err != nil {
-		return err
+		return fmt.Errorf("%w\nnothing of the app was changed", err)
 	}
 	op, err := beginOperation(ctx, r, log, cfg, l.action, name, from, o.Now())
 	if err != nil {
 		return err
 	}
 	if stopFirst {
-		err = replaceStopFirst(ctx, r, log, cfg, l, o, op, adm, name, old, live, plan)
+		err = replaceStopFirst(ctx, r, log, cfg, l, o, op, adm, name, old, live, plan, routes)
 	} else {
-		err = replaceOverlap(ctx, r, log, cfg, l, o, op, adm, name, old, plan)
+		err = replaceOverlap(ctx, r, log, cfg, l, o, op, adm, name, old, plan, routes)
 	}
 	if err != nil {
 		return err
@@ -250,7 +250,7 @@ func servingStopFirst(ctx context.Context, r remote.Runner, log io.Writer, app, 
 // each route only once the new copy passes its health check. The server's admission ends as soon as
 // the container exists: from then on the memory check of the next deploy counts its limit.
 func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options,
-	op operation, adm *admission, name string, old []container, plan map[string]string) error {
+	op operation, adm *admission, name string, old []container, plan map[string]string, routes held) error {
 	err := l.start(ctx, name)
 	adm.release(ctx)
 	if err != nil {
@@ -259,7 +259,7 @@ func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 	}
 	switched, err := switchProxy(ctx, r, log, cfg, name, plan)
 	if err != nil {
-		revert(ctx, r, log, cfg, plan, switched, old)
+		revert(ctx, r, log, cfg, plan, switched, old, routes)
 		// The entry stays open: a command that failed may still have switched its route on the
 		// proxy (the connection can drop after the proxy acted), so how this ended is not known,
 		// and the journal is what tells the next run that an operation never finished.
@@ -277,7 +277,7 @@ func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 // server's admission is held until the app is settled one way or the other, because until then
 // its memory is in flux: the old copies' share is free, the new copy's is not yet taken.
 func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options,
-	op operation, adm *admission, name string, old []container, live []string, plan map[string]string) error {
+	op operation, adm *admission, name string, old []container, live []string, plan map[string]string, routes held) error {
 	defer adm.release(ctx)
 	// Cleanup runs to the end even when the run is cancelled: a half-done revival is how two copies,
 	// or none, end up running.
@@ -286,7 +286,9 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	if err == nil && len(stopped) > 0 {
 		// Measured again, now that the old copies are down: what they gave back is a fact, not the
 		// estimate the first check went by.
-		err = checkMemory(ctx, r, log, cfg, nil)
+		if err = checkMemory(ctx, r, log, cfg, nil); err != nil {
+			err = fmt.Errorf("%w\nthis was measured after the old copies stopped, so they are being started again", err)
+		}
 	}
 	if err != nil {
 		err = errors.Join(err, revive(cleanup, r, log, stopped))
@@ -333,7 +335,7 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	// switch failed, which may have moved all the same. The proxy health-checks that copy before it
 	// moves a route, so a copy that did not come back keeps its routes where they are.
 	attempted := cfg.Ports[:min(len(switched)+1, len(cfg.Ports))]
-	revert(cleanup, r, log, cfg, plan, attempted, among(old, stopped))
+	revert(cleanup, r, log, cfg, plan, attempted, among(old, stopped), routes)
 	return fmt.Errorf("%w\n%s was removed and %v brought back; the routes were moved back to them as the lines above say — "+
 		"check `boks proxy list`: the operation stays open in the journal", err, name, stopped)
 }
@@ -1048,21 +1050,19 @@ func switchProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 // comes from the OLD container's own label: if the config changed a port between deploys, the
 // old container still listens where it was started, and aiming at the new number would make the
 // proxy's health check fail and leave the route on the broken new container.
-func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, plan map[string]string, switched []config.Port, old []container) {
-	if len(switched) == 0 {
-		return
-	}
-	if len(old) != 1 {
-		fmt.Fprintf(log, "warning: %d route(s) already point at the new container and cannot be reverted automatically (previous containers: %v)\n", len(switched), names(old))
-		return
-	}
-	// Every switched route is put back. The label makes the target exact when it has a record
-	// for that port; without one the current config is the best guess, which is what boks did
-	// before the label existed. Attempting is never worse than skipping: kamal-proxy only moves
-	// a route after its own health check passes, and the call goes through best(), so a wrong
-	// guess leaves the route exactly where skipping would have left it — on the new container.
-	prev := old[0]
+func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, plan map[string]string, switched []config.Port, old []container, h held) {
+	var unknown []string
 	for _, p := range switched {
+		prev, ok := previousOf(h, plan[p.Name], old)
+		if !ok {
+			unknown = append(unknown, p.Name)
+			continue
+		}
+		// The label makes the target exact when it has a record for that port; without one the
+		// current config is the best guess, which is what boks did before the label existed.
+		// Attempting is never worse than skipping: kamal-proxy only moves a route after its own
+		// health check passes, and the call goes through best(), so a wrong guess leaves the route
+		// exactly where skipping would have left it — on the new container.
 		target := p
 		if recorded, ok := prev.record(p); ok {
 			recorded.Host = p.Host // the domain belongs to the route, not to the container
@@ -1076,6 +1076,35 @@ func revert(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 		fmt.Fprintf(log, "revert %s → %s\n", svc.Name, svc.Target)
 		best(ctx, r, log, proxy.DeployArgs(svc)...)
 	}
+	if len(unknown) > 0 {
+		fmt.Fprintf(log, "warning: the route(s) of %v already point at the new container and cannot be reverted automatically (previous containers: %v)\n", unknown, names(old))
+	}
+}
+
+// previousOf is the container a route goes back to: the one the proxy sent it to before this run
+// started, when that is one of old, or the only container in old. Several candidates and no record
+// of which one served is a guess, and a guess is not made.
+func previousOf(h held, svc string, old []container) (container, bool) {
+	if s, ok := h.services[svc]; ok {
+		var was string
+		for _, t := range s.Targets {
+			c, _, _ := strings.Cut(t, ":")
+			if was != "" && c != was {
+				was = ""
+				break
+			}
+			was = c
+		}
+		for _, c := range old {
+			if was != "" && c.name == was {
+				return c, true
+			}
+		}
+	}
+	if len(old) == 1 {
+		return old[0], true
+	}
+	return container{}, false
 }
 
 // record is what the container was started with for the route of p. A route is its host — the
