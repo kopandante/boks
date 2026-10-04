@@ -75,7 +75,7 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 			return fmt.Errorf("deploy needs exactly one <tag>")
 		}
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return runDeploy(ctx, r, out, cfg, rest[0], true)
+			return runDeploy(ctx, r, out, cfg, rest[0])
 		})
 	case "rollback":
 		if len(rest) > 1 {
@@ -112,12 +112,12 @@ func each(ctx context.Context, cfg *config.Config, out io.Writer, fn action) err
 	return nil
 }
 
-func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string, pull bool) error {
+func runDeploy(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string) error {
 	env, err := cfg.EnvContent()
 	if err != nil {
 		return err
 	}
-	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Pull: pull, Env: env})
+	return deploy.Run(ctx, r, out, cfg, tag, deploy.Options{Pull: true, Env: env})
 }
 
 func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config) error {

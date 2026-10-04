@@ -46,13 +46,42 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
+	return put(ctx, r, log, cfg, launch{
+		action: "deploy", tag: tag, ref: cfg.Image + ":" + tag, pull: o.Pull, prune: true,
+		start: func(ctx context.Context, name string) error { return start(ctx, r, log, cfg, name, tag, o.Env) },
+		record: func(ctx context.Context, name, op string) error {
+			return record(ctx, r, log, cfg, name, tag, op, o.Env, o.Now())
+		},
+	}, o)
+}
+
+// launch is the version an operation puts on the server: a tag being deployed, or a release being
+// rolled back to. The two differ in what they run and how they write it down, and in nothing else:
+// stopping an app without routes before its new copy starts, switching routes and reverting them,
+// the certificate and old-volume checks are one machinery, so a fix to it reaches both.
+type launch struct {
+	action string // how the journal names the operation
+	tag    string // the version label, and part of the container's name
+	ref    string // the image docker runs
+	pull   bool
+	// start runs the container. record writes down that it is now the release serving and closes
+	// the journal entry; the previous containers are retired only once it succeeds.
+	start  func(ctx context.Context, name string) error
+	record func(ctx context.Context, name, op string) error
+	// prune removes this repository's images beyond keep once the previous containers are gone.
+	prune bool
+}
+
+// put runs l on a server whose lock the caller holds. cfg is what l runs with: the current config
+// for a deploy, the recorded release over the current server side for a rollback.
+func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options) error {
 	// Before anything on the server changes, the proxy included: a deploy that has to be refused
 	// for its data must leave the server as it found it.
 	if err := checkLegacyVolumes(ctx, r, cfg); err != nil {
 		return err
 	}
 	if len(cfg.Ports) == 0 {
-		return runRouteless(ctx, r, log, cfg, tag, o)
+		return runRouteless(ctx, r, log, cfg, l, o)
 	}
 	if err := proxy.Boot(ctx, r, log, cfg.Network, cfg.ProxyImage); err != nil {
 		return err
@@ -63,7 +92,7 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		crt, _ := cert.ServerPaths(cfg.Cert)
 		return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
 	}
-	if err := pull(ctx, r, log, cfg.Image+":"+tag, o.Pull); err != nil {
+	if err := pull(ctx, r, log, l.ref, l.pull); err != nil {
 		return err
 	}
 	old, err := containers(ctx, r, cfg.App)
@@ -80,12 +109,12 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err != nil {
 		return err
 	}
-	name := ContainerName(cfg.App, tag, o.Now())
-	op, err := beginOperation(ctx, r, log, cfg, "deploy", name, o.Now())
+	name := ContainerName(cfg.App, l.tag, o.Now())
+	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
 	if err != nil {
 		return err
 	}
-	if err := start(ctx, r, log, cfg, name, tag, o.Env); err != nil {
+	if err := l.start(ctx, name); err != nil {
 		finish(ctx, r, log, cfg.App, op, "failed", o.Now())
 		return err
 	}
@@ -108,11 +137,13 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := settle(ctx, r, log, cfg, name, plan, held); err != nil {
 		return keptOld(err, old)
 	}
-	if err := record(ctx, r, log, cfg, name, tag, op, o.Env, o.Now()); err != nil {
+	if err := l.record(ctx, name, op); err != nil {
 		return unrecorded(err, name, old)
 	}
 	retire(ctx, r, log, names(old))
-	prune(ctx, r, log, cfg, tag)
+	if l.prune {
+		prune(ctx, r, log, cfg, l.tag)
+	}
 	return nil
 }
 
@@ -141,19 +172,18 @@ func keptOld(err error, old []container) error {
 // new one never becomes healthy. Only the copies that were actually running are stopped and
 // brought back: a container left stopped by an earlier deploy must stay stopped, or a failed
 // deploy would end with two copies where there was one.
-func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, tag string, o Options) error {
+func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options) error {
 	// The proxy is what normally creates the network every app container joins; without it the
 	// network has to be made here, or the first deploy on a fresh server cannot start at all.
 	if err := proxy.EnsureNetwork(ctx, r, log, cfg.Network); err != nil {
 		return err
 	}
-	ref := cfg.Image + ":" + tag
-	if err := pull(ctx, r, log, ref, o.Pull); err != nil {
+	if err := pull(ctx, r, log, l.ref, l.pull); err != nil {
 		return err
 	}
 	// Whether the image declares a HEALTHCHECK is known before anything is touched. A deploy that
 	// is bound to be refused must not first take the running copy down.
-	if declaresNoHealthcheck(ctx, r, ref) {
+	if declaresNoHealthcheck(ctx, r, l.ref) {
 		return noHealthcheck(cfg)
 	}
 	old, err := containers(ctx, r, cfg.App)
@@ -174,13 +204,13 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	// The failure path below force-removes the container by name, so that name must not already
 	// belong to an earlier copy: two deploys of one tag within a second would otherwise remove the
 	// very copy that was meant to come back.
-	name := ContainerName(cfg.App, tag, o.Now())
+	name := ContainerName(cfg.App, l.tag, o.Now())
 	for _, c := range names(old) {
 		if c == name {
 			return fmt.Errorf("a container named %s already exists (the same tag was deployed less than a second ago); retry in a second", name)
 		}
 	}
-	op, err := beginOperation(ctx, r, log, cfg, "deploy", name, o.Now())
+	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
 	if err != nil {
 		return err
 	}
@@ -197,7 +227,7 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 			return fmt.Errorf("could not stop %s, so the new version was not started: %w", c, err)
 		}
 	}
-	err = start(ctx, r, log, cfg, name, tag, o.Env)
+	err = l.start(ctx, name)
 	if err == nil {
 		err = waitHealthy(ctx, r, log, cfg, name, o.Poll)
 	}
@@ -237,11 +267,13 @@ func runRouteless(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 				"%v are kept stopped until a deploy can check them\n", kept)
 		}
 	}
-	if err := record(ctx, r, log, cfg, name, tag, op, o.Env, o.Now()); err != nil {
+	if err := l.record(ctx, name, op); err != nil {
 		return unrecorded(err, name, old)
 	}
 	retire(ctx, r, log, gone)
-	prune(ctx, r, log, cfg, tag)
+	if l.prune {
+		prune(ctx, r, log, cfg, l.tag)
+	}
 	return nil
 }
 
@@ -263,9 +295,9 @@ func discard(ctx context.Context, r remote.Runner, log io.Writer, name string) b
 }
 
 // declaresNoHealthcheck reports whether the image is known to declare no HEALTHCHECK (none at all,
-// or `HEALTHCHECK NONE`). An image that cannot be inspected — `rollback` to a tag that is not on
-// the server yet, which `docker run` will fetch — is not known to lack one; the running container
-// is asked instead.
+// or `HEALTHCHECK NONE`). An image that cannot be inspected — a rollback to a release whose image
+// is no longer on the server, which `docker run` will fetch — is not known to lack one; the running
+// container is asked instead.
 func declaresNoHealthcheck(ctx context.Context, r remote.Runner, ref string) bool {
 	out, err := r.Run(ctx, "docker", "image", "inspect", "--format",
 		"{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}}", ref)
@@ -621,14 +653,23 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	if err := release.Save(ctx, r, snapshot); err != nil {
 		return err
 	}
-	if err := release.SetCurrent(ctx, r, cfg.App, name); err != nil {
-		return fmt.Errorf("mark %s as current: %w", name, err)
-	}
-	if err := release.Finish(context.WithoutCancel(ctx), r, cfg.App, op, "ok", now); err != nil {
-		return fmt.Errorf("close the journal entry: %w", err)
+	if err := serving(ctx, r, cfg.App, name, op, now); err != nil {
+		return err
 	}
 	if err := release.Prune(ctx, r, cfg.App, cfg.Keep); err != nil {
 		fmt.Fprintf(log, "warning: could not prune old releases: %v\n", err)
+	}
+	return nil
+}
+
+// serving points `current` at release id and closes the operation that put it there, in that order,
+// so an interruption between the two leaves the release named and the operation visibly open.
+func serving(ctx context.Context, r remote.Runner, app, id, op string, now time.Time) error {
+	if err := release.SetCurrent(ctx, r, app, id); err != nil {
+		return fmt.Errorf("mark %s as current: %w", id, err)
+	}
+	if err := release.Finish(context.WithoutCancel(ctx), r, app, op, "ok", now); err != nil {
+		return fmt.Errorf("close the journal entry: %w", err)
 	}
 	return nil
 }
@@ -771,12 +812,17 @@ func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 			return err
 		}
 	}
+	return run(ctx, r, log, cfg, name, tag, cfg.Image+":"+tag, envPath)
+}
+
+// run starts container name from image ref, labelled as version tag of the app cfg describes.
+func run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, ref, envPath string) error {
 	fmt.Fprintf(log, "run %s\n", name)
-	_, err := r.Run(ctx, runArgs(cfg, name, tag, envPath)...)
+	_, err := r.Run(ctx, runArgs(cfg, name, tag, ref, envPath)...)
 	return err
 }
 
-func runArgs(cfg *config.Config, name, tag, envPath string) []string {
+func runArgs(cfg *config.Config, name, tag, ref, envPath string) []string {
 	a := []string{"docker", "run", "-d", "--name", name, "--network", cfg.Network,
 		"--restart", "unless-stopped", "--label", "boks.app=" + cfg.App, "--label", "boks.version=" + tag,
 		"--label", "boks.ports=" + portLabel(cfg.Ports)}
@@ -787,7 +833,7 @@ func runArgs(cfg *config.Config, name, tag, envPath string) []string {
 		vol, path, _ := strings.Cut(v, ":")
 		a = append(a, "-v", cfg.App+proxy.NameSep+vol+":"+path)
 	}
-	return append(a, cfg.Image+":"+tag)
+	return append(a, ref)
 }
 
 // covered reports whether any of the app's hosts is served by the configured certificate.

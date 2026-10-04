@@ -1137,14 +1137,15 @@ func TestRunDoesNotGuessRevertTargetAmongSeveralOld(t *testing.T) {
 	}
 }
 
-func TestRollbackSkipsPull(t *testing.T) {
+// Pull is an option: a run without it leaves fetching to `docker run`, and no env means no file.
+func TestRunWithoutPullOrEnv(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v1", Options{Now: fixed.Now}); err != nil {
 		t.Fatal(err)
 	}
 	if f.has("docker pull") {
-		t.Errorf("rollback must not pull, calls %v", f.calls)
+		t.Errorf("a run without Pull must not pull, calls %v", f.calls)
 	}
 	for _, c := range f.calls {
 		if strings.Contains(c, "--env-file") {

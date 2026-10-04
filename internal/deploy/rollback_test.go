@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -60,5 +61,145 @@ func TestRollbackWithoutAnyEarlierRelease(t *testing.T) {
 	err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed)
 	if err == nil || !strings.Contains(err.Error(), "no earlier release") {
 		t.Fatalf("want a clear refusal, got %v", err)
+	}
+}
+
+// botReleases is a server where bot-v2-2 is current and running, and bot-v1-1 is the release
+// before it, recorded with its digest and environment file.
+func botReleases(health string) *fake {
+	f := newFake()
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v2-2\t[]\n"
+	f.out["docker ps --filter label=boks.app=bot"] = "bot-v2-2\n"
+	f.out["docker image inspect"] = `["CMD-SHELL","redis-cli ping"]`
+	f.out["docker inspect --format"] = health
+	f.out["sh -c ls -1"] = "bot-v1-1.json\nbot-v2-2.json\n"
+	f.out["sh -c cat '.boks/bot/current'"] = "bot-v2-2\n"
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"volumes":["data:/data"],"network":"boks","env_path":".boks/bot/bot-v1-1.env"}`
+	return f
+}
+
+// A rollback of an app without routes replaces it in place, exactly as a deploy does: two copies
+// of Redis on one volume, or two workers on one queue, are what this path exists to prevent.
+func TestRoutelessRollbackStopsTheRunningCopyFirst(t *testing.T) {
+	f := botReleases("healthy")
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	stop, run := f.callAt("docker stop bot-v2-2"), f.callAt("docker run -d --name bot-v1-1700000000")
+	if stop < 0 || run < 0 || stop > run {
+		t.Fatalf("the running copy must be stopped before the restored one starts: %v", f.calls)
+	}
+	if !strings.HasSuffix(f.calls[run], "-v bot.data:/data ghcr.io/x/bot@sha256:old") {
+		t.Errorf("the recorded volumes and digest must be run: %s", f.calls[run])
+	}
+	if f.has("docker pull") || touchesProxy(f) {
+		t.Errorf("a rollback of an app without routes neither pulls nor touches the proxy: %v", f.calls)
+	}
+}
+
+// A restored release that never becomes healthy is removed before the copy it replaced comes back.
+func TestRoutelessRollbackBringsTheOldCopyBack(t *testing.T) {
+	f := botReleases("unhealthy")
+	err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick())
+	if err == nil {
+		t.Fatal("want the unhealthy release to fail the rollback")
+	}
+	removed, restarted := f.callAt("docker rm -f bot-v1-1700000000"), f.callAt("docker start bot-v2-2")
+	if removed < 0 || restarted < 0 || removed > restarted {
+		t.Errorf("the restored copy must be gone before the old one restarts: %v", f.calls)
+	}
+	if f.uploads[".boks/bot/current"] != "" {
+		t.Errorf("a failed rollback must not move current: %v", f.uploads)
+	}
+}
+
+// A stop that fails is the guarantee failing: the restored copy must not start next to it.
+func TestRoutelessRollbackRefusesWhenTheStopFails(t *testing.T) {
+	f := botReleases("healthy")
+	f.fail["docker stop bot-v2-2"] = errors.New("daemon busy")
+	err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick())
+	if err == nil || !strings.Contains(err.Error(), "could not stop bot-v2-2") {
+		t.Fatalf("want a refusal about the stop, got %v", err)
+	}
+	if f.has("docker run") {
+		t.Errorf("nothing may start after a failed stop: %v", f.calls)
+	}
+}
+
+// The restored release keeps its id, so the next rollback goes further back instead of returning
+// to the release just left.
+func TestRollbackPointsCurrentAtTheRestoredRelease(t *testing.T) {
+	f := botReleases("healthy")
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.uploads[".boks/bot/current"]; got != "bot-v1-1\n" {
+		t.Errorf("current must name the restored release, got %q", got)
+	}
+	for path := range f.uploads {
+		if strings.HasPrefix(path, ".boks/bot/releases/") {
+			t.Errorf("a rollback must not record a copy of the release under a new id: %s", path)
+		}
+	}
+	if !strings.Contains(f.appends[botJournal], `"result":"ok"`) {
+		t.Errorf("the rollback's entry must be closed: %q", f.appends[botJournal])
+	}
+}
+
+// Without a record of what serves now, retiring the copy that served before would delete the last
+// trace of it while `current` still names it.
+func TestRollbackKeepsTheOldCopyWhenCurrentCannotBeMoved(t *testing.T) {
+	f := botReleases("healthy")
+	f.pipeFail = func(path, _ string) error {
+		if path == ".boks/bot/current" {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick())
+	if err == nil || !strings.Contains(err.Error(), "could not record it") {
+		t.Fatalf("want the unrecorded rollback reported, got %v", err)
+	}
+	if f.has("docker rm bot-v2-2") {
+		t.Errorf("the previous copy must be kept: %v", f.calls)
+	}
+}
+
+// A rollback routes the hosts through the current certificate, as a deploy does: it refuses while
+// the file is missing and, once routed, records that the proxy has loaded it.
+func TestRollbackHandlesTheCertificateLikeADeploy(t *testing.T) {
+	withCert := onePort + "cert: {domains: [\"*.example.com\"], dns: cloudflare, email: a@example.com}\n"
+	snapshot := func(f *fake) {
+		f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
+		f.out["sh -c cat '.boks/demo/current'"] = "demo-v2-2\n"
+		f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1",
+			"ports":[{"name":"web","port":3000,"host":"demo.example.com"}],"network":"boks"}`
+	}
+
+	missing := routedFake(t, nil)
+	snapshot(missing)
+	err := Rollback(context.Background(), missing, io.Discard, parse(t, withCert), "", fixed)
+	if err == nil || !strings.Contains(err.Error(), "boks cert issue") {
+		t.Fatalf("want a refusal while the certificate is missing, got %v", err)
+	}
+	if missing.has("docker run") {
+		t.Errorf("nothing may start without the certificate: %v", missing.calls)
+	}
+
+	f := routedFake(t, nil)
+	snapshot(f)
+	f.out["docker exec boks-proxy cat /certs/boks/_.example.com.crt"] = "-----BEGIN CERTIFICATE-----"
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, withCert), "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	marked := false
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "docker exec -i -u 0 boks-proxy sh -c") && strings.Contains(c, ".demo.loaded") {
+			marked = true
+		}
+	}
+	if !marked {
+		t.Errorf("the certificate the routes now load must be recorded as loaded: %v", f.calls)
 	}
 }
