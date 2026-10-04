@@ -226,3 +226,26 @@ func TestRollbackHandlesTheCertificateLikeADeploy(t *testing.T) {
 		t.Errorf("the certificate the routes now load must be recorded as loaded: %v", f.calls)
 	}
 }
+
+// An explicit id is the release returned to, whatever the current one was deployed over; and the
+// mounts are the recorded ones, not those the config names today.
+func TestRollbackToAnExplicitRelease(t *testing.T) {
+	f := newFake()
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
+	f.out["sh -c cat '.boks/demo/current'"] = "demo-v3-3\n"
+	f.out["cat .boks/demo/releases/demo-v3-3.json"] = `{"id":"demo-v3-3","previous":"demo-v2-2"}`
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","app":"demo","image":"ghcr.io/x/y","tag":"v1",
+		"digest":"sha256:one","ports":[{"name":"web","port":3000,"host":"demo.example.com"}],"volumes":["data:/data"],"network":"boks"}`
+	cfg := parse(t, strings.Replace(onePort, "volumes: [data:/data]", "volumes: [cache:/cache]", 1))
+	if err := Rollback(context.Background(), f, io.Discard, cfg, "demo-v1-1", fixed); err != nil {
+		t.Fatal(err)
+	}
+	run := f.callAt("docker run")
+	if run < 0 || !strings.HasSuffix(f.calls[run], "-v demo.data:/data ghcr.io/x/y@sha256:one") || strings.Contains(f.calls[run], "cache") {
+		t.Errorf("want release v1 with its own mounts only, got %v", f.calls)
+	}
+	if got := f.uploads[".boks/demo/current"]; got != "demo-v1-1\n" {
+		t.Errorf("current must name the release asked for, got %q", got)
+	}
+}
