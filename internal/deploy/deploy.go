@@ -308,7 +308,8 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 		return fmt.Errorf("%w; routes may still point at %s: once the old copies run again, run `%s` or check `boks proxy list` — "+
 			"the operation stays open in the journal", left, name, l.again)
 	}
-	err = errors.Join(err, revive(cleanup, r, log, stopped))
+	back := revive(cleanup, r, log, stopped)
+	err = errors.Join(err, back)
 	// Until a route switch was attempted, no route changed and the outcome is known.
 	if !switching {
 		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
@@ -317,8 +318,12 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	// The routes go back to the copy that is running again — the ones that moved and the one whose
 	// switch failed, which may have moved all the same. The proxy health-checks that copy before it
 	// moves a route, so a copy that did not come back keeps its routes where they are.
-	attempted := cfg.Ports[:min(len(switched)+1, len(cfg.Ports))]
-	revert(cleanup, r, log, cfg, plan, attempted, among(old, stopped), routes)
+	// A copy that did not come back is no target: the proxy would wait out its health check on every
+	// route, under the server's admission lock, to end where it started.
+	if back == nil {
+		attempted := cfg.Ports[:min(len(switched)+1, len(cfg.Ports))]
+		revert(cleanup, r, log, cfg, plan, attempted, among(old, stopped), routes)
+	}
 	return fmt.Errorf("%w\n%s was removed and %v brought back; the routes were moved back to them as the lines above say — "+
 		"check `boks proxy list`: the operation stays open in the journal", err, name, stopped)
 }

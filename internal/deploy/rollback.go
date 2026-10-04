@@ -34,6 +34,35 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 	ref := snapshot.Reference()
 	fmt.Fprintf(log, "rolling back to %s (%s)\n", id, ref)
 
+	target := restored(cfg, snapshot)
+	if cfg.Memory != "" && target.Memory == "" {
+		fmt.Fprintf(log, "warning: release %s was recorded without a memory limit, so it runs without one and without the memory check; "+
+			"today's config asks for %s\n", id, cfg.Memory)
+	}
+	// Everything else — stopping an app without routes before its old copy comes back, the route
+	// switch and its revert, the certificate checks — is what a deploy does, by the same code.
+	return put(ctx, r, log, target, launch{
+		action: "rollback", again: "boks rollback " + id, tag: snapshot.Tag, ref: ref,
+		stopFirst: cfg.ReplaceMode() == config.ReplaceStopFirst,
+		start: func(ctx context.Context, name string) error {
+			return run(ctx, r, log, target, name, snapshot.Tag, ref, snapshot.EnvPath)
+		},
+		// The release being restored keeps its own identity: `current` points back at its snapshot,
+		// which still names the release it was deployed over, rather than at a copy under a new id.
+		// So a second rollback goes one step further back instead of returning to the release this
+		// one just left.
+		record: func(ctx context.Context, _ string, op operation) error {
+			if err := serving(ctx, r, cfg.App, id, op.id, o.Now()); err != nil {
+				return err
+			}
+			pruneReleases(ctx, r, log, cfg, id)
+			return nil
+		},
+	}, o)
+}
+
+// restored is what a rollback to snapshot runs with.
+func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	// The snapshot owns what belonged to the release; the current config still owns the server
 	// side of things — which proxy image runs and on which network, how long a deploy may take,
 	// which certificate the hosts are served with. Mixing them the other way would restore a
@@ -53,34 +82,39 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 	// The restored copy is labelled with the release's own mode, so the config's vote goes to put
 	// separately rather than into the label.
 	target.Replace = snapshot.Replace
-	// Everything else — stopping an app without routes before its old copy comes back, the route
-	// switch and its revert, the certificate checks — is what a deploy does, by the same code.
-	return put(ctx, r, log, &target, launch{
-		action: "rollback", again: "boks rollback " + id, tag: snapshot.Tag, ref: ref,
-		stopFirst: cfg.ReplaceMode() == config.ReplaceStopFirst,
-		start: func(ctx context.Context, name string) error {
-			return run(ctx, r, log, &target, name, snapshot.Tag, ref, snapshot.EnvPath)
-		},
-		// The release being restored keeps its own identity: `current` points back at its snapshot,
-		// which still names the release it was deployed over, rather than at a copy under a new id.
-		// So a second rollback goes one step further back instead of returning to the release this
-		// one just left.
-		record: func(ctx context.Context, _ string, op operation) error {
-			if err := serving(ctx, r, cfg.App, id, op.id, o.Now()); err != nil {
-				return err
-			}
-			pruneReleases(ctx, r, log, cfg, id)
-			return nil
-		},
-	}, o)
+	return &target
 }
 
 // CheckRollback says, changing nothing, which release a rollback to id (empty: to the previous
 // release) would return this server to, or why it cannot. A command over several servers asks
 // every one of them first, so that it does not leave the app split across two versions.
+//
+// The preliminary memory check is asked here too, with the copies that would be stopped: refused on
+// a server further down the list, it would otherwise leave the servers before it rolled back. It is
+// asked again, under the server's admission lock, when each server's turn comes.
 func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id string) (string, error) {
-	id, _, err := reproducible(ctx, r, cfg, id)
-	return id, err
+	id, snapshot, err := reproducible(ctx, r, cfg, id)
+	if err != nil {
+		return "", err
+	}
+	target := restored(cfg, snapshot)
+	if target.Memory == "" {
+		return id, nil
+	}
+	old, err := containers(ctx, r, cfg.App)
+	if err != nil {
+		return "", err
+	}
+	var live []string
+	if target.ReplaceMode() == config.ReplaceStopFirst || cfg.ReplaceMode() == config.ReplaceStopFirst || anyStopFirst(old) {
+		if live, err = running(ctx, r, cfg.App); err != nil {
+			return "", err
+		}
+	}
+	if err := checkMemory(ctx, r, io.Discard, target, live); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // reproducible resolves the release a rollback returns to and makes sure it can be run as it was.

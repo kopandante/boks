@@ -801,3 +801,53 @@ func TestALostStopAnswerIsAskedAgain(t *testing.T) {
 		t.Errorf("a stop that completed on the second ask is a stop: %v", f.calls)
 	}
 }
+
+// The check a fleet rollback asks every server before any of them changes includes the memory check
+// of the release it would restore — refused on one server, none is rolled back — and it reads only.
+func TestCheckRollbackAsksTheMemoryCheck(t *testing.T) {
+	f := demoReleases(t, `{`+v1Release+`,"memory":"1g"}`)
+	f.server(700, nil)
+	if _, err := CheckRollback(context.Background(), f, parse(t, onePort), ""); err == nil || !strings.Contains(err.Error(), "preliminary memory check") {
+		t.Fatalf("want the memory refusal, got %v", err)
+	}
+	if f.has("docker stop") || f.has("docker run") || f.has("ln -sn") || len(f.appends) != 0 || len(f.uploads) != 0 {
+		t.Errorf("a check changes nothing: %v", f.calls)
+	}
+	g := demoReleases(t, `{`+v1Release+`,"memory":"256m"}`)
+	g.server(4000, nil)
+	if id, err := CheckRollback(context.Background(), g, parse(t, onePort), ""); err != nil || id != "demo-v1-1" {
+		t.Errorf("a release that fits passes: %q %v", id, err)
+	}
+}
+
+// A rollback to a release recorded without a limit runs without one, as it did — and says so when
+// today's config asks for one.
+func TestRollbackSaysWhenItDropsTheLimit(t *testing.T) {
+	f := demoReleases(t, `{`+v1Release+`}`)
+	var log strings.Builder
+	if err := Rollback(context.Background(), f, &log, parse(t, onePort+"memory: 512m\n"), "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "recorded without a memory limit") {
+		t.Errorf("want the dropped limit named: %q", log.String())
+	}
+}
+
+// A copy that did not come back is no target for the routes: no proxy deploy waits out its health
+// check on every port.
+func TestStopFirstDoesNotRevertOntoACopyThatStayedDown(t *testing.T) {
+	f := stopFirstFake(t)
+	f.fail[deployVia+"demo.web --target "+newCopy] = errors.New("unhealthy")
+	f.onRun = func(cmd string) {
+		if cmd == "docker start demo-v1-1" {
+			f.out[isRunningQuery+"demo-v1-1"] = "false"
+		}
+	}
+	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "did not come back up") {
+		t.Fatalf("want the copy that stayed down named, got %v", err)
+	}
+	if f.has(deployVia + "demo.web --target demo-v1-1") {
+		t.Errorf("no route goes back to a copy that is not running: %v", f.calls)
+	}
+}
