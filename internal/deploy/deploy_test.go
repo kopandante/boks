@@ -1498,6 +1498,28 @@ func TestSnapshotKeepsTheCertificateDomains(t *testing.T) {
 	}
 }
 
+// The certificate is read through the proxy, so it is checked once the proxy is booted: a deploy
+// still brings back a proxy that was stopped or removed, with the certificate on its volume, rather
+// than send the operator to issue a certificate that is already there.
+func TestTheCertificateIsCheckedOnceTheProxyIsUp(t *testing.T) {
+	f := newFake() // no proxy: the deploy boots it
+	const crt = "docker exec boks-proxy cat /certs/boks/_.example.com.crt"
+	f.fail[crt] = errors.New("Error response from daemon: No such container: boks-proxy")
+	f.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, "docker run -d --name boks-proxy") {
+			delete(f.fail, crt)
+			f.out[crt] = "-----BEGIN CERTIFICATE-----"
+		}
+	}
+	cfg := parse(t, onePort+"cert: {domains: [\"*.example.com\"], dns: cloudflare, email: a@example.com}\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if boot, check := f.callAt("docker run -d --name boks-proxy"), f.callAt(crt); boot < 0 || check < boot {
+		t.Errorf("want the proxy booted before the certificate is read: %d %d", boot, check)
+	}
+}
+
 const botJournal = ".boks/bot/journal.jsonl"
 
 // Stopping the running copy changes the server, so the entry is open before it.

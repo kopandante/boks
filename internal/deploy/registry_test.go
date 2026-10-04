@@ -212,38 +212,34 @@ func TestNewLogin(t *testing.T) {
 	}
 }
 
-// The script itself, run by a real shell against a stand-in docker: the logout runs however the
-// pull ends, the token reaches `docker login` on its stdin and nothing else, and the script's
-// status is the pull's.
+// The script itself, run by a real shell against stand-in docker and flock, once per outcome: the
+// logout runs wherever the login may have happened and nowhere else, the token reaches `docker
+// login` on its stdin and nothing else, a silent pull is stopped by a signal or a cut connection,
+// and the script's status is the pull's. Under sh and dash: Ubuntu's sh is dash, whose traps differ
+// from bash's in the details the script leans on.
 func TestTheLoginScriptLogsOutWhateverHappens(t *testing.T) {
-	dir := t.TempDir()
-	fakeDocker := `#!/bin/sh
-echo "$*" >> "$DIR/log"
-case "$1" in
-login) cat > "$DIR/login-stdin"; echo "WARNING! stored unencrypted" >&2; [ "$LOGIN" = ok ] || exit 1 ;;
-pull) cat > "$DIR/pull-stdin"
-  case "$PULL" in fail) exit 3 ;; term) kill -TERM $PPID; sleep 1 ;; hang) echo $$ > "$DIR/pull-pid"; exec sleep 30 ;; esac ;;
-logout) [ "$LOGOUT" = ok ] || exit 1 ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(fakeDocker), 0o755); err != nil {
-		t.Fatal(err)
+	all := []string{wantLogin, wantPull, wantLogout}
+	cases := []scriptCase{
+		{name: "pulled", status: 0, ran: all},
+		// A run that never took the lock touches nothing: its logout would end another pull's login.
+		{name: "lock not taken", flock: "fail", status: 1, says: "another pull has held the registry login"},
+		{name: "login refused", login: "fail", status: 1, ran: []string{wantLogin, wantLogout}, says: loginRefused},
+		{name: "pull failed", pull: "fail", status: 3, ran: all},
+		// A logout that fails leaves the token behind, so it fails the script; a failed pull keeps its status.
+		{name: "logout failed", logout: "fail", status: 1, ran: all, says: "docker logout registry.depot.dev failed"},
+		{name: "pull and logout failed", pull: "fail", logout: "fail", status: 3, ran: all, says: "docker logout registry.depot.dev failed"},
+		// boks going away closes the connection; nothing else would make a silent pull notice.
+		{name: "connection cut", pull: "hang", act: "cut", status: -1, ran: all},
+		{name: "SIGTERM", pull: "hang", act: "term", status: 143, ran: all},
 	}
-	if err := os.WriteFile(filepath.Join(dir, "flock"), []byte("#!/bin/sh\necho \"$*\" > \"$DIR/flock-args\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	l := &Login{Registry: &config.Registry{Host: "registry.depot.dev", User: "x-token", TokenEnv: "T"}, Token: depotToken}
-	// Ubuntu's sh is dash, whose traps differ from bash's in the details this script leans on.
 	shells := []string{"sh"}
 	if _, err := exec.LookPath("dash"); err == nil {
 		shells = append(shells, "dash")
 	}
 	for _, shell := range shells {
-		t.Run(shell, func(t *testing.T) {
-			runLoginScript(t, shell, dir, l)
-			runLoginScriptCut(t, shell, dir, l)
-			runLoginScriptTerm(t, shell, dir, l)
-		})
+		for _, c := range cases {
+			t.Run(shell+"/"+c.name, func(t *testing.T) { runScript(t, shell, c) })
+		}
 	}
 }
 
@@ -253,157 +249,120 @@ const (
 	wantLogout = "logout registry.depot.dev"
 )
 
-func loginScript(shell, dir string, l *Login, login, pull, logout string) *exec.Cmd {
-	os.Remove(filepath.Join(dir, "log"))
-	os.Remove(filepath.Join(dir, "pull-stdin"))
-	os.Remove(filepath.Join(dir, "flock-args"))
-	os.Remove(filepath.Join(dir, "pull-pid"))
+// scriptCase is one outcome of the login script. The stand-ins succeed unless told "fail"; a pull
+// told "hang" sits silent until stopped, and act is what then happens to the script: "cut" closes
+// its connection, "term" signals it.
+type scriptCase struct {
+	name                       string
+	flock, login, pull, logout string
+	act                        string
+	status                     int      // the exit status; -1 is any but 0
+	ran                        []string // what docker was asked, in order, in full
+	says                       string   // what the script must say on stderr
+}
+
+const fakeDocker = `#!/bin/sh
+echo "$*" >> "$DIR/log"
+case "$1" in
+login) cat > "$DIR/login-stdin"; echo "WARNING! stored unencrypted" >&2; [ "$LOGIN" != fail ] ;;
+pull) echo $$ > "$DIR/pull-pid"; cat > "$DIR/pull-stdin"
+  case "$PULL" in fail) exit 3 ;; hang) exec sleep 30 ;; esac ;;
+logout) [ "$LOGOUT" != fail ] ;;
+esac
+`
+
+const fakeFlock = `#!/bin/sh
+echo "$*" > "$DIR/flock-args"
+[ "$FLOCK" != fail ]
+`
+
+func runScript(t *testing.T, shell string, c scriptCase) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{"docker": fakeDocker, "flock": fakeFlock} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(name string) string { b, _ := os.ReadFile(filepath.Join(dir, name)); return string(b) }
+	l := &Login{Registry: &config.Registry{Host: "registry.depot.dev", User: "x-token", TokenEnv: "T"}, Token: depotToken}
 	cmd := exec.Command(shell, "-c", loginPull(l, "registry.depot.dev/p:v1"))
-	cmd.Stdin = bytes.NewReader([]byte(l.Token))
-	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "HOME=" + dir, "DIR=" + dir, "LOGIN=" + login, "PULL=" + pull, "LOGOUT=" + logout}
-	return cmd
-}
-
-// dockerRan is what the stand-in docker was asked, one command per element.
-func dockerRan(dir string) []string {
-	log, _ := os.ReadFile(filepath.Join(dir, "log"))
-	return strings.Split(strings.TrimSpace(string(log)), "\n")
-}
-
-func runLoginScript(t *testing.T, shell, dir string, l *Login) {
-	for _, c := range []struct {
-		login, pull, logout string
-		status              int
-		ran                 []string
-	}{
-		{"ok", "ok", "ok", 0, []string{wantLogin, wantPull, wantLogout}},
-		{"no", "ok", "ok", 1, []string{wantLogin, wantLogout}},
-		{"ok", "fail", "ok", 3, []string{wantLogin, wantPull, wantLogout}},
-		{"ok", "term", "ok", 143, []string{wantLogin, wantPull, wantLogout}},
-		// A logout that fails fails the script, and a failed pull keeps its own status.
-		{"ok", "ok", "fail", 1, []string{wantLogin, wantPull, wantLogout}},
-		{"ok", "fail", "fail", 3, []string{wantLogin, wantPull, wantLogout}},
-	} {
-		cmd := loginScript(shell, dir, l, c.login, c.pull, c.logout)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		_ = cmd.Run()
-		name := "login " + c.login + ", pull " + c.pull + ", logout " + c.logout
-		if got := cmd.ProcessState.ExitCode(); got != c.status {
-			t.Errorf("%s: exit %d, want %d (%s)", name, got, c.status, stderr.String())
+	cmd.Stdin = strings.NewReader(l.Token)
+	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "HOME=" + dir, "DIR=" + dir,
+		"FLOCK=" + c.flock, "LOGIN=" + c.login, "PULL=" + c.pull, "LOGOUT=" + c.logout}
+	// Its own process group, so whatever the script leaves behind can be stopped after a failure.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	var conn io.Closer
+	if c.act == "cut" {
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
 		}
-		if c.logout != "ok" && !strings.Contains(stderr.String(), "docker logout registry.depot.dev failed") {
-			t.Errorf("%s: a failed logout is said: %q", name, stderr.String())
-		}
-		if got := dockerRan(dir); strings.Join(got, "|") != strings.Join(c.ran, "|") {
-			t.Errorf("%s: docker ran %q, want %q", name, got, c.ran)
-		}
-		// Waiting, and for long enough to outlast another pull: an flock without -w, or with -u,
-		// would not serialize anything.
-		if got, _ := os.ReadFile(filepath.Join(dir, "flock-args")); strings.TrimSpace(string(got)) != "-w 600 9" {
-			t.Errorf("%s: flock ran with %q", name, got)
-		}
-		if got, _ := os.ReadFile(filepath.Join(dir, "login-stdin")); string(got) != depotToken {
-			t.Errorf("%s: login read %q from stdin", name, got)
-		}
-		// The lock is the docker config's, beside the credentials it guards.
-		if _, err := os.Stat(filepath.Join(dir, ".docker", registryLock)); err != nil {
-			t.Errorf("%s: no lock in the docker config: %v", name, err)
-		}
-		if got, _ := os.ReadFile(filepath.Join(dir, "pull-stdin")); len(got) != 0 {
-			t.Errorf("%s: the pull read %q from stdin", name, got)
-		}
-		if c.login != "ok" && (!strings.Contains(stderr.String(), loginRefused) || !strings.Contains(stderr.String(), "WARNING")) {
-			t.Errorf("%s: a refused login is said as such, with what docker said: %q", name, stderr.String())
-		}
-		if c.login == "ok" && strings.Contains(stderr.String(), "WARNING") {
-			t.Errorf("%s: what a successful login says is not passed on: %q", name, stderr.String())
-		}
-	}
-}
-
-// boks going away — a cancelled run, a CI job killed — closes the connection the script writes to.
-// A pull that sits silent would never notice; the watcher does, stops the pull and the script logs
-// out within seconds rather than when the pull would have ended.
-func runLoginScriptCut(t *testing.T, shell, dir string, l *Login) {
-	cmd := loginScript(shell, dir, l, "ok", "hang", "ok")
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
+		conn = out
 	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 100 && !slices.Contains(dockerRan(dir), wantPull); i++ {
-		time.Sleep(50 * time.Millisecond)
+	t.Cleanup(func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	deadline := time.Now().Add(10 * time.Second)
+	if c.act != "" {
+		for read("pull-pid") == "" {
+			if time.Now().After(deadline) {
+				t.Fatalf("the pull never started; docker ran %q", read("log"))
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		switch c.act {
+		case "cut":
+			conn.Close()
+		case "term":
+			cmd.Process.Signal(syscall.SIGTERM)
+		}
 	}
-	start := time.Now()
-	out.Close()
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	done := make(chan struct{})
+	go func() { cmd.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
-		cmd.Process.Kill()
-		t.Fatalf("the script outlived the connection by 15s: docker ran %q", dockerRan(dir))
+	case <-time.After(time.Until(deadline)):
+		t.Fatalf("the script was still running after 10s; docker ran %q", read("log"))
 	}
-	if cmd.ProcessState.ExitCode() == 0 {
-		t.Error("a pull cut short is not a success")
-	}
-	if got := dockerRan(dir); strings.Join(got, "|") != strings.Join([]string{wantLogin, wantPull, wantLogout}, "|") {
-		t.Errorf("docker ran %q, want the logout after the cut pull", got)
-	}
-	if d := time.Since(start); d > 10*time.Second {
-		t.Errorf("the logout came %s after the connection closed", d)
-	}
-	pullGone(t, dir)
-}
 
-// A signal to the script — the server's own shutdown, an operator's kill — stops a silent pull at
-// once and logs out, rather than after the pull would have ended.
-func runLoginScriptTerm(t *testing.T, shell, dir string, l *Login) {
-	cmd := loginScript(shell, dir, l, "ok", "hang", "ok")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	if got := cmd.ProcessState.ExitCode(); got != c.status && !(c.status == -1 && got != 0) {
+		t.Errorf("exit %d, want %d; stderr %q", got, c.status, stderr.String())
 	}
-	for i := 0; i < 100; i++ {
-		if _, err := os.Stat(filepath.Join(dir, "pull-pid")); err == nil {
-			break
+	if got := strings.FieldsFunc(read("log"), func(r rune) bool { return r == '\n' }); !slices.Equal(got, c.ran) {
+		t.Errorf("docker ran %q, want %q", got, c.ran)
+	}
+	if c.says != "" && !strings.Contains(stderr.String(), c.says) {
+		t.Errorf("stderr %q, want it to say %q", stderr.String(), c.says)
+	}
+	// What a successful login says (that the credentials are stored unencrypted) is noise after the
+	// pull; a refused one is passed on with docker's own words.
+	if warned := strings.Contains(stderr.String(), "WARNING"); warned != (c.login == "fail") {
+		t.Errorf("docker login's warning passed on: %v; stderr %q", warned, stderr.String())
+	}
+	// Waiting, and for long enough to outlast another pull: an flock without -w, or with -u, would not
+	// serialize anything. The lock is the docker config's, beside the credentials it guards.
+	if got := strings.TrimSpace(read("flock-args")); got != "-w 600 9" {
+		t.Errorf("flock ran with %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".docker", registryLock)); err != nil {
+		t.Errorf("no lock in the docker config: %v", err)
+	}
+	if slices.Contains(c.ran, wantLogin) && read("login-stdin") != depotToken {
+		t.Errorf("login read %q from stdin", read("login-stdin"))
+	}
+	if got := read("pull-stdin"); got != "" {
+		t.Errorf("the pull read %q from stdin", got)
+	}
+	if pid, err := strconv.Atoi(strings.TrimSpace(read("pull-pid"))); err == nil {
+		for i := 0; syscall.Kill(pid, 0) == nil; i++ {
+			if i == 50 {
+				t.Errorf("the pull (pid %d) was left running", pid)
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
-	cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		cmd.Process.Kill()
-		t.Fatalf("the script outlived SIGTERM by 10s: docker ran %q", dockerRan(dir))
-	}
-	if got := cmd.ProcessState.ExitCode(); got != 143 {
-		t.Errorf("exit %d after SIGTERM, want 143", got)
-	}
-	if got := dockerRan(dir); strings.Join(got, "|") != strings.Join([]string{wantLogin, wantPull, wantLogout}, "|") {
-		t.Errorf("docker ran %q, want the logout after the signal", got)
-	}
-	pullGone(t, dir)
-}
-
-// pullGone checks that the stand-in pull the script started is no longer running.
-func pullGone(t *testing.T, dir string) {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, "pull-pid"))
-	if err != nil {
-		t.Fatalf("the pull never started: %v", err)
-	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	for i := 0; i < 40; i++ {
-		if syscall.Kill(pid, 0) != nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	syscall.Kill(pid, syscall.SIGKILL)
-	t.Errorf("the pull (pid %d) was left running", pid)
 }

@@ -391,8 +391,10 @@ func (c *Config) validateRegistry() error {
 	if h := ImageHost(c.Image); h != r.Host {
 		return fmt.Errorf("image: %s is on %s, not on registry.host %s; boks logs in to %s only", c.Image, h, r.Host, r.Host)
 	}
-	// The proxy is booted by `docker run`, which pulls without the login.
-	if r.Logs(c.ProxyImage) {
+	// The proxy is booted by `docker run`, which pulls without the login. Only a proxy image the config
+	// names is asked about: the default is public, and on Docker Hub it would share the host with a
+	// private image while needing no login at all.
+	if c.ProxyImage != DefaultProxyImage && r.Logs(c.ProxyImage) {
 		return fmt.Errorf("proxy_image: %s is on the private registry %s, and the proxy is pulled without a login; use a public proxy image",
 			c.ProxyImage, r.Host)
 	}

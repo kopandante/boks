@@ -281,6 +281,10 @@ func TestParseRegistry(t *testing.T) {
 	if err != nil || cfg.Registry.User != "me" {
 		t.Errorf("an explicit user is kept: %+v, %v", cfg.Registry, err)
 	}
+	// A private image on Docker Hub shares the host with the default proxy image, which is public.
+	if _, err := Parse([]byte("app: demo\nimage: myorg/private\nservers: [a]\nregistry: {host: docker.io, token_env: HUB_TOKEN}\n")); err != nil {
+		t.Errorf("the default proxy needs no login: %v", err)
+	}
 	if cfg, err := Parse([]byte(depot)); err != nil || cfg.Registry != nil {
 		t.Errorf("without the block the image is public: %+v, %v", cfg, err)
 	}

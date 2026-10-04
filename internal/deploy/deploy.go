@@ -113,12 +113,6 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if _, err := checkNetworks(ctx, r, cfg, name); err != nil {
 		return err
 	}
-	// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
-	// the deploy or, worse, makes it accept and then fail every TLS handshake for that host.
-	if routed && covered(cfg) && !cert.Installed(ctx, r, cfg) {
-		crt, _ := cert.ServerPaths(cfg.Cert)
-		return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
-	}
 	// The pull comes before the proxy is booted: a registry that refuses the login, or an image that
 	// is not there, is a refusal that leaves the server as it found it.
 	if err := pull(ctx, r, log, l.ref, l.pull || missing(ctx, r, l.ref), o.Login); err != nil {
@@ -132,6 +126,14 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if routed {
 		if err := bootProxy(ctx, r, log, cfg.App, cfg.ProxyImage, o); err != nil {
 			return err
+		}
+		// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
+		// the deploy or, worse, makes it accept and then fail every TLS handshake for that host. The
+		// file is read through the proxy, so only once it is booted: a stopped proxy would read as a
+		// missing certificate.
+		if covered(cfg) && !cert.Installed(ctx, r, cfg) {
+			crt, _ := cert.ServerPaths(cfg.Cert)
+			return fmt.Errorf("%s is missing on this server: run `boks cert issue` before deploying an app with a cert block", crt)
 		}
 	}
 	old, err := containers(ctx, r, cfg.App)
