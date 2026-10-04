@@ -121,3 +121,27 @@ func TestDeployNamesTheReleaseOnceForAllServers(t *testing.T) {
 		}
 	}
 }
+
+// `boks proxy boot` changes what every app on the server shares — the proxy and its networks — so it
+// takes the server's admission lock around the boot, under a holder no deploy mistakes for its own.
+func TestProxyBootTakesTheAdmissionLock(t *testing.T) {
+	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running", "docker exec boks-proxy kamal-proxy list --json": "{}"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "boot"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	took, booted, gave := -1, -1, -1
+	for i, c := range a.calls {
+		switch {
+		case strings.HasPrefix(c, "ln -sn _proxy.") && took < 0:
+			took = i
+		case strings.HasPrefix(c, "docker ps -a --filter name=^boks-proxy$") && booted < 0:
+			booted = i
+		case strings.HasPrefix(c, "sh -c [ \"$(readlink /tmp/boks.admit.lock)\" = '_proxy."):
+			gave = i
+		}
+	}
+	if took < 0 || booted < took || gave < booted {
+		t.Errorf("want the lock taken, the proxy booted, the lock given back: %d %d %d %v", took, booted, gave, a.calls)
+	}
+}

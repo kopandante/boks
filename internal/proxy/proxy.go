@@ -138,7 +138,8 @@ func RunArgs(image string) []string {
 }
 
 // Boot makes sure the proxy's network exists, the proxy container is running and it is on the
-// networks its routes need. Idempotent.
+// networks its routes need. Idempotent. It changes state every app on the server shares — the proxy
+// and its networks — so the caller holds the server's admission lock, the one lock all of them take.
 func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) error {
 	if err := ensureNetwork(ctx, r, log); err != nil {
 		return err
@@ -164,27 +165,25 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 			return err
 		}
 	}
-	reattach(ctx, r, log)
-	return nil
+	return reattach(ctx, r, log)
 }
 
 // reattach puts the proxy on the networks of the containers its routes target that it is not on.
 // The routes outlive a removed proxy in its config volume, its networks do not: a new container is
 // on Network alone, and every route to an app on its own network — or on the network apps shared
-// before — would answer 502 until that app is deployed again. It runs on every boot, not only on
-// the one that created the proxy, so a boot cut short between the two is finished by the next. Best
-// effort: a target that is gone has no network to join, and the next deploy of its app connects the
-// proxy where it routes.
-func reattach(ctx context.Context, r remote.Runner, log io.Writer) {
+// before — would answer 502 until that app is deployed again. It runs on every boot, so a boot cut
+// short between creating the proxy and joining is finished by the next. A route whose target is
+// gone has no network to join and costs a warning; any other failure is the boot's, because a route
+// to a container that runs and cannot be reached is an outage the boot would otherwise report as a
+// success.
+func reattach(ctx context.Context, r remote.Runner, log io.Writer) error {
 	on, err := networks(ctx, r)
 	if err != nil {
-		fmt.Fprintf(log, "warning: the proxy's networks could not be read, so none was joined: %v\n", err)
-		return
+		return err
 	}
 	services, names, err := Services(ctx, r)
 	if err != nil {
-		fmt.Fprintf(log, "warning: the proxy could not list its routes, so it joined no app network: %v\n", err)
-		return
+		return fmt.Errorf("reading the proxy's routes to put it on their networks: %w", err)
 	}
 	seen, joined := map[string]bool{}, map[string]bool{Network: true}
 	for _, n := range on {
@@ -197,23 +196,41 @@ func reattach(ctx context.Context, r remote.Runner, log io.Writer) {
 				continue
 			}
 			seen[c] = true
-			out, err := r.Run(ctx, "docker", "container", "inspect", "--format",
-				"{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}", c)
+			nets, gone, err := targetNetworks(ctx, r, c)
 			if err != nil {
-				fmt.Fprintf(log, "warning: route %s targets %s, whose networks could not be read: %v\n", n, c, err)
+				return fmt.Errorf("route %s targets %s, whose networks could not be read: %w", n, c, err)
+			}
+			if gone {
+				fmt.Fprintf(log, "warning: route %s targets %s, which is gone; deploying its app again repairs the route\n", n, c)
 				continue
 			}
-			for _, net := range strings.Fields(out) {
+			for _, net := range nets {
 				if joined[net] {
 					continue
 				}
-				joined[net] = true
 				if err := Connect(ctx, r, log, net); err != nil {
-					fmt.Fprintf(log, "warning: route %s may not reach %s: %v\n", n, c, err)
+					return fmt.Errorf("route %s cannot reach %s: %w", n, c, err)
 				}
+				joined[net] = true
 			}
 		}
 	}
+	return nil
+}
+
+// targetNetworks are the networks container c is attached to. Only docker's own answer that there is
+// no such container counts as gone; any other failure is an error.
+func targetNetworks(ctx context.Context, r remote.Runner, c string) ([]string, bool, error) {
+	out, err := r.Run(ctx, "sh", "-c", "out=$(docker container inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "+
+		remote.Quote(c)+" 2>&1) && echo \"$out\" || case \"$out\" in *'No such container'*|*'No such object'*) echo '<gone>';; "+
+		"*) echo \"$out\" >&2; exit 1;; esac")
+	if err != nil {
+		return nil, false, err
+	}
+	if strings.TrimSpace(out) == "<gone>" {
+		return nil, true, nil
+	}
+	return strings.Fields(out), false, nil
 }
 
 // awaitAnswer waits for a proxy that was just started to open its command socket: the deploy

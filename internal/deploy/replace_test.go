@@ -232,12 +232,14 @@ func TestAdmissionWaitsForAnotherApp(t *testing.T) {
 	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", o); err != nil {
 		t.Fatalf("a lock let go of is taken: %v", err)
 	}
-	if tries != 3 || g.at("ln -sn") > g.at("docker run") {
+	// The proxy boot's admission waits out the three tries; the container's is then taken at once.
+	if tries != 4 || g.at("ln -sn") > g.at("docker run") {
 		t.Errorf("want the run to start after the third try: %d %v", tries, g.calls)
 	}
 }
 
-// `boks unlock` clears a stale admission lock this app left, and only that one.
+// `boks unlock` clears a stale admission lock this app left, or a proxy boot outside any deploy did
+// (`boks proxy boot`, `boks cert`), and no other.
 func TestUnlockClearsTheAdmissionLockOfThisApp(t *testing.T) {
 	f := newFake()
 	f.fail["rmdir"] = errors.New("No such file or directory")
@@ -246,7 +248,7 @@ func TestUnlockClearsTheAdmissionLockOfThisApp(t *testing.T) {
 	if err := Unlock(context.Background(), f, "demo"); err != nil {
 		t.Errorf("a freed admission lock is an unlock: %v", err)
 	}
-	if !strings.Contains(f.calls[0], " demo.*) rm -f /tmp/boks.admit.lock") {
+	if !strings.Contains(f.calls[0], " demo.*|_proxy.*) rm -f /tmp/boks.admit.lock") {
 		t.Errorf("only this app's admission lock is removed: %v", f.calls)
 	}
 	g := newFake()
@@ -266,7 +268,7 @@ func TestStopFirstStopsTheOldCopyBeforeTheNewOneStarts(t *testing.T) {
 	}
 	opened := f.writeAt(journal, `"action":"deploy"`)
 	stop, confirmed := f.callAt("docker stop demo-v1-1"), f.callAt(isRunningQuery+"demo-v1-1")
-	run, route, given := f.callAt("docker run"), f.callAt(deployVia+"demo.web --target "+newCopy), f.callAt(admitGive("demo"))
+	run, route, given := f.callAt("docker run"), f.callAt(deployVia+"demo.web --target "+newCopy), f.lastAt(admitGive("demo"))
 	if opened < 0 || opened > stop || stop > confirmed || confirmed > run || run > route || route > given {
 		t.Errorf("want journal < stop < confirmed < run < route < admission given back: %d %d %d %d %d %d\n%v",
 			opened, stop, confirmed, run, route, given, f.calls)

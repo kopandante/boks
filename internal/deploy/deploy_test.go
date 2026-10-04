@@ -59,6 +59,16 @@ func (f *fake) writeIndex(path, substr string) int {
 	return -1
 }
 
+// lastAt is the position of the last command starting with prefix, or -1.
+func (f *fake) lastAt(prefix string) int {
+	for i := len(f.calls) - 1; i >= 0; i-- {
+		if strings.HasPrefix(f.calls[i], prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
 // callAt is the position of the first command starting with prefix, or -1.
 func (f *fake) callAt(prefix string) int {
 	for i, c := range f.calls {
@@ -213,11 +223,14 @@ func TestRunHappyPath(t *testing.T) {
 		// Whether the app's network is free for its alias is known before anything changes.
 		netOwnerQuery("boks-demo"),
 		boxesQuery,
+		// The proxy and its networks are every app's, so booting it takes the server's admission lock.
+		admitTake("demo"),
 		"docker network inspect boks",
 		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
 		// The proxy is on the networks its routes need: none here.
 		proxyNets,
 		proxyList,
+		admitGive("demo"),
 		"docker pull ghcr.io/x/y:v2",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		proxyList,
@@ -232,12 +245,13 @@ func TestRunHappyPath(t *testing.T) {
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
 			"--label boks.replace=overlap --env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
-		// In overlap the server's admission ends once the container exists: the next deploy's
-		// memory check sees it from then on, and the health wait does not hold every other app up.
-		admitGive("demo"),
-		// The proxy joins the app's network right before the first route moves.
+		// The proxy joins the app's network before the first route moves, still under the lock.
 		proxyNets,
 		"docker network connect boks-demo boks-proxy",
+		// In overlap the server's admission ends once the container exists and the proxy can reach
+		// it: the next deploy's memory check sees it from then on, and the health wait does not hold
+		// every other app up.
+		admitGive("demo"),
 		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
 			"--host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s",
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
@@ -333,8 +347,10 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
 		// In stop-first the admission lasts until the new copy is up.
 		admitGive("bot"),
-		// No proxy routes to the app, so the proxy is not left on its network.
+		// No proxy routes to the app, so the proxy is not left on its network — asked under the lock.
+		admitTake("bot"),
 		proxyNets,
+		admitGive("bot"),
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
 		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
 		"docker stop bot-v1-1",

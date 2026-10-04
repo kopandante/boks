@@ -112,7 +112,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	if routed {
-		if err := proxy.Boot(ctx, r, log, cfg.ProxyImage); err != nil {
+		if err := bootProxy(ctx, r, log, cfg.App, cfg.ProxyImage, o); err != nil {
 			return err
 		}
 		// Routing a host to a certificate file that isn't there yet either makes kamal-proxy refuse
@@ -211,7 +211,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	} else if err := removeExcept(ctx, r, log, routes, nil); err != nil {
 		return keptOld(err, l.again, old)
 	} else if checked {
-		leaveProxy(ctx, r, log, cfg)
+		leaveProxy(ctx, r, log, cfg, o)
 	}
 	// A route named by an earlier boks is known to be this app's only by its targets, so while the
 	// proxy cannot be asked, the copies that may be such a target stay, stopped, until a deploy can
@@ -246,14 +246,15 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options,
 	op operation, adm *admission, name string, old []container, plan map[string]string, routes held) error {
 	err := l.start(ctx, name)
-	adm.release(ctx)
 	if err == nil {
 		// The proxy joins before any route moves, so a failure here moved none: the new copy goes and
-		// the operation ends as failed rather than as one whose routes nobody can vouch for.
+		// the operation ends as failed rather than as one whose routes nobody can vouch for. Under the
+		// admission lock, like every change to the proxy's networks.
 		if err = joinProxy(ctx, r, log, cfg); err != nil && !discard(context.WithoutCancel(ctx), r, log, cfg.App, name) {
 			err = fmt.Errorf("%w\n%s could not be confirmed removed: it routes nothing, and the next deploy retires it", err, name)
 		}
 	}
+	adm.release(ctx)
 	if err != nil {
 		finish(ctx, r, log, cfg.App, op.id, "failed", o.Now())
 		return err

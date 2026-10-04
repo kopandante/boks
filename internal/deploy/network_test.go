@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kopandante/boks/internal/proxy"
 )
@@ -333,5 +334,32 @@ func TestTheProxysOwnNameMustBeFreeOnTheNetwork(t *testing.T) {
 	f.out[boxes] = boxLine("other-v1-1", "other", "abc", `["boks-proxy"]`)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil || !changedNothing(f) {
 		t.Errorf("want a refusal before any change, got %v: %v", err, f.calls)
+	}
+}
+
+// A proxy that cannot reach the target of another app's route fails the boot, and with it the deploy,
+// before anything of this app changes; the admission lock is given back.
+func TestAProxyThatCannotReachARouteStopsTheDeploy(t *testing.T) {
+	f := routedFake(t, map[string]proxy.Listed{"other.web": {Hosts: []string{"o.example.com"}, Targets: []string{"other-v1-1:80"}}})
+	f.fail["sh -c out=$(docker container inspect"] = errors.New("connection reset")
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "other-v1-1") {
+		t.Fatalf("want the boot's failure, got %v", err)
+	}
+	if f.has("docker pull") || f.has("docker run") || len(f.appends) != 0 || !f.has(admitGive("demo")) {
+		t.Errorf("nothing of the app changes, and the lock is given back: %v", f.calls)
+	}
+}
+
+// A lock left by a proxy boot outside any deploy is named as that, with the way to clear it.
+func TestALeftoverProxyBootLockIsNamed(t *testing.T) {
+	f := routedFake(t, nil)
+	f.fail["ln -sn"] = errors.New("File exists")
+	f.out["sh -c readlink /tmp/boks.admit.lock"] = "_proxy.1699999999000000000"
+	o := fixed
+	o.Poll, o.AdmitWait = time.Millisecond, 5*time.Millisecond
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o)
+	if err == nil || !strings.Contains(err.Error(), "`boks proxy boot` or `boks cert` run has held") {
+		t.Fatalf("want the proxy boot named, got %v", err)
 	}
 }

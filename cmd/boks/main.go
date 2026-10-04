@@ -27,7 +27,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   releases         releases recorded on each server, newest last
   proxy boot       make sure kamal-proxy is running (idempotent)
   proxy list       routes known to kamal-proxy
-  unlock           clear a stale deploy lock, and the server's admission lock if this app left it
+  unlock           clear a stale deploy lock, and the server's admission lock if this app or a
+                   proxy boot left it
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
   cert renew       same, but lego skips the run unless the certificate is due (safe in a cron)
   cert status      subject and expiry of the certificate each server currently serves
@@ -246,7 +247,7 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 		return err
 	}
 	return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-		if err := proxy.Boot(ctx, r, out, cfg.ProxyImage); err != nil {
+		if err := deploy.BootProxy(ctx, r, out, cfg.ProxyImage); err != nil {
 			return err
 		}
 		if err := cert.Install(ctx, r, out, cfg); err != nil {
@@ -276,7 +277,7 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 	switch args[0] {
 	case "boot":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return proxy.Boot(ctx, r, out, cfg.ProxyImage)
+			return deploy.BootProxy(ctx, r, out, cfg.ProxyImage)
 		})
 	case "list":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {

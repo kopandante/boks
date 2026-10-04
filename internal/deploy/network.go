@@ -212,13 +212,19 @@ func joinProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.
 }
 
 // leaveProxy takes the proxy off the network of an app that has no routes any more, once they are
-// known to be gone: the proxy joins only the networks of the apps it routes to. A failure costs
-// isolation, not the deploy, and is reported; the next deploy without routes tries again.
-func leaveProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) {
+// known to be gone: the proxy joins only the networks of the apps it routes to. Under the admission
+// lock, like every change to the proxy's networks, so a proxy boot reading the routes a moment
+// before they went cannot put it back. A failure costs isolation, not the deploy, and is reported;
+// the next deploy without routes tries again.
+func leaveProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, o Options) {
 	n := cfg.Networks()[0].Name
-	on, err := proxy.On(ctx, r, n)
-	if err == nil && on {
-		err = proxy.Disconnect(ctx, r, log, n)
+	adm, err := admit(ctx, r, log, cfg.App, o)
+	if err == nil {
+		defer adm.release(ctx)
+		var on bool
+		if on, err = proxy.On(ctx, r, n); err == nil && on {
+			err = proxy.Disconnect(ctx, r, log, n)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(log, "warning: the proxy may still be on network %s: %v\n", n, err)
