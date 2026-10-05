@@ -496,6 +496,32 @@ func TestParseSchedules(t *testing.T) {
 		app + "schedules: [{name: w, cron: '* * * * *', command: ' '}]\n":                                         "command is required",
 		app + "schedules: [{name: w, cron: '* * * * *', command: x}, {name: w, cron: '* * * * *', command: y}]\n": "named twice",
 	}
+	// What the server's crontab would refuse is refused here: the crontab is installed only after the
+	// release already serves.
+	for cron, want := range map[string]string{
+		"60 * * * *":    "within 0-59",
+		"0 24 * * *":    "within 0-23",
+		"0 0 0 * *":     "within 1-31",
+		"0 0 * 13 *":    "within 1-12",
+		"0 0 * * 8":     "within 0-7",
+		"*/ * * * *":    "numbers, *",
+		"*/0 * * * *":   "step 0",
+		"5/10 * * * *":  "single number",
+		"10-5 * * * *":  "backwards",
+		"1,,2 * * * *":  "numbers, *",
+		"- * * * *":     "numbers, *",
+		"1-2-3 * * * *": "numbers, *",
+	} {
+		in := app + "schedules: [{name: w, cron: '" + cron + "', command: x}]\n"
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("cron %q: want error containing %q, got %v", cron, want, err)
+		}
+	}
+	for _, cron := range []string{"0 9 * * 1-5", "*/15 0-6,22-23 1,15 */2 0", "0-59/5 * * * 7", "00 09 * * *"} {
+		if _, err := Parse([]byte(app + "schedules: [{name: w, cron: '" + cron + "', command: x}]\n")); err != nil {
+			t.Errorf("cron %q: want it accepted, got %v", cron, err)
+		}
+	}
 	for in, want := range rejects {
 		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want error containing %q, got %v", in, want, err)

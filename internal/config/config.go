@@ -50,11 +50,7 @@ var (
 	registryHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
 	envNameRe      = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 	// signalRe is a signal as docker names it, written the one way that cannot be misread.
-	signalRe = regexp.MustCompile(`^SIG[A-Z0-9]+$`)
-	// cronFieldRe is one field of a five-field cron expression in the form every cron accepts:
-	// numbers, `*`, ranges, lists and steps. Names (MON, JAN) and @-shortcuts vary between cron
-	// implementations, so they are left out.
-	cronFieldRe    = regexp.MustCompile(`^[0-9*,/-]+$`)
+	signalRe       = regexp.MustCompile(`^SIG[A-Z0-9]+$`)
 	registryUserRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+-]*$`)
 )
 
@@ -664,13 +660,74 @@ func (s Schedule) validate() error {
 	if len(fields) != 5 {
 		return fmt.Errorf("schedules[%s]: cron %q must have five fields: minute hour day-of-month month day-of-week", s.Name, s.Cron)
 	}
-	for _, f := range fields {
-		if !cronFieldRe.MatchString(f) {
-			return fmt.Errorf("schedules[%s]: cron field %q must use numbers, *, ranges, lists and steps only", s.Name, f)
+	for i, f := range fields {
+		if err := cronField(f, cronBounds[i]); err != nil {
+			return fmt.Errorf("schedules[%s]: cron field %q (%s): %w", s.Name, f, cronBounds[i].name, err)
 		}
 	}
 	if strings.TrimSpace(s.Command) == "" {
 		return fmt.Errorf("schedules[%s]: command is required", s.Name)
+	}
+	return nil
+}
+
+// cronBounds are the five cron fields in order, with the values each accepts (7 is Sunday, as 0).
+type cronBound struct {
+	name   string
+	lo, hi int
+}
+
+var cronBounds = [5]cronBound{{"minute", 0, 59}, {"hour", 0, 23}, {"day of month", 1, 31}, {"month", 1, 12}, {"day of week", 0, 7}}
+
+// cronField checks one field in the form every cron reads alike: a list of `*`, a number or a range
+// `a-b`, the star and the range optionally stepped `/n`. Names (MON, JAN) and @-shortcuts vary between
+// cron implementations, so they are left out. The crontab is installed after the release already
+// serves, so a field the server's cron would refuse is refused here, before anything changes.
+func cronField(f string, b cronBound) error {
+	num := func(v string) (int, error) {
+		if v == "" || strings.Trim(v, "0123456789") != "" {
+			return 0, fmt.Errorf("must use numbers, *, ranges, lists and steps only")
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < b.lo || n > b.hi {
+			return 0, fmt.Errorf("%s must be within %d-%d", v, b.lo, b.hi)
+		}
+		return n, nil
+	}
+	for _, item := range strings.Split(f, ",") {
+		base, step, stepped := strings.Cut(item, "/")
+		if stepped {
+			if strings.Trim(step, "0123456789") != "" || step == "" {
+				return fmt.Errorf("must use numbers, *, ranges, lists and steps only")
+			}
+			if n, err := strconv.Atoi(step); err != nil || n < 1 || n > b.hi-b.lo+1 {
+				return fmt.Errorf("step %s must be within 1-%d", step, b.hi-b.lo+1)
+			}
+		}
+		if base == "*" {
+			continue
+		}
+		lo, hi, ranged := strings.Cut(base, "-")
+		if !ranged {
+			if stepped {
+				return fmt.Errorf("a step follows * or a range, not a single number")
+			}
+			if _, err := num(base); err != nil {
+				return err
+			}
+			continue
+		}
+		a, err := num(lo)
+		if err != nil {
+			return err
+		}
+		z, err := num(hi)
+		if err != nil {
+			return err
+		}
+		if a > z {
+			return fmt.Errorf("range %s runs backwards", base)
+		}
 	}
 	return nil
 }
