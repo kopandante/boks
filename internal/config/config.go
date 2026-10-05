@@ -290,7 +290,12 @@ func Parse(data []byte) (*Config, error) {
 		}
 		// A null element (`~`, or a bare `-`) decodes to nothing rather than to "": `[redis-server, --save, ~]`
 		// would run without the argument and shift the ones after it. An empty argument is written "".
-		if probe.Command.Kind == yaml.SequenceNode && len(probe.Command.Content) != len(cfg.Command) {
+		// An alias (`command: *cmd`) is decoded through to the list it names, and so is checked there.
+		seq := &probe.Command
+		for seq.Kind == yaml.AliasNode && seq.Alias != nil {
+			seq = seq.Alias
+		}
+		if seq.Kind == yaml.SequenceNode && len(seq.Content) != len(cfg.Command) {
 			return nil, errors.New(`command: an element is null; write "" for an empty argument`)
 		}
 		// `command:` or `command: []` would start the image's own CMD while the config looks as if it set one.

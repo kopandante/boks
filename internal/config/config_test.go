@@ -458,16 +458,17 @@ func TestParseCommandAndStopSignal(t *testing.T) {
 		t.Errorf("an empty argument written \"\" is kept: %q %v", cfg.Command, err)
 	}
 	rejects := map[string]string{
-		bot + "command:\n":                   "give the program",
-		bot + "command: []\n":                "give the program",
-		bot + "command: [\"\", x]\n":         "cannot be empty",
-		bot + "command: [null, x]\n":         "is null",
-		bot + "command: [x, --save, ~, y]\n": "is null",
-		bot + "command:\n  -\n  - x\n":       "is null",
-		bot + "command: [~]\n":               "is null",
-		bot + "stop_signal: int\n":           "signal name",
-		bot + "stop_signal: 2\n":             "signal name",
-		bot + "stop_signal: SIGINT x\n":      "signal name",
+		bot + "command:\n":                              "give the program",
+		bot + "command: []\n":                           "give the program",
+		bot + "command: [\"\", x]\n":                    "cannot be empty",
+		bot + "command: [null, x]\n":                    "is null",
+		bot + "command: [x, --save, ~, y]\n":            "is null",
+		bot + "command:\n  -\n  - x\n":                  "is null",
+		bot + "<<: {command: &c [x, ~]}\ncommand: *c\n": "is null",
+		bot + "command: [~]\n":                          "is null",
+		bot + "stop_signal: int\n":                      "signal name",
+		bot + "stop_signal: 2\n":                        "signal name",
+		bot + "stop_signal: SIGINT x\n":                 "signal name",
 	}
 	for in, want := range rejects {
 		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
