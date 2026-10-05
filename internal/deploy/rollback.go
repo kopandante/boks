@@ -62,8 +62,8 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 		// which still names the release it was deployed over, rather than at a copy under a new id.
 		// So a second rollback goes one step further back instead of returning to the release this
 		// one just left.
-		record: func(ctx context.Context, _ string, op operation) error {
-			if err := serving(ctx, r, cfg.App, id, op.id, o.Now()); err != nil {
+		record: func(ctx context.Context, name string, op operation) error {
+			if err := serving(ctx, r, cfg.App, id, name, op.id, o.Now()); err != nil {
 				return err
 			}
 			pruneReleases(ctx, r, log, cfg, id)
@@ -95,6 +95,8 @@ func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	// And the command and stop signal: one the release did not record ran with the image's own.
 	target.Command = snapshot.Command
 	target.StopSignal = snapshot.StopSignal
+	// And its schedules: cron follows the release that serves.
+	target.Schedules = snapshot.Schedules
 	// The replace mode is the one field where the release and today's config both have a say, and
 	// either asking for stop-first wins: the release may have written its volume with one writer, and
 	// the config may say that it does now — overlapping on the word of either side alone could put two
@@ -196,6 +198,9 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 			return "", nil, fmt.Errorf("a file of release %s is gone (%s): it was pruned or removed, "+
 				"so this release cannot be reproduced; deploy the tag again instead", id, gone)
 		}
+	}
+	if err := jobsPresent(ctx, r, cfg.App, id, snapshot.Schedules); err != nil {
+		return "", nil, err
 	}
 	return id, snapshot, nil
 }

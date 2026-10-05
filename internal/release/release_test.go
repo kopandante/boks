@@ -118,7 +118,7 @@ func TestPruneKeepsTheNewest(t *testing.T) {
 	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.removed) != 3 || !strings.Contains(f.removed[0], "demo-v1-1.json") || f.removed[2] != ".boks/demo/files/demo-v1-1" {
+	if len(f.removed) != 4 || !strings.Contains(f.removed[0], "demo-v1-1.json") || f.removed[2] != ".boks/demo/files/demo-v1-1" || f.removed[3] != ".boks/demo/jobs/demo-v1-1" {
 		t.Errorf("want the oldest release removed with its env and files, got %v", f.removed)
 	}
 	if strings.Join(f.rmFlags, " ") != "-rf" {
@@ -146,7 +146,7 @@ func TestPruneGoesByAgeNotByTag(t *testing.T) {
 	if err := Prune(context.Background(), f, "demo", "", 3); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{".boks/demo/releases/demo-c1d2e3f-100.json", ".boks/demo/demo-c1d2e3f-100.env", ".boks/demo/files/demo-c1d2e3f-100"}
+	want := []string{".boks/demo/releases/demo-c1d2e3f-100.json", ".boks/demo/demo-c1d2e3f-100.env", ".boks/demo/files/demo-c1d2e3f-100", ".boks/demo/jobs/demo-c1d2e3f-100"}
 	if strings.Join(f.removed, " ") != strings.Join(want, " ") {
 		t.Errorf("want only the oldest release and its env removed, got %v", f.removed)
 	}
@@ -261,7 +261,7 @@ func TestPruneKeepsWhatARollbackReaches(t *testing.T) {
 	if err := Prune(context.Background(), f, "demo", "demo-v4-4", 3); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{".boks/demo/releases/demo-v2-2.json", ".boks/demo/demo-v2-2.env", ".boks/demo/files/demo-v2-2"}
+	want := []string{".boks/demo/releases/demo-v2-2.json", ".boks/demo/demo-v2-2.env", ".boks/demo/files/demo-v2-2", ".boks/demo/jobs/demo-v2-2"}
 	if strings.Join(f.removed, " ") != strings.Join(want, " ") {
 		t.Errorf("want v2 removed and v1 kept, got %v", f.removed)
 	}

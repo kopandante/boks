@@ -37,8 +37,9 @@ import (
 // added the files mounted into the container: a boks that drops them would bring a release back
 // without its configuration files, and the container would start on whatever the image ships.
 // Version 7 added the command and the stop signal: without them a release of a stock image (redis
-// started with a password) would come back running the image's own CMD.
-const FormatVersion = 7
+// started with a password) would come back running the image's own CMD. Version 8 added the
+// schedules: a boks that drops them would leave cron running the jobs of the release rolled back from.
+const FormatVersion = 8
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -83,6 +84,9 @@ type Snapshot struct {
 	// empty when the release ran with the image's own, and before version 7.
 	Command    []string `json:"command,omitempty"`
 	StopSignal string   `json:"stop_signal,omitempty"`
+	// Schedules are the jobs cron runs in the serving copy; their commands are kept under JobsDir of
+	// this release. Empty when it had none, and before version 8.
+	Schedules []config.Schedule `json:"schedules,omitempty"`
 	// Previous is the release that was serving when this one was deployed: where a rollback
 	// without an id returns, and what Prune keeps. Empty for a first deploy, and in snapshots
 	// written before the field.
@@ -126,8 +130,21 @@ func snapshotPath(app, id string) string { return path.Join(Dir(app), "releases"
 
 // FilesDir holds the files release id mounts. One owner for the name, as for EnvPath.
 func FilesDir(app, id string) string { return path.Join(Dir(app), "files", id) }
-func currentPath(app string) string  { return path.Join(Dir(app), "current") }
-func journalPath(app string) string  { return path.Join(Dir(app), "journal.jsonl") }
+
+// JobsDir holds the commands of release id's schedules, one file per job.
+func JobsDir(app, id string) string { return path.Join(Dir(app), "jobs", id) }
+
+// ServingPath names the release that serves and its container, on one line written in one atomic
+// step: a scheduled job reads both together. `current` alone cannot say which container that is —
+// a rollback restores a release under its old id in a container of a new name.
+func ServingPath(app string) string { return path.Join(Dir(app), "serving") }
+
+// SetServing records that release id serves from container.
+func SetServing(ctx context.Context, r remote.Runner, app, id, container string) error {
+	return remote.UploadAtomic(ctx, r, []byte(id+" "+container+"\n"), ServingPath(app))
+}
+func currentPath(app string) string { return path.Join(Dir(app), "current") }
+func journalPath(app string) string { return path.Join(Dir(app), "journal.jsonl") }
 
 // Save writes a snapshot. The write is atomic because a half-written snapshot is worse than a
 // missing one: rollback would run something that never existed.
@@ -271,7 +288,7 @@ func Prune(ctx context.Context, r remote.Runner, app, current string, keep int) 
 		if kept[id] {
 			continue
 		}
-		if _, err := r.Run(ctx, "rm", "-rf", snapshotPath(app, id), EnvPath(app, id), FilesDir(app, id)); err != nil {
+		if _, err := r.Run(ctx, "rm", "-rf", snapshotPath(app, id), EnvPath(app, id), FilesDir(app, id), JobsDir(app, id)); err != nil {
 			return err
 		}
 	}

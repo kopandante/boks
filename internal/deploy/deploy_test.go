@@ -272,6 +272,7 @@ func TestRunHappyPath(t *testing.T) {
 			"--host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s",
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
 		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
+		cronClear("demo"),
 		"docker stop demo-v1-1",
 		"docker rm demo-v1-1",
 		"docker images ghcr.io/x/y --format {{.Tag}} {{.ID}}",
@@ -320,6 +321,15 @@ func touchesProxy(f *fake) bool {
 	return false
 }
 
+// cronClear is the one call a deploy of an app without schedules makes about cron: it removes the
+// app's block only if an earlier release left one.
+func cronClear(app string) string {
+	b := "'.boks/" + app + "/crontab'"
+	return "sh -c [ -s " + b + " ] || exit 0; command -v crontab >/dev/null || { : > " + b + "; exit 0; }; " +
+		"{ crontab -l 2>/dev/null || true; } | sed -e '/^# boks:" + app + " begin$/','/^# boks:" + app + " end$/'d > " + b + ".new && " +
+		"crontab " + b + ".new && rm -f " + b + ".new && : > " + b
+}
+
 const proxyProbe = "docker ps -a --filter name=^boks-proxy$ --format {{.State}}"
 
 const boxesQuery = boxes + ` || exit 1; [ -z "$ids" ] || exec docker inspect --format '{"id":{{json .Id}},"name":{{json .Name}},` +
@@ -366,6 +376,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		admitGive("bot"),
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
 		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
+		cronClear("bot"),
 		// Recorded: no proxy routes to the app, so the proxy is not left on its network — asked under
 		// the lock.
 		admitTake("bot"),
@@ -1770,5 +1781,57 @@ func TestDeployRunsTheConfiguredCommandAndStopSignal(t *testing.T) {
 	opts := runOptions(cfg, "bot-v2", "v2", "bot:v2", "", nil)
 	if want := []string{"bot:v2", "sh", "-c", `exec redis-server --requirepass "$P"`, ""}; len(opts) < len(want) || !slices.Equal(opts[len(opts)-len(want):], want) {
 		t.Errorf("each element of the command must be one argument after the image: %q", opts)
+	}
+}
+
+const withSchedule = noPorts + "schedules:\n  - {name: warm, cron: '*/4 * * * *', command: 'cd /app && ./warm %s'}\n"
+
+// A release with schedules: the server is asked for cron before anything changes, the job's command
+// goes under the release's own directory before the snapshot names it, the serving copy is recorded,
+// and the app's crontab block points cron at the runner — without the command in the crontab, where
+// `%` would end the line.
+func TestDeployWithSchedules(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["sh -c command -v crontab"] = "yes"
+	if err := Run(context.Background(), f, io.Discard, parse(t, withSchedule), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if cron, stop := f.callAt("sh -c command -v crontab"), f.callAt("docker stop"); cron < 0 || stop < 0 || cron > stop {
+		t.Errorf("cron must be checked before the running copy is touched: %v", f.calls)
+	}
+	if f.uploads[".boks/bot/jobs/bot-v2-1700000000/warm.sh"] != "cd /app && ./warm %s\n" {
+		t.Errorf("the job's command must be kept under the release: %v", f.uploads)
+	}
+	if f.writeIndex(".boks/bot/jobs/bot-v2-1700000000/warm.sh", "warm") > f.writeIndex(".boks/bot/releases/bot-v2-1700000000.json", "") {
+		t.Errorf("the command must exist before the snapshot names it")
+	}
+	if f.uploads[".boks/bot/serving"] != "bot-v2-1700000000 bot-v2-1700000000\n" {
+		t.Errorf("the serving release and container must be recorded together: %q", f.uploads[".boks/bot/serving"])
+	}
+	if !strings.Contains(f.uploads[".boks/bin/boks-job"], "docker exec -i \"$c\" sh -s < \"$f\"") || !f.has("chmod 0700 .boks/bin/boks-job") {
+		t.Errorf("the runner must be written and made executable")
+	}
+	block := f.uploads[".boks/bot/crontab"]
+	if block != "# boks:bot begin\n*/4 * * * * $HOME/.boks/bin/boks-job bot warm\n# boks:bot end\n" {
+		t.Errorf("unexpected crontab block: %q", block)
+	}
+	if !f.has("sh -c { crontab -l 2>/dev/null || true; } | sed -e '/^# boks:bot begin$/','/^# boks:bot end$/'d") {
+		t.Errorf("the app's block must replace its earlier one in the crontab: %v", f.calls)
+	}
+	if !strings.Contains(f.uploads[".boks/bot/releases/bot-v2-1700000000.json"], `"name": "warm"`) {
+		t.Errorf("the release must record its schedules")
+	}
+}
+
+// Without cron the jobs would never run, so the deploy is refused while the running copy is still up.
+func TestDeployWithSchedulesRefusesAServerWithoutCron(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["sh -c command -v crontab"] = "no"
+	err := Run(context.Background(), f, io.Discard, parse(t, withSchedule), "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "install cron") {
+		t.Fatalf("want a refusal naming cron, got %v", err)
+	}
+	if f.has("docker stop") || f.has("docker run") || f.has("docker pull") {
+		t.Errorf("nothing may change on a server that cannot run the jobs: %v", f.calls)
 	}
 }

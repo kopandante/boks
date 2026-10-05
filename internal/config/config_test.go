@@ -476,3 +476,29 @@ func TestParseCommandAndStopSignal(t *testing.T) {
 		}
 	}
 }
+
+// A schedule is a named five-field cron in the form every cron reads, and a command.
+func TestParseSchedules(t *testing.T) {
+	const app = "app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\n"
+	cfg, err := Parse([]byte(app + "schedules:\n  - {name: warm, cron: '*/4 * * * *', command: 'cd /app && ./warm'}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Schedules) != 1 || cfg.Schedules[0].Cron != "*/4 * * * *" || cfg.Schedules[0].Command != "cd /app && ./warm" {
+		t.Errorf("want the schedule verbatim, got %+v", cfg.Schedules)
+	}
+	rejects := map[string]string{
+		app + "schedules: [{name: Warm, cron: '* * * * *', command: x}]\n":                                        "name",
+		app + "schedules: [{name: w, cron: '* * * *', command: x}]\n":                                             "five fields",
+		app + "schedules: [{name: w, cron: '* * * * * *', command: x}]\n":                                         "five fields",
+		app + "schedules: [{name: w, cron: '0 9 * * MON', command: x}]\n":                                         "numbers, *",
+		app + "schedules: [{name: w, cron: '@hourly', command: x}]\n":                                             "five fields",
+		app + "schedules: [{name: w, cron: '* * * * *', command: ' '}]\n":                                         "command is required",
+		app + "schedules: [{name: w, cron: '* * * * *', command: x}, {name: w, cron: '* * * * *', command: y}]\n": "named twice",
+	}
+	for in, want := range rejects {
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+}

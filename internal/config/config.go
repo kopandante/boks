@@ -50,7 +50,11 @@ var (
 	registryHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
 	envNameRe      = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 	// signalRe is a signal as docker names it, written the one way that cannot be misread.
-	signalRe       = regexp.MustCompile(`^SIG[A-Z0-9]+$`)
+	signalRe = regexp.MustCompile(`^SIG[A-Z0-9]+$`)
+	// cronFieldRe is one field of a five-field cron expression in the form every cron accepts:
+	// numbers, `*`, ranges, lists and steps. Names (MON, JAN) and @-shortcuts vary between cron
+	// implementations, so they are left out.
+	cronFieldRe    = regexp.MustCompile(`^[0-9*,/-]+$`)
 	registryUserRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+-]*$`)
 )
 
@@ -111,6 +115,18 @@ type Healthcheck struct {
 	Interval string `yaml:"interval" json:"interval"`
 }
 
+// Schedule is a shell command run on a cron schedule inside the copy of the app that serves at that
+// moment — what Dokploy calls an application schedule. The json tags are load-bearing: a release
+// snapshot stores the schedules verbatim, and a rollback brings back the ones that release had.
+type Schedule struct {
+	Name string `yaml:"name" json:"name"`
+	// Cron is five fields — minute, hour, day of month, month, day of week — in the server's cron,
+	// which runs in UTC on our servers.
+	Cron string `yaml:"cron" json:"cron"`
+	// Command is run by `sh` inside the container, as its default user and in its working directory.
+	Command string `yaml:"command" json:"command"`
+}
+
 // Cert describes a certificate obtained by lego over DNS-01 — the case kamal-proxy's built-in
 // autocert cannot serve, because a wildcard has no HTTP-01 challenge. Hosts not covered by it
 // keep using autocert, so an app can mix both.
@@ -155,6 +171,8 @@ type Config struct {
 	// StopSignal is what `docker stop` sends in place of the image's STOPSIGNAL (SIGTERM unless the
 	// image says otherwise): self-hosted Convex shuts down cleanly on SIGINT.
 	StopSignal string `yaml:"stop_signal"`
+	// Schedules are commands cron runs inside the serving copy of the app.
+	Schedules []Schedule `yaml:"schedules"`
 	// Files are files of the app's repository the container reads, each `local:/container/path`,
 	// the local path relative to boks.yml. Every release gets its own copy on the server, mounted
 	// read-only, so a rollback reads the files it ran with.
@@ -579,6 +597,16 @@ func (c *Config) validateLists() error {
 			return err
 		}
 	}
+	jobs := map[string]bool{}
+	for _, s := range c.Schedules {
+		if err := s.validate(); err != nil {
+			return err
+		}
+		if jobs[s.Name] {
+			return fmt.Errorf("schedules: %s is named twice", s.Name)
+		}
+		jobs[s.Name] = true
+	}
 	targets := map[string]bool{}
 	for _, f := range c.Files {
 		_, target, err := splitFile(f)
@@ -624,6 +652,25 @@ func validateVolume(v string) error {
 	name, path, ok := strings.Cut(v, ":")
 	if !ok || !nameRe.MatchString(name) || !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("volumes: %q must be name:/absolute/path", v)
+	}
+	return nil
+}
+
+func (s Schedule) validate() error {
+	if !nameRe.MatchString(s.Name) {
+		return fmt.Errorf("schedules: name %q must match %s", s.Name, nameRe)
+	}
+	fields := strings.Fields(s.Cron)
+	if len(fields) != 5 {
+		return fmt.Errorf("schedules[%s]: cron %q must have five fields: minute hour day-of-month month day-of-week", s.Name, s.Cron)
+	}
+	for _, f := range fields {
+		if !cronFieldRe.MatchString(f) {
+			return fmt.Errorf("schedules[%s]: cron field %q must use numbers, *, ranges, lists and steps only", s.Name, f)
+		}
+	}
+	if strings.TrimSpace(s.Command) == "" {
+		return fmt.Errorf("schedules[%s]: command is required", s.Name)
 	}
 	return nil
 }

@@ -466,3 +466,37 @@ func TestRollbackRestoresTheCommandOfTheRelease(t *testing.T) {
 		t.Errorf("a release recorded without them runs the image's own, not today's: %s", run)
 	}
 }
+
+// A rollback brings back the schedules its release had, records the restored copy — a new container
+// under the release's old id — as the serving one, and refuses before anything changes when the
+// release's job commands are gone.
+func TestRollbackRestoresTheSchedulesOfTheRelease(t *testing.T) {
+	v1 := `{"version":8,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1","digest":"sha256:old","ports":[],
+		"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
+		"schedules":[{"name":"nightly","cron":"0 3 * * *","command":"./nightly"}]}`
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = v1
+	f.out["sh -c command -v crontab"] = "yes"
+	f.out["sh -c for f in '.boks/bot/jobs/bot-v1-1/nightly.sh'"] = "present"
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, withSchedule), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.uploads[".boks/bot/serving"]; got != "bot-v1-1 bot-v1-1700000000\n" {
+		t.Errorf("the serving line must pair the release's id with the restored container: %q", got)
+	}
+	if !strings.Contains(f.uploads[".boks/bot/crontab"], "0 3 * * * $HOME/.boks/bin/boks-job bot nightly") || strings.Contains(f.uploads[".boks/bot/crontab"], "warm") {
+		t.Errorf("cron must carry the release's schedules, not today's: %q", f.uploads[".boks/bot/crontab"])
+	}
+
+	g := botReleases("healthy")
+	g.out["cat .boks/bot/releases/bot-v1-1.json"] = v1
+	g.out["sh -c command -v crontab"] = "yes"
+	g.out["sh -c for f in"] = ".boks/bot/jobs/bot-v1-1/nightly.sh"
+	err := Rollback(context.Background(), g, io.Discard, parse(t, noPorts), "", quick())
+	if err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
+		t.Fatalf("want a refusal naming the missing job, got %v", err)
+	}
+	if g.has("docker stop") || g.has("docker run") {
+		t.Errorf("the running copy must be left alone: %v", g.calls)
+	}
+}
