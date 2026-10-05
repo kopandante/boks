@@ -882,7 +882,8 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
 		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(), Uses: cfg.Uses,
 		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, Replace: cfg.ReplaceMode(),
-		Healthcheck: cfg.Healthcheck, Files: files, Previous: op.from, CreatedAt: now,
+		Healthcheck: cfg.Healthcheck, Files: files, Command: cfg.Command, StopSignal: cfg.StopSignal,
+		Previous: op.from, CreatedAt: now,
 	}
 	if cfg.Cert != nil {
 		snapshot.CertDomains = cfg.Cert.Domains
@@ -1246,6 +1247,9 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string, binds []stri
 		a = append(a, "--health-cmd", h.Cmd, "--health-interval", h.Interval,
 			"--health-start-period", cfg.DeployTimeout, "--health-start-interval", h.Interval)
 	}
+	if cfg.StopSignal != "" {
+		a = append(a, "--stop-signal", cfg.StopSignal)
+	}
 	if envPath != "" {
 		a = append(a, "--env-file", envPath)
 	}
@@ -1262,7 +1266,8 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string, binds []stri
 	if cfg.Registry.Logs(ref) {
 		a = append(a, "--pull", "never")
 	}
-	return append(a, ref)
+	// The command follows the image, as `docker run IMAGE [COMMAND] [ARG...]` takes it.
+	return append(append(a, ref), cfg.Command...)
 }
 
 // covered reports whether any of the app's hosts is served by the configured certificate.

@@ -61,11 +61,11 @@ health check контейнера — `HEALTHCHECK` образа или блок
 
 | # | Что | Кого блокирует | Статус |
 |---|---|---|---|
-| G4 | Переопределение command/args | 8 Redis (`redis-server --requirepass …`, AOF у mail-redis) | в boks |
+| G4 | Переопределение command/args | 8 Redis (`redis-server --requirepass …`, AOF у mail-redis) | **сделано** (feat/run-options): `command:` exec-форма, снимок v7; boks-lab: redis с паролем из env через `sh -c`, откат по digest с записанной командой |
 | G5 | `--path-prefix` в `ports:` (kamal-proxy умеет, boks не выставляет) | pakim `/api/cn/images` → шлюз (перезапись пути и заголовки — в коде шлюза) | в boks |
 | G6 | Расписания | auctions (`warm_namsuwon_catalog` каждые 4 мин) | в boks, форма не решена |
 | G7 | Wildcard-хост `*.домен` | onestar (`cars-*.buying-korea.com`) | проверить kamal-proxy |
-| G8 | `stop_signal` | Convex-стеки (Dokploy шлёт SIGINT) | проверить влияние |
+| G8 | `stop_signal` | Convex-стеки (Dokploy шлёт SIGINT) | **сделано** (feat/run-options): `stop_signal:` → `--stop-signal`, в снимке v7 |
 | G9 | Фильтр по User-Agent на весь сервер | bot-policy Habsida | решение автора: форк kamal-proxy / приложения / внешний прокси |
 
 Телеметрия (решение автора 2026-10-06): центр (Grafana, Prometheus, Loki) — на отдельном сервере, это

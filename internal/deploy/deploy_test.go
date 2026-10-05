@@ -1747,3 +1747,21 @@ func TestDeployRefusesFilesItCouldNotMakeReadable(t *testing.T) {
 		t.Errorf("no container may start with unreadable files, and the old copy must come back: %v", f.calls)
 	}
 }
+
+// The command follows the image on `docker run`, the stop signal goes with the options, and the
+// release records both.
+func TestDeployRunsTheConfiguredCommandAndStopSignal(t *testing.T) {
+	f := routelessFake("healthy")
+	cfg := parse(t, noPorts+"command: [redis-server, --appendonly, \"yes\"]\nstop_signal: SIGINT\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	run := f.calls[f.callAt("docker run")]
+	if !strings.HasSuffix(run, " ghcr.io/x/bot:v2 redis-server --appendonly yes") || !strings.Contains(run, " --stop-signal SIGINT ") {
+		t.Errorf("want the signal among the options and the command after the image: %s", run)
+	}
+	snap := f.uploads[".boks/bot/releases/bot-v2-1700000000.json"]
+	if !strings.Contains(snap, `"stop_signal": "SIGINT"`) || !strings.Contains(snap, `"--appendonly"`) {
+		t.Errorf("the release must record the command and the signal: %s", snap)
+	}
+}
