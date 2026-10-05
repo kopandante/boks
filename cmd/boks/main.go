@@ -28,6 +28,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   releases         releases recorded on each server, newest last
   proxy boot       make sure the proxy (Caddy) is running (idempotent)
   proxy list       routes the proxy serves, for every app on each server
+  proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
+                   every app on the server (once per server)
   unlock           clear a stale deploy lock, and the server's admission lock if this app or a
                    proxy boot left it
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
@@ -308,7 +310,7 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 
 func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
 	if len(args) != 1 {
-		return fmt.Errorf("proxy needs one of: boot, list")
+		return fmt.Errorf("proxy needs one of: boot, list, migrate")
 	}
 	switch args[0] {
 	case "boot":
@@ -320,6 +322,10 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 			fs, err := proxy.Fragments(ctx, r)
 			printRoutes(out, fs)
 			return err
+		})
+	case "migrate":
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			return deploy.MigrateProxy(ctx, r, out, cfg.ProxyImage, deploy.Options{})
 		})
 	}
 	return fmt.Errorf("unknown proxy command %q", args[0])

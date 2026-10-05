@@ -220,6 +220,19 @@ func TestProxyListShowsTheRoutesOfEveryApp(t *testing.T) {
 	}
 }
 
+// `boks proxy migrate` changes the whole server: it runs under the admission lock like a proxy boot.
+func TestProxyMigrateTakesTheAdmissionLock(t *testing.T) {
+	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var out strings.Builder
+	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "migrate"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !a.ran("ln -sn _proxy.") || !strings.Contains(out.String(), "Caddy already") {
+		t.Errorf("want the migration run under the lock: %q %v", out.String(), a.calls)
+	}
+}
+
 // A token the config declares and the environment lacks refuses deploy and rollback before any
 // server is reached (E6): not one command runs, not even the lock.
 func TestAMissingRegistryTokenReachesNoServer(t *testing.T) {
