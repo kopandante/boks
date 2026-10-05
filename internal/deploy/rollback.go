@@ -46,7 +46,7 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 			"today's config asks for %s\n", id, cfg.Memory)
 	}
 	// Everything else — stopping an app without routes before its old copy comes back, the route
-	// switch and its revert, the certificate checks — is what a deploy does, by the same code.
+	// switch and putting the routes back on failure, the certificate checks — is what a deploy does, by the same code.
 	return put(ctx, r, log, target, launch{
 		action: "rollback", again: "boks rollback " + id, tag: snapshot.Tag, ref: ref,
 		stopFirst: cfg.ReplaceMode() == config.ReplaceStopFirst,

@@ -136,10 +136,9 @@ cert:
 	return cfg
 }
 
-// A fresh certificate volume is root-owned and `docker exec` runs as the image's non-root user,
-// so the write has to go in as root and hand the result to the proxy user. Getting this wrong
-// meant the feature could never deliver a certificate to a real server.
-func TestInstallWritesAsRootAndHandsOverToTheProxyUser(t *testing.T) {
+// A fresh certificate volume is root-owned; the write goes in as root, which Caddy runs as, and keeps
+// the key from other users. kamal-proxy's uid is no longer handed anything.
+func TestInstallWritesAsRootAndKeepsTheKeyPrivate(t *testing.T) {
 	f, cfg := newFake(), testConfig(t)
 	if err := Install(context.Background(), f, io.Discard, cfg); err != nil {
 		t.Fatal(err)
@@ -151,10 +150,13 @@ func TestInstallWritesAsRootAndHandsOverToTheProxyUser(t *testing.T) {
 			break
 		}
 	}
-	for _, want := range []string{"docker exec -i -u 0", "chown 1001:1001", "chmod 640", "chmod 750"} {
+	for _, want := range []string{"docker exec -i -u 0", "chmod 640", "chmod 750"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("write script must contain %q, got:\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, "chown") {
+		t.Errorf("Caddy runs as root, nothing is handed over: %s", script)
 	}
 	crt, key := ServerPaths(cfg.Cert)
 	// Compared by content, not merely by presence: swapping the two paths would still put a
@@ -184,81 +186,28 @@ func TestInstallSkipsAnIdenticalCertificate(t *testing.T) {
 	}
 }
 
-// A deploy points routes at the certificate path, which makes the proxy read it — so a deploy
-// is a load and must clear the debt, or status would keep claiming a reload is owed.
-func TestMarkLoadedClearsWhatADeployLoaded(t *testing.T) {
+// A deploy whose routes changed reloads the proxy, which reads every certificate file again: it
+// records the load as a renewal's reload does, and restarts nothing.
+func TestMarkReloadedClearsWhatADeploysReloadLoaded(t *testing.T) {
 	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
 	if err := Install(ctx, f, io.Discard, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := MarkLoaded(ctx, f, cfg); err != nil {
+	if err := MarkReloaded(ctx, f, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(strings.Join(f.calls, "\n"), "docker restart") {
-		t.Error("recording a load must not restart anything")
+	if strings.Contains(strings.Join(f.calls, "\n"), "docker restart") || strings.Contains(strings.Join(f.calls, "\n"), "caddy reload") {
+		t.Error("recording a load must not reload anything")
 	}
 	pending, err := Pending(ctx, f, cfg)
 	if err != nil || pending {
-		t.Fatalf("nothing owed after a deploy loaded it, got %v %v", pending, err)
+		t.Fatalf("nothing owed after a reload loaded it, got %v %v", pending, err)
 	}
 }
 
-// A deploy loads the certificate for its own routes only — kamal-proxy reads the file per
-// service. Letting one app's deploy vouch for the whole server would leave a second app under
-// the same wildcard serving the old certificate until expiry, with nothing reporting a debt.
-func TestADeploysLoadDoesNotVouchForAnotherApp(t *testing.T) {
-	ctx, f, app1 := context.Background(), newFake(), testConfig(t)
-	app2 := *app1
-	app2.App = "other"
-	if err := Install(ctx, f, io.Discard, app1); err != nil {
-		t.Fatal(err)
-	}
-	if err := MarkLoaded(ctx, f, app1); err != nil {
-		t.Fatal(err)
-	}
-	pending, err := Pending(ctx, f, app1)
-	if err != nil || pending {
-		t.Fatalf("the app that deployed is settled, got %v %v", pending, err)
-	}
-	pending, err = Pending(ctx, f, &app2)
-	if err != nil || !pending {
-		t.Fatalf("an app nobody deployed still owes a load, got %v %v", pending, err)
-	}
-}
-
-// The mark that settles `cert status` for one app must not settle the restart, because a restart
-// is the only thing that reaches apps the config never names. The path this guards survives
-// expiry: a renewal installs the new certificate and dies before restarting, a deploy of A then
-// loads it for A's routes alone, and from then on the daily `cert renew -f a.yml` would report
-// "already loaded" forever while B serves the old certificate until it runs out.
-func TestADeploysLoadDoesNotCancelTheRestartTheProxyStillOwes(t *testing.T) {
-	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
-	if err := Install(ctx, f, io.Discard, cfg); err != nil { // the renewal that died before reloading
-		t.Fatal(err)
-	}
-	if err := MarkLoaded(ctx, f, cfg); err != nil { // an ordinary deploy of this app afterwards
-		t.Fatal(err)
-	}
-	pending, err := Pending(ctx, f, cfg)
-	if err != nil || pending {
-		t.Fatalf("this app's own routes do carry it, got %v %v", pending, err)
-	}
-	pending, err = ReloadPending(ctx, f, cfg)
-	if err != nil || !pending {
-		t.Fatalf("the proxy has not re-read anything, the restart is still owed, got %v %v", pending, err)
-	}
-	if err := Reload(ctx, f, io.Discard, cfg); err != nil {
-		t.Fatal(err)
-	}
-	pending, err = ReloadPending(ctx, f, cfg)
-	if err != nil || pending {
-		t.Fatalf("the restart settles it, got %v %v", pending, err)
-	}
-}
-
-// A restart makes the proxy re-read the files for every service, so it settles the debt for
-// apps that were never deployed — otherwise each of them would trigger its own restart.
-func TestARestartSettlesEveryApp(t *testing.T) {
+// A reload makes Caddy read the files for every route on the server, so it settles the debt for apps
+// that were never deployed — otherwise each of them would trigger its own reload.
+func TestAReloadSettlesEveryApp(t *testing.T) {
 	ctx, f, app1 := context.Background(), newFake(), testConfig(t)
 	app2 := *app1
 	app2.App = "other"
@@ -271,7 +220,7 @@ func TestARestartSettlesEveryApp(t *testing.T) {
 	for _, cfg := range []*config.Config{app1, &app2} {
 		pending, err := Pending(ctx, f, cfg)
 		if err != nil || pending {
-			t.Fatalf("%s: a restart covers every service, got %v %v", cfg.App, pending, err)
+			t.Fatalf("%s: a reload covers every route, got %v %v", cfg.App, pending, err)
 		}
 	}
 }
@@ -446,8 +395,9 @@ func TestPendingUntilReloadRecordsIt(t *testing.T) {
 	if err := Reload(ctx, f, io.Discard, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(f.calls, "\n"), "docker restart boks-proxy") {
-		t.Errorf("reload must restart the proxy, calls:\n%s", strings.Join(f.calls, "\n"))
+	// Forced: the paths are unchanged, and Caddy skips an unchanged config (measured on boks-lab).
+	if !strings.Contains(strings.Join(f.calls, "\n"), "docker exec boks-proxy caddy reload --config /etc/boks/caddy.json --force") {
+		t.Errorf("reload must force Caddy to load the files again, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
 	pending, err = Pending(ctx, f, cfg)
 	if err != nil || pending {

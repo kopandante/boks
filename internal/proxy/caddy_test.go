@@ -247,9 +247,13 @@ func TestSetRoutesCatchesUpALaggingFragment(t *testing.T) {
 func TestSetRoutesRecordsNothingCaddyRefused(t *testing.T) {
 	d := newDisk()
 	d.fail[reloadNext] = errors.New("loading new config: open /certs/boks/x.crt: no such file")
-	_, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
+	touched, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
 	if err == nil || !strings.Contains(err.Error(), "keeps the ones it had") {
 		t.Fatalf("want the refusal, got %v", err)
+	}
+	// Whether Caddy acted is not known from a failed call, so the caller is told to put routes back.
+	if !touched {
+		t.Error("a failed reload may have gone through")
 	}
 	if _, ok := d.files[Dir+"/routes/demo.json"]; ok {
 		t.Errorf("no fragment for a refused config: %v", d.files)
@@ -295,17 +299,40 @@ func TestSetRoutesRemovesAnAppsRoutes(t *testing.T) {
 	}
 }
 
+// After a failed reload the files still say what the proxy ran before, and may be wrong: putting
+// the routes back reloads with them anyway, forced, and records them.
+func TestRestoreRoutesReloadsEvenWhenNothingChanged(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	d.calls = nil
+	if err := RestoreRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	if !d.ran(reloadNext + " --force") {
+		t.Errorf("want a forced reload: %v", d.calls)
+	}
+	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	if d.files[Dir+"/caddy.json"] != string(want) || d.files[Dir+"/caddy.next.json"] != "" {
+		t.Errorf("want the restored config applied: %v", d.files)
+	}
+}
+
 // A host another app holds is refused before anything changes.
 func TestCheckHostsRefusesAnotherAppsHost(t *testing.T) {
 	d := newDisk()
 	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", web); err != nil {
 		t.Fatal(err)
 	}
-	d.calls = nil
-	if err := CheckHosts(context.Background(), d, "demo", web); err == nil || d.ran("upload") || d.ran("docker exec") {
-		t.Errorf("want a refusal that changes nothing, got %v %v", err, d.calls)
+	fs, err := Fragments(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := CheckHosts(context.Background(), d, "other", web); err != nil {
+	if err := CheckHosts(fs, "demo", web); err == nil {
+		t.Errorf("want a refusal, got %v", err)
+	}
+	if err := CheckHosts(fs, "other", web); err != nil {
 		t.Errorf("an app's own host is its own: %v", err)
 	}
 }
@@ -322,11 +349,12 @@ func TestReloadIsForced(t *testing.T) {
 	}
 }
 
-// The container is labelled as Caddy, keeps its ACME state and the certificate volume kamal-proxy
-// used, and reads the state directory, not one file, read-only.
+// The container is labelled as Caddy, has the sysctl a lossless reload needs, keeps its ACME state and
+// the certificate volume kamal-proxy used, and reads the state directory, not one file, read-only.
 func TestCreateArgs(t *testing.T) {
-	got := strings.Join(CreateArgs(DefaultImage, "/home/u/.boks/_proxy"), " ")
-	want := "docker create --name boks-proxy --restart unless-stopped --label boks.proxy=caddy --network boks -p 80:80 -p 443:443 " +
+	got := strings.Join(CreateArgs("caddy:2.11.7-alpine", "/home/u/.boks/_proxy"), " ")
+	want := "docker create --name boks-proxy --restart unless-stopped --label boks.proxy=caddy " +
+		"--sysctl net.ipv4.tcp_migrate_req=1 --network boks -p 80:80 -p 443:443 " +
 		"-v boks-proxy-data:/data -v boks-certs:/certs -v /home/u/.boks/_proxy:/etc/boks:ro " +
 		"caddy:2.11.7-alpine caddy run --config /etc/boks/caddy.json"
 	if got != want {

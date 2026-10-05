@@ -267,11 +267,11 @@ func makeNetwork(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 	return err
 }
 
-// joinProxy puts the proxy on the app's network right before the first route moves: kamal-proxy
-// reaches the new container by name, and only through a network the two share. Not earlier, so a
-// deploy that fails before routing anything does not leave the proxy on a network it routes nothing
-// to. A proxy still on the network every app shared before keeps reaching the old copies there, so
-// the routes answer until they move, and a route sent back goes back to a copy it can reach.
+// joinProxy puts the proxy on the app's network once the new copy runs: the proxy probes it and then
+// dials it by name, and only through a network the two share. Not earlier, so a deploy that fails
+// before starting anything does not leave the proxy on a network it routes nothing to. A proxy still
+// on the network every app shared before keeps reaching the old copies there, so the routes answer
+// until they move, and routes put back go back to a copy they can reach.
 func joinProxy(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
 	n := cfg.Networks()[0].Name
 	on, err := proxy.On(ctx, r, n)

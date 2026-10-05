@@ -1,9 +1,7 @@
 package proxy
 
-// The Caddy side of the proxy (docs/plans/20261006-caddy.md), the part that does not depend on how
-// a deploy moves traffic between copies: the config assembled from per-app route fragments, its
-// application by reload, the certificate files, the container's launch. kamal-proxy above stays the
-// proxy deploys drive until the switch mechanism is settled.
+// The proxy's config: assembled from a route fragment per app, applied by reload, and the
+// container that runs it.
 
 import (
 	"context"
@@ -20,9 +18,6 @@ import (
 )
 
 const (
-	// DefaultImage is the pinned Caddy boks runs; 2.11.7 is the newest release on Docker Hub on
-	// 2026-10-06, and the version the plan's measurements were taken with.
-	DefaultImage = "caddy:2.11.7-alpine"
 	// DataVolume is Caddy's /data: the ACME account and the certificates Caddy obtained itself. Losing
 	// it means issuing them all again, against Let's Encrypt's rate limits.
 	DataVolume = "boks-proxy-data"
@@ -40,9 +35,8 @@ const (
 	mountDir = "/etc/boks"
 )
 
-// Route is one host the proxy serves for an app: requests for Host go to Dial (`name:port`). What
-// the name is — a copy's own name, or a name that moves between copies — is the switch mechanism's
-// choice, made by whoever builds the fragment. The json tags are load-bearing: the fragment on the
+// Route is one host the proxy serves for an app: requests for Host go to Dial, the `container:port`
+// of the copy that serves it — a deploy moves the route by reloading with the new copy's. The json tags are load-bearing: the fragment on the
 // server is the record of what the proxy serves.
 type Route struct {
 	Host string `json:"host"`
@@ -235,13 +229,19 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 
 // CheckHosts refuses routes whose host another app's fragment already holds, before anything changes:
 // found only when the config is assembled, it would stop a run whose new copy already serves.
-func CheckHosts(ctx context.Context, r remote.Runner, app string, routes []Route) error {
-	fs, err := Fragments(ctx, r)
-	if err != nil {
-		return err
-	}
-	_, err = Config(withRoutes(fs, app, routes))
+func CheckHosts(fragments []Fragment, app string, routes []Route) error {
+	_, err := Config(withRoutes(fragments, app, routes))
 	return err
+}
+
+// Of is app's routes among fragments; none when it has no fragment.
+func Of(fragments []Fragment, app string) []Route {
+	for _, f := range fragments {
+		if f.App == app {
+			return f.Routes
+		}
+	}
+	return nil
 }
 
 // withRoutes is fragments with app's routes set to routes; none removes the app's fragment.
@@ -258,8 +258,9 @@ func withRoutes(fragments []Fragment, app string, routes []Route) []Fragment {
 	return out
 }
 
-// SetRoutes makes app's routes those given — none removes them — and reports whether the proxy was
-// reloaded. The proxy reloads only when the assembled config differs from the one it runs; the
+// SetRoutes makes app's routes those given — none removes them — and reports whether the proxy may
+// now run them: true after a reload, and after a reload that failed too, since its answer can be lost
+// after Caddy acted (RestoreRoutes puts the previous routes back for certain). The proxy reloads only when the assembled config differs from the one it runs; the
 // fragment alone is rewritten when only it lags (a run cut after the reload). The fragment is written
 // after Caddy took the config, so a config Caddy refused leaves no fragment behind that would make
 // every later run, of any app, assemble the refused config again. The caller holds the server's
@@ -268,6 +269,18 @@ func withRoutes(fragments []Fragment, app string, routes []Route) []Fragment {
 //
 // A proxy that is not running is not reloaded: the files are what it loads when it starts.
 func SetRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, routes []Route) (bool, error) {
+	return setRoutes(ctx, r, log, app, routes, false)
+}
+
+// RestoreRoutes is SetRoutes for a run whose reload failed, which does not tell whether Caddy took the
+// config: the answer can be lost after Caddy acted. So it reloads even when the files say the proxy
+// already runs these routes — they said so before the failed reload too.
+func RestoreRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, routes []Route) error {
+	_, err := setRoutes(ctx, r, log, app, routes, true)
+	return err
+}
+
+func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, routes []Route, force bool) (bool, error) {
 	fs, err := Fragments(ctx, r)
 	if err != nil {
 		return false, err
@@ -286,7 +299,7 @@ func SetRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 	if err != nil {
 		return false, err
 	}
-	stale := !present || applied != string(body)
+	stale := !present || applied != string(body) || force
 	if !stale && sameRoutes(had, routes) {
 		return false, nil
 	}
@@ -300,10 +313,15 @@ func SetRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 			return false, err
 		}
 		fmt.Fprintf(log, "proxy: reloading with the routes of %s\n", app)
-		if _, err := r.Run(ctx, "docker", "exec", Container, "caddy", "reload", "--config", inProxy(nextPath())); err != nil {
+		reloadArgs := []string{"docker", "exec", Container, "caddy", "reload", "--config", inProxy(nextPath())}
+		if force {
+			// Unchanged in Caddy's eyes when the lost reload did go through; without --force it would do nothing.
+			reloadArgs = append(reloadArgs, "--force")
+		}
+		if _, err := r.Run(ctx, reloadArgs...); err != nil {
 			// Caddy checks a config before it lets go of the running one, so a refused reload leaves the
 			// proxy serving what it served.
-			return false, fmt.Errorf("the proxy refused the new routes and keeps the ones it had: %w", err)
+			return true, fmt.Errorf("the proxy refused the new routes and keeps the ones it had: %w", err)
 		}
 	}
 	if len(routes) == 0 {
@@ -368,21 +386,17 @@ func readFile(ctx context.Context, r remote.Runner, p string) (string, bool, err
 
 // caddyRunning says whether the proxy container is running and is the Caddy boks runs.
 func caddyRunning(ctx context.Context, r remote.Runner) (bool, error) {
-	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+Container+"$", "--format", "{{.State}}\t{{.Label \"boks.proxy\"}}")
-	if err != nil {
-		return false, err
-	}
-	state, kind, _ := strings.Cut(strings.TrimSpace(out), "\t")
-	return strings.TrimSpace(state) == "running" && strings.TrimSpace(kind) == Kind, nil
+	state, kind, err := State(ctx, r)
+	return state == "running" && kind == Kind, err
 }
 
 // CreateArgs create the Caddy proxy container, not started, with the state directory at abs — an
 // absolute path, since docker takes nothing else as a bind source. Caddy loads the applied config
 // when it starts; the certificate volume is the one kamal-proxy used, so files installed for it are
-// where Caddy looks.
+// where Caddy looks. The sysctl is per network namespace, so it is the container's own.
 func CreateArgs(image, abs string) []string {
 	return []string{"docker", "create", "--name", Container, "--restart", "unless-stopped", "--label", "boks.proxy=" + Kind,
-		"--network", Network, "-p", "80:80", "-p", "443:443",
+		"--sysctl", migrateReq + "=1", "--network", Network, "-p", "80:80", "-p", "443:443",
 		"-v", DataVolume + ":/data", "-v", CertsVolume + ":/certs", "-v", abs + ":" + mountDir + ":ro",
 		image, "caddy", "run", "--config", inProxy(appliedPath())}
 }

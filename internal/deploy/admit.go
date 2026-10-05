@@ -45,9 +45,18 @@ const proxyHolder = "_proxy"
 
 // BootProxy starts the proxy if it is not running and puts it on the networks its routes need,
 // under the server's admission lock: the proxy and its networks are shared by every app on the
-// server, and the deploys that join or leave them take the same lock.
-func BootProxy(ctx context.Context, r remote.Runner, log io.Writer, image string) error {
-	return bootProxy(ctx, r, log, proxyHolder, image, Options{Now: time.Now})
+// server, and the deploys that join or leave them take the same lock. then, when given, runs under the
+// same lock once the proxy is up — a certificate reload, which must not race a deploy's reload.
+func BootProxy(ctx context.Context, r remote.Runner, log io.Writer, image string, then func() error) error {
+	adm, err := admit(ctx, r, log, proxyHolder, Options{Now: time.Now})
+	if err != nil {
+		return err
+	}
+	defer adm.release(ctx)
+	if err := proxy.Boot(ctx, r, log, image); err != nil || then == nil {
+		return err
+	}
+	return then()
 }
 
 func bootProxy(ctx context.Context, r remote.Runner, log io.Writer, holder, image string, o Options) error {

@@ -55,7 +55,7 @@ type Snapshot struct {
 	Volumes []string      `json:"volumes"`
 	TLS     bool          `json:"tls"`
 	// CertDomains are the domains of the certificate the routes were deployed with; a host they
-	// cover was routed at that certificate rather than at kamal-proxy's autocert.
+	// cover was routed at that certificate rather than at the proxy's automatic HTTPS.
 	CertDomains []string `json:"cert_domains,omitempty"`
 	// Networks are the networks the container joined, the one it was started on first, with the
 	// aliases it answered to in each. Empty before version 3.

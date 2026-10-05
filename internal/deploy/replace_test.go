@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/kopandante/boks/internal/config"
-	"github.com/kopandante/boks/internal/proxy"
 	"github.com/kopandante/boks/internal/release"
 )
 
@@ -51,7 +50,7 @@ func (f *fake) server(availMiB int, running map[string][2]int) {
 
 // stopFirstFake is a routed app on stop-first whose one copy, demo-v1-1, is running.
 func stopFirstFake(t *testing.T) *fake {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t, webPort) + "\n"
 	f.out["docker ps --filter label=boks.app=demo"] = "demo-v1-1\n"
 	return f
@@ -62,7 +61,7 @@ const stopFirst = onePort + "replace: stop-first\n"
 // The limit reaches `docker run`, and the snapshot records it with the replace mode, so a rollback
 // can put the release back as it ran.
 func TestDeployRunsAndRecordsTheLimit(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.server(1500, nil)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed); err != nil {
 		t.Fatal(err)
@@ -95,7 +94,7 @@ func TestDeployRunsAndRecordsTheLimit(t *testing.T) {
 // its limit is not free: 700 available − (512−300) it may grow − 256 reserve leaves 232 for 512.
 // The refusal comes before anything changes, the journal included, and gives the lock back.
 func TestOverlapMustFitBesideTheOldCopy(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.server(700, map[string][2]int{"demo-v1-1": {512, 300}})
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "preliminary memory check") || !strings.Contains(err.Error(), "not a guarantee against OOM") {
@@ -104,7 +103,7 @@ func TestOverlapMustFitBesideTheOldCopy(t *testing.T) {
 	if !strings.Contains(err.Error(), "232MiB is free") {
 		t.Errorf("the refusal must give the arithmetic: %v", err)
 	}
-	if f.has("docker run") || f.has("docker stop") || f.has(deployVia) || len(f.appends) != 0 {
+	if f.has("docker run") || f.has("docker stop") || f.has(reloadVia) || len(f.appends) != 0 {
 		t.Errorf("nothing may change before the check: %v / %v", f.calls, f.appends)
 	}
 	if !f.has(admitGive("demo")) {
@@ -162,13 +161,13 @@ func TestStopFirstRefusesWhenTheStopFreedTooLittle(t *testing.T) {
 // A container admitted a moment ago has not taken its memory yet; MemAvailable alone would hand that
 // memory to the next deploy. Its whole limit is counted until it uses it.
 func TestTheCheckCountsWhatAdmittedContainersMayStillTake(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.server(1100, map[string][2]int{"other-v1-1": {512, 0}, "unlimited-v1-1": {0, 100}})
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "332MiB is free") {
 		t.Fatalf("1100 − 512 promised − 256 reserve leaves 332, got %v", err)
 	}
-	f = routedFake(t, nil)
+	f = routedFake(t)
 	f.server(1100, map[string][2]int{"other-v1-1": {512, 512}})
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed); err != nil {
 		t.Errorf("a container at its limit promises nothing more: %v", err)
@@ -184,7 +183,7 @@ func TestTheCheckRefusesWhatItCannotRead(t *testing.T) {
 		"stats":     func(f *fake) { f.fail[memStats] = errors.New("boom") },
 		"bad stats": func(f *fake) { f.out[memStats] = "id-other-v1-1\tlots / --" },
 	} {
-		f := routedFake(t, nil)
+		f := routedFake(t)
 		f.server(4000, map[string][2]int{"other-v1-1": {512, 10}})
 		broke(f)
 		err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed)
@@ -200,7 +199,7 @@ func TestTheCheckRefusesWhatItCannotRead(t *testing.T) {
 // Admission is serialized server-wide: a deploy of another app holding the lock is waited for, and
 // one that never lets go is named, not overruled.
 func TestAdmissionWaitsForAnotherApp(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.fail["ln -sn"] = errors.New("File exists")
 	f.out["sh -c readlink /tmp/boks.admit.lock"] = "convex.1699999999000000000"
 	o := fixed
@@ -218,7 +217,7 @@ func TestAdmissionWaitsForAnotherApp(t *testing.T) {
 	}
 
 	tries := 0
-	g := routedFake(t, nil)
+	g := routedFake(t)
 	g.out["sh -c readlink /tmp/boks.admit.lock"] = "convex.1699999999000000000"
 	g.onRun = func(cmd string) {
 		if strings.HasPrefix(cmd, "ln -sn") {
@@ -234,8 +233,9 @@ func TestAdmissionWaitsForAnotherApp(t *testing.T) {
 	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", o); err != nil {
 		t.Fatalf("a lock let go of is taken: %v", err)
 	}
-	// The proxy boot's admission waits out the three tries; the container's is then taken at once.
-	if tries != 4 || g.at("ln -sn") > g.at("docker run") {
+	// The proxy boot's admission waits out the three tries; the container's and the switch's are then
+	// taken at once.
+	if tries != 5 || g.at("ln -sn") > g.at("docker run") {
 		t.Errorf("want the run to start after the third try: %d %v", tries, g.calls)
 	}
 }
@@ -261,8 +261,8 @@ func TestUnlockClearsTheAdmissionLockOfThisApp(t *testing.T) {
 }
 
 // Stop-first with routes: the old copy is stopped and confirmed down before the new one starts, the
-// journal is open before the stop, and the routes move only through the proxy's health check of the
-// new copy. Admission lasts until the routes have moved.
+// journal is open before the stop, and the routes move only once the proxy's health check of the new
+// copy passed. Admission lasts until the routes have moved.
 func TestStopFirstStopsTheOldCopyBeforeTheNewOneStarts(t *testing.T) {
 	f := stopFirstFake(t)
 	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err != nil {
@@ -270,13 +270,14 @@ func TestStopFirstStopsTheOldCopyBeforeTheNewOneStarts(t *testing.T) {
 	}
 	opened := f.writeAt(journal, `"action":"deploy"`)
 	stop, confirmed := f.callAt("docker stop demo-v1-1"), f.callAt(isRunningQuery+"demo-v1-1")
-	run, route, given := f.callAt("docker run"), f.callAt(deployVia+"demo.web --target "+newCopy), f.lastAt(admitGive("demo"))
-	if opened < 0 || opened > stop || stop > confirmed || confirmed > run || run > route || route > given {
-		t.Errorf("want journal < stop < confirmed < run < route < admission given back: %d %d %d %d %d %d\n%v",
-			opened, stop, confirmed, run, route, given, f.calls)
+	run, probed := f.callAt("docker run"), f.callAt(probe+"http://"+newCopy+":3000/up")
+	route, given := f.callAt(reloadVia), f.lastAt(admitGive("demo"))
+	if opened < 0 || opened > stop || stop > confirmed || confirmed > run || run > probed || probed > route || route > given {
+		t.Errorf("want journal < stop < confirmed < run < probe < route < admission given back: %d %d %d %d %d %d %d\n%v",
+			opened, stop, confirmed, run, probed, route, given, f.calls)
 	}
-	if !strings.Contains(f.calls[route], "--health-check-path /up") {
-		t.Errorf("the route moves through the health check: %s", f.calls[route])
+	if f.has(upstreams) {
+		t.Errorf("the old copy is down already: nothing to drain: %v", f.calls)
 	}
 	if !f.has("docker rm demo-v1-1") || f.uploads[".boks/demo/current"] != newCopy+"\n" {
 		t.Errorf("a successful stop-first deploy records and retires as usual: %v", f.calls)
@@ -297,7 +298,7 @@ func TestStopFirstDoesNotStartWithoutAConfirmedStop(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "the new version was not started") {
 			t.Errorf("%s: want a refusal to start, got %v", name, err)
 		}
-		if f.has("docker run") || f.has(deployVia) {
+		if f.has("docker run") || f.has(reloadVia) {
 			t.Errorf("%s: nothing may start or move: %v", name, f.calls)
 		}
 		if !f.has("docker start demo-v1-1") || !strings.Contains(f.appends[journal], `"result":"failed"`) {
@@ -306,41 +307,54 @@ func TestStopFirstDoesNotStartWithoutAConfirmedStop(t *testing.T) {
 	}
 }
 
-// A new copy that fails the proxy's health check is removed, the old copy brought back, and the route
-// — which may have moved even though the command failed — put back on it. The proxy's outcome is not
-// known, so the operation stays open.
-func TestStopFirstBringsTheOldCopyAndItsRoutesBack(t *testing.T) {
+// unhealthy is a server on which the new copy never passes its health check, and a config that gives
+// up on it at once.
+func unhealthy(t *testing.T, f *fake, cfg string) (*config.Config, Options) {
+	f.fail[probe] = errors.New("wget: server returned error: HTTP/1.1 503 Service Unavailable")
+	return parse(t, cfg+"deploy_timeout: 1ms\n"), quick()
+}
+
+// A new copy that fails the proxy's health check got no route: it is removed, the old copy brought
+// back — the routes still dial it — and the outcome is known.
+func TestStopFirstBringsTheOldCopyBack(t *testing.T) {
 	f := stopFirstFake(t)
-	f.fail[deployVia+"demo.web --target "+newCopy] = errors.New("target failed to become healthy")
-	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed)
-	if err == nil || !strings.Contains(err.Error(), "healthy") {
+	cfg, o := unhealthy(t, f, stopFirst)
+	err := Run(context.Background(), f, io.Discard, cfg, "v2", o)
+	if err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("want the health failure, got %v", err)
 	}
 	removed, restarted := f.callAt("docker rm -f "+newCopy), f.callAt("docker start demo-v1-1")
-	reverted := f.callAt(deployVia + "demo.web --target demo-v1-1:3000")
-	if removed < 0 || restarted < 0 || reverted < 0 || removed > restarted || restarted > reverted {
-		t.Errorf("want removed < restarted < route reverted: %d %d %d\n%v", removed, restarted, reverted, f.calls)
+	if removed < 0 || restarted < 0 || removed > restarted || f.has(reloadVia) {
+		t.Errorf("want removed < restarted, and no reload: %d %d\n%v", removed, restarted, f.calls)
 	}
-	if !journalOpen(f, journal) {
-		t.Errorf("the entry must stay open: %q", f.appends[journal])
-	}
-	if f.has("docker rm demo-v1-1") || f.uploads[".boks/demo/current"] != "" {
-		t.Errorf("a failed deploy neither retires nor records: %v", f.calls)
+	if journalOpen(f, journal) || f.has("docker rm demo-v1-1") || f.uploads[".boks/demo/current"] != "" {
+		t.Errorf("a failed deploy closes the entry, neither retires nor records: %v %q", f.calls, f.appends[journal])
 	}
 }
 
-// With two ports, the one that moved and the one whose switch failed both go back.
-func TestStopFirstRevertsTheFailedPortToo(t *testing.T) {
+// A switch that failed may have gone through: the routes are put back on the stopped copy before the
+// new one is removed and the old one started, so the two never serve at once.
+func TestStopFirstPutsTheRoutesBackBeforeTheOldCopyStarts(t *testing.T) {
 	f := stopFirstFake(t)
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t, webPort, actionsPort) + "\n"
-	f.fail[deployVia+"demo.actions --target "+newCopy] = errors.New("connection reset")
-	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts+"replace: stop-first\n"), "v2", fixed); err == nil {
+	reloads := 0
+	f.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, reloadVia) {
+			if reloads++; reloads == 1 {
+				f.fail[reloadVia] = errors.New("connection reset")
+			} else {
+				delete(f.fail, reloadVia)
+			}
+		}
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	for _, p := range []string{"demo.web --target demo-v1-1:3000", "demo.actions --target demo-v1-1:3001"} {
-		if !f.has(deployVia + p) {
-			t.Errorf("route %s must go back: %v", p, f.calls)
-		}
+	restored, removed, restarted := f.callAt(reloadVia+" --force"), f.callAt("docker rm -f "+newCopy), f.callAt("docker start demo-v1-1")
+	if restored < 0 || removed < restored || restarted < removed {
+		t.Errorf("want restored < removed < restarted: %d %d %d\n%v", restored, removed, restarted, f.calls)
+	}
+	if journalOpen(f, journal) {
+		t.Errorf("the routes are back, so the outcome is known: %q", f.appends[journal])
 	}
 }
 
@@ -352,7 +366,7 @@ func TestStopFirstFailedStartClosesTheJournal(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	if !f.has("docker start demo-v1-1") || f.has(deployVia) {
+	if !f.has("docker start demo-v1-1") || f.has(reloadVia) {
 		t.Errorf("the old copy comes back and no route is touched: %v", f.calls)
 	}
 	closed, cleaned := f.writeAt(journal, `"result":"failed"`), f.callAt("docker start demo-v1-1")
@@ -364,9 +378,9 @@ func TestStopFirstFailedStartClosesTheJournal(t *testing.T) {
 // If the new copy cannot be confirmed gone, the old one is not brought back beside it.
 func TestStopFirstKeepsTheOldCopyStoppedWhenTheNewOneWillNotGo(t *testing.T) {
 	f := stopFirstFake(t)
-	f.fail[deployVia+"demo.web --target "+newCopy] = errors.New("unhealthy")
+	cfg, o := unhealthy(t, f, stopFirst)
 	f.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\tdemo\n"
-	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed)
+	err := Run(context.Background(), f, io.Discard, cfg, "v2", o)
 	if err == nil || !strings.Contains(err.Error(), "could not be confirmed removed") {
 		t.Fatalf("want the leftover named, got %v", err)
 	}
@@ -452,7 +466,7 @@ func TestRollbackStopsFirstWhenEitherSideAsks(t *testing.T) {
 // Container use is read before MemAvailable: growth between the two readings is then counted
 // twice rather than not at all.
 func TestTheCheckReadsUseBeforeAvailable(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.server(4000, map[string][2]int{"other-v1-1": {512, 10}})
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed); err != nil {
 		t.Fatal(err)
@@ -471,40 +485,51 @@ func TestUnlockReportsAnAdmissionLockItCouldNotCheck(t *testing.T) {
 	}
 }
 
-// When the copy that took a route cannot be confirmed removed, the routes are not where they were:
-// the operation stays open and the error says where they may point.
+// When the routes cannot be put back after a failed switch, they may dial the new copy: it stays, the
+// old one stays stopped rather than serve beside it, and the operation stays open.
 func TestStopFirstLeftoverAfterASwitchLeavesTheJournalOpen(t *testing.T) {
 	f := stopFirstFake(t)
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t, webPort, actionsPort) + "\n"
-	f.fail[deployVia+"demo.actions --target "+newCopy] = errors.New("unhealthy")
-	f.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\tdemo\n"
-	err := Run(context.Background(), f, io.Discard, parse(t, twoPorts+"replace: stop-first\n"), "v2", fixed)
-	if err == nil || !strings.Contains(err.Error(), "routes may still point at "+newCopy) {
+	f.fail[reloadVia] = errors.New("connection reset")
+	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "putting the routes back failed too") || !strings.Contains(err.Error(), newCopy+" is left running") {
 		t.Fatalf("want the routes named, got %v", err)
 	}
-	if !journalOpen(f, journal) {
-		t.Errorf("the entry must stay open: %q", f.appends[journal])
+	if !journalOpen(f, journal) || f.has("docker rm -f "+newCopy) || f.has("docker start demo-v1-1") {
+		t.Errorf("want the entry open, the new copy kept and the old one stopped: %v %q", f.calls, f.appends[journal])
 	}
 }
 
-// With two copies of the app running (an overlap deploy that failed and left its copy), a route goes
-// back to the copy the proxy sent it to before this run, not nowhere.
+// With two copies of the app running (an overlap deploy that failed and left its copy), the routes
+// go back to the copy the proxy dialled before this run — its fragment says which — not to a guess.
+// In stop-first they are back before the stopped copies start.
 func TestARouteGoesBackToTheCopyThatServedIt(t *testing.T) {
-	routes := map[string]proxy.Listed{
-		"demo.web":     {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-		"demo.actions": {Hosts: []string{"actions.example.com"}, Targets: []string{"demo-v1-1:3001"}},
-	}
 	two := "demo-v1-1\t" + ports(t, webPort, actionsPort) + "\ndemo-v1-2\t" + ports(t, webPort, actionsPort) + "\n"
 	for _, mode := range []string{"overlap", "stop-first"} {
-		f := routedFake(t, routes)
+		f := routedFake(t)
+		f.out[frags] = fragment(t, "demo", "demo-v1-1", webPort, actionsPort)
 		f.out["docker ps -a --filter label=boks.app=demo"] = two
 		f.out["docker ps --filter label=boks.app=demo"] = "demo-v1-1\ndemo-v1-2\n"
-		f.fail[deployVia+"demo.actions --target "+newCopy] = errors.New("unhealthy")
+		reloads := 0
+		f.onRun = func(cmd string) {
+			if strings.HasPrefix(cmd, reloadVia) {
+				if reloads++; reloads == 1 {
+					f.fail[reloadVia] = errors.New("connection reset")
+				} else {
+					delete(f.fail, reloadVia)
+				}
+			}
+		}
 		if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts+"replace: "+mode+"\n"), "v2", fixed); err == nil {
 			t.Fatalf("%s: want an error", mode)
 		}
-		if !f.has(deployVia+"demo.web --target demo-v1-1:3000") || f.has(deployVia+"demo.web --target demo-v1-2") {
-			t.Errorf("%s: the route must go back to demo-v1-1, which served it: %v", mode, f.calls)
+		next := f.uploads[".boks/_proxy/caddy.next.json"]
+		if !strings.Contains(next, `"dial": "demo-v1-1:3000"`) || !strings.Contains(next, `"dial": "demo-v1-1:3001"`) || strings.Contains(next, "demo-v1-2") {
+			t.Errorf("%s: the routes must go back to demo-v1-1, which served them:\n%s", mode, next)
+		}
+		if mode == "stop-first" {
+			if restored, revived := f.at(reloadVia+" --force"), f.at("docker start demo-v1-1"); restored < 0 || revived < restored {
+				t.Errorf("the routes are back before the old copies start: %v", f.calls)
+			}
 		}
 	}
 }
@@ -512,7 +537,7 @@ func TestARouteGoesBackToTheCopyThatServedIt(t *testing.T) {
 // `ln` that succeeded but whose answer was lost leaves this run's own token in the link: the run
 // owns the lock, rather than waiting for itself and leaving every app blocked.
 func TestAdmissionRecognizesItsOwnLock(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.fail["ln -sn"] = errors.New("connection reset")
 	f.out["sh -c readlink /tmp/boks.admit.lock"] = "demo.1700000000000000000"
 	o := fixed
@@ -528,7 +553,7 @@ func TestAdmissionRecognizesItsOwnLock(t *testing.T) {
 // A container removed between listing and inspecting (another app retiring its old copy) is asked
 // about again rather than failing the check; a failure that persists still refuses.
 func TestTheCheckAsksAgainWhenAContainerGoesMeanwhile(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.server(4000, map[string][2]int{"other-v1-1": {512, 10}})
 	inspects := 0
 	f.onRun = func(cmd string) {
@@ -567,7 +592,7 @@ func TestUnlockReportsAnAppLockItCouldNotRemove(t *testing.T) {
 // docker has no stats for a container stuck restarting and prints `--`; that container's use is
 // unknown, counted as nothing, rather than blocking every deploy on the server.
 func TestAContainerWithoutStatsCountsItsWholeLimit(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.server(1100, map[string][2]int{"looping-v1-1": {512, 0}})
 	f.out[memStats] = "id-looping-v1-1\t-- / --"
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed)
@@ -579,7 +604,7 @@ func TestAContainerWithoutStatsCountsItsWholeLimit(t *testing.T) {
 // A lock this app left under another token is a leftover: the caller holds the app's deploy lock,
 // so no other run of the app can be holding it. It is taken back instead of waited for.
 func TestAdmissionTakesBackALeftoverOfThisApp(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out["sh -c readlink /tmp/boks.admit.lock"] = "demo.1699999999000000000"
 	f.onRun = func(cmd string) {
 		switch {
@@ -603,7 +628,7 @@ func TestAdmissionTakesBackALeftoverOfThisApp(t *testing.T) {
 // `ln` that fails with no lock in the way is the server failing, said after a few tries rather
 // than after the whole wait.
 func TestAdmissionFailsFastWithoutALockInTheWay(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.fail["ln -sn"] = errors.New("Read-only file system")
 	o := fixed
 	o.Poll, o.AdmitWait = time.Millisecond, 3*time.Second
@@ -637,7 +662,7 @@ func TestAFailedStartLeavesAnotherAppsContainerAlone(t *testing.T) {
 
 // A leftover of this app that cannot be removed is taken back once, then waited for like any lock.
 func TestAnUnremovableLeftoverIsNotRetriedForever(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.fail["ln -sn"] = errors.New("File exists")
 	f.out["sh -c readlink /tmp/boks.admit.lock"] = "demo.1699999999000000000"
 	o := fixed
@@ -837,42 +862,18 @@ func TestRollbackSaysWhenItDropsTheLimit(t *testing.T) {
 	}
 }
 
-// A copy that did not come back is no target for the routes: no proxy deploy waits out its health
-// check on every port.
-func TestStopFirstDoesNotRevertOntoACopyThatStayedDown(t *testing.T) {
+// A copy that did not come back after a failed deploy is named: its routes dial it, and answer only
+// once it runs.
+func TestStopFirstNamesACopyThatStayedDown(t *testing.T) {
 	f := stopFirstFake(t)
-	f.fail[deployVia+"demo.web --target "+newCopy] = errors.New("unhealthy")
+	cfg, o := unhealthy(t, f, stopFirst)
 	f.onRun = func(cmd string) {
 		if cmd == "docker start demo-v1-1" {
 			f.out[isRunningQuery+"demo-v1-1"] = "false"
 		}
 	}
-	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed)
+	err := Run(context.Background(), f, io.Discard, cfg, "v2", o)
 	if err == nil || !strings.Contains(err.Error(), "did not come back up") {
 		t.Fatalf("want the copy that stayed down named, got %v", err)
-	}
-	if f.has(deployVia + "demo.web --target demo-v1-1") {
-		t.Errorf("no route goes back to a copy that is not running: %v", f.calls)
-	}
-	if !strings.Contains(err.Error(), "no route was moved back") || strings.Contains(err.Error(), "sent back") {
-		t.Errorf("the error must not claim routes went back: %v", err)
-	}
-}
-
-// A copy whose state could not be read after its restart may well be back, so its routes are still
-// sent to it; only one docker says is not running is skipped.
-func TestStopFirstRevertsOntoACopyOfUnknownState(t *testing.T) {
-	f := stopFirstFake(t)
-	f.fail[deployVia+"demo.web --target "+newCopy] = errors.New("unhealthy")
-	f.onRun = func(cmd string) {
-		if cmd == "docker start demo-v1-1" {
-			f.fail[isRunningQuery+"demo-v1-1"] = errors.New("connection reset")
-		}
-	}
-	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err == nil {
-		t.Fatal("want an error")
-	}
-	if !f.has(deployVia + "demo.web --target demo-v1-1:3000") {
-		t.Errorf("the route goes back to a copy that may be up: %v", f.calls)
 	}
 }

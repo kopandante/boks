@@ -181,7 +181,7 @@ func TestDeployNamesTheReleaseOnceForAllServers(t *testing.T) {
 // `boks proxy boot` changes what every app on the server shares — the proxy and its networks — so it
 // takes the server's admission lock around the boot, under a holder no deploy mistakes for its own.
 func TestProxyBootTakesTheAdmissionLock(t *testing.T) {
-	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running", "docker exec boks-proxy kamal-proxy list --json": "{}"}}
+	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1"}}
 	fleet(t, map[string]*recorder{"a": a}, time.Now)
 	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "boot"}, io.Discard); err != nil {
 		t.Fatal(err)
@@ -199,6 +199,24 @@ func TestProxyBootTakesTheAdmissionLock(t *testing.T) {
 	}
 	if took < 0 || booted < took || gave < booted {
 		t.Errorf("want the lock taken, the proxy booted, the lock given back: %d %d %d %v", took, booted, gave, a.calls)
+	}
+}
+
+// `boks proxy list` shows every app's routes from the fragments on the server: host, the copy it
+// dials, how TLS is served.
+func TestProxyListShowsTheRoutesOfEveryApp(t *testing.T) {
+	a := &recorder{server: server{"sh -c for f in": `{"app":"bot","routes":[{"host":"b.example.com","dial":"bot-v1-1:80"}]}` + "\n" +
+		`{"app":"demo","routes":[{"host":"a.example.com","dial":"demo-v2-2:3000","tls":true},` +
+		`{"host":"w.example.com","dial":"demo-v2-2:3001","tls":true,"cert":{"certificate":"/certs/boks/_.example.com.crt","key":"k"}}]}`}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var out strings.Builder
+	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "list"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	want := "== a\nbot\tb.example.com → bot-v1-1:80\thttp\ndemo\ta.example.com → demo-v2-2:3000\ttls acme\n" +
+		"demo\tw.example.com → demo-v2-2:3001\ttls /certs/boks/_.example.com.crt\n"
+	if out.String() != want {
+		t.Errorf("got\n%s\nwant\n%s", out.String(), want)
 	}
 }
 

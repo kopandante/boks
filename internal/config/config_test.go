@@ -22,7 +22,7 @@ func TestParseDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Network.Kind != 0 || cfg.ProxyImage != DefaultProxyImage ||
-		cfg.Keep != DefaultKeep || cfg.DeployTimeout != DefaultDeployTimeout {
+		cfg.Keep != DefaultKeep || cfg.DeployTimeout != DefaultDeployTimeout || cfg.DrainTimeout != "30s" {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
 }
@@ -36,6 +36,8 @@ func TestParseRejects(t *testing.T) {
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1}]":                                       "host is required",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\nvolumes: [data]":             "volumes",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\ndeploy_timeout: soon":        "deploy_timeout",
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\ndrain_timeout: soon":         "drain_timeout",
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\ndrain_timeout: -1s":          "drain_timeout",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: a}, {name: w, port: 2, host: b}]": "duplicate name",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: a}, {name: v, port: 2, host: a}]": "duplicate host",
 	}
@@ -149,7 +151,7 @@ func TestCertCovers(t *testing.T) {
 		}
 	}
 	// A wildcard matches exactly one label: the bare domain and a deeper name are not covered,
-	// and neither is an unrelated host — those keep kamal-proxy's autocert.
+	// and neither is an unrelated host — those keep the proxy's automatic HTTPS.
 	for _, h := range []string{"lab.example.com", "a.b.lab.example.com", "other.example.com", ""} {
 		if c.Covers(h) {
 			t.Errorf("%q must not be covered", h)
