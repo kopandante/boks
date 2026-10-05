@@ -1682,32 +1682,39 @@ func TestRoutelessDeploysAStockImageWithAHealthcheckBlock(t *testing.T) {
 }
 
 // A release's files go to a directory of their own on the server, readable by the container's user
-// whatever it is, and are mounted read-only by their absolute path; the release records them.
+// whatever it is, and are mounted read-only by their absolute path; the release records them. Every
+// one of them: a second file dropped would leave the container on what its image ships there.
 func TestDeployMountsTheReleasesFiles(t *testing.T) {
+	const dir = ".boks/bot/files/bot-v2-1700000000"
 	f := routelessFake("healthy")
-	f.out["sh -c cd '.boks/bot/files/bot-v2-1700000000' && pwd -P"] = "/home/u/.boks/bot/files/bot-v2-1700000000"
+	f.out["sh -c cd '"+dir+"' && pwd -P"] = "/home/u/" + dir
 	o := quick()
-	o.Files = []config.FileContent{{Name: "0-site.conf", Target: "/etc/nginx/conf.d/default.conf", Body: []byte("server {}")}}
+	o.Files = []config.FileContent{
+		{Name: "0-site.conf", Target: "/etc/nginx/conf.d/default.conf", Body: []byte("server {}")},
+		{Name: "1-mime.types", Target: "/etc/nginx/mime.types", Body: []byte("types {}")},
+	}
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", o); err != nil {
 		t.Fatal(err)
 	}
-	if f.uploads[".boks/bot/files/bot-v2-1700000000/0-site.conf"] != "server {}" {
-		t.Errorf("the file must be written into the release's directory: %v", f.uploads)
-	}
-	chmod, run := f.callAt("chmod 0644 .boks/bot/files/bot-v2-1700000000/0-site.conf"), f.callAt("docker run")
+	chmod, run := f.callAt("chmod 0644 "+dir+"/0-site.conf "+dir+"/1-mime.types"), f.callAt("docker run")
 	if chmod < 0 || run < 0 || chmod > run {
-		t.Errorf("the file must be made readable before the container starts: %v", f.calls)
-	}
-	// The write leaves the file owner-only, so the mode is set after it, not before.
-	if w := f.writeAt(".boks/bot/files/bot-v2-1700000000/0-site.conf", "server {}"); w < 0 || w > chmod {
-		t.Errorf("the file must be written before its mode is set: write after %d commands, chmod at %d", w, chmod)
-	}
-	if !strings.Contains(f.calls[run], " -v /home/u/.boks/bot/files/bot-v2-1700000000/0-site.conf:/etc/nginx/conf.d/default.conf:ro ") {
-		t.Errorf("the file must be mounted read-only by its absolute path: %s", f.calls[run])
+		t.Errorf("the files must be made readable before the container starts: %v", f.calls)
 	}
 	snap := f.uploads[".boks/bot/releases/bot-v2-1700000000.json"]
-	if !strings.Contains(snap, `"name": "0-site.conf"`) || !strings.Contains(snap, `"target": "/etc/nginx/conf.d/default.conf"`) {
-		t.Errorf("the release must record its files: %s", snap)
+	for _, c := range o.Files {
+		if f.uploads[dir+"/"+c.Name] != string(c.Body) {
+			t.Errorf("%s must be written into the release's directory: %v", c.Name, f.uploads)
+		}
+		// The write leaves the file owner-only, so the mode is set after it, not before.
+		if w := f.writeAt(dir+"/"+c.Name, string(c.Body)); w < 0 || w > chmod {
+			t.Errorf("%s must be written before its mode is set: write after %d commands, chmod at %d", c.Name, w, chmod)
+		}
+		if !strings.Contains(f.calls[run], " -v /home/u/"+dir+"/"+c.Name+":"+c.Target+":ro ") {
+			t.Errorf("%s must be mounted read-only by its absolute path: %s", c.Name, f.calls[run])
+		}
+		if !strings.Contains(snap, `"name": "`+c.Name+`"`) || !strings.Contains(snap, `"target": "`+c.Target+`"`) {
+			t.Errorf("the release must record %s: %s", c.Name, snap)
+		}
 	}
 }
 

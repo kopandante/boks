@@ -365,21 +365,22 @@ func TestRollbackRefusesAHealthcheckTheDeployTimeoutCannotWaitFor(t *testing.T) 
 func TestRollbackMountsTheFilesOfTheRelease(t *testing.T) {
 	v1 := `{"version":6,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1","digest":"sha256:old","ports":[],
 		"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
-		"files":[{"name":"0-site.conf","target":"/etc/site.conf"}]}`
+		"files":[{"name":"0-site.conf","target":"/etc/site.conf"},{"name":"1-mime.types","target":"/etc/mime.types"}]}`
 	f := botReleases("healthy")
 	f.out["cat .boks/bot/releases/bot-v1-1.json"] = v1
-	f.out["sh -c for f in '.boks/bot/files/bot-v1-1/0-site.conf'"] = "present"
+	f.out["sh -c for f in '.boks/bot/files/bot-v1-1/0-site.conf' '.boks/bot/files/bot-v1-1/1-mime.types';"] = "present"
 	f.out["sh -c cd '.boks/bot/files/bot-v1-1' && pwd -P"] = "/home/u/.boks/bot/files/bot-v1-1"
 	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
 		t.Fatal(err)
 	}
-	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, " -v /home/u/.boks/bot/files/bot-v1-1/0-site.conf:/etc/site.conf:ro ") {
+	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, " -v /home/u/.boks/bot/files/bot-v1-1/0-site.conf:/etc/site.conf:ro ") ||
+		!strings.Contains(run, " -v /home/u/.boks/bot/files/bot-v1-1/1-mime.types:/etc/mime.types:ro ") {
 		t.Errorf("the restored copy must mount the release's own files: %s", run)
 	}
 
 	g := botReleases("healthy")
 	g.out["cat .boks/bot/releases/bot-v1-1.json"] = v1
-	g.out["sh -c for f in"] = ".boks/bot/files/bot-v1-1/0-site.conf"
+	g.out["sh -c for f in"] = ".boks/bot/files/bot-v1-1/1-mime.types"
 	err := Rollback(context.Background(), g, io.Discard, parse(t, noPorts), "", quick())
 	if err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
 		t.Fatalf("want a refusal naming the missing file, got %v", err)
