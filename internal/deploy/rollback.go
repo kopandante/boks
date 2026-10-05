@@ -84,6 +84,8 @@ func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	target.Uses = snapshot.Uses
 	// The limit is the release's too, absence included: a release recorded without one ran without one.
 	target.Memory = snapshot.Memory
+	// So is the health check: one the release did not record ran with the image's own.
+	target.Healthcheck = snapshot.Healthcheck
 	// The replace mode is the one field where the release and today's config both have a say, and
 	// either asking for stop-first wins: the release may have written its volume with one writer, and
 	// the config may say that it does now — overlapping on the word of either side alone could put two
@@ -152,6 +154,16 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 	}
 	if err := recordedNetworks(cfg.App, snapshot); err != nil {
 		return "", nil, fmt.Errorf("release %s cannot be reproduced: %w", id, err)
+	}
+	// The health check is the release's and the wait is today's config's, and each passed validation
+	// on its own: a recorded interval that today's deploy_timeout does not outlast would stop the
+	// running copy for one that cannot answer in time.
+	if h := snapshot.Healthcheck; h != nil {
+		interval, _ := time.ParseDuration(h.Interval)
+		if timeout, _ := time.ParseDuration(cfg.DeployTimeout); interval >= timeout {
+			return "", nil, fmt.Errorf("release %s checks its health every %s, and deploy_timeout %s ends before the first check; "+
+				"raise deploy_timeout to roll back to it", id, h.Interval, cfg.DeployTimeout)
+		}
 	}
 	// A connection that drops is not a missing file: only an answer from the server says it is gone.
 	if snapshot.EnvPath != "" {

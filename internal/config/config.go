@@ -22,6 +22,10 @@ const (
 	DefaultProxyImage    = "basecamp/kamal-proxy:v0.10.0"
 	DefaultKeep          = 3
 	DefaultDeployTimeout = "60s"
+	// DefaultHealthInterval is shorter than docker's 30s on purpose: docker runs the first check only
+	// after one interval, and a deploy without routes waits on that answer — at 30s a 60s deploy_timeout
+	// would see two checks at most.
+	DefaultHealthInterval = "5s"
 
 	// ReplaceOverlap starts the new copy beside the old one and moves the routes once it is healthy:
 	// no downtime, but for a moment two copies run, on the same volumes.
@@ -94,6 +98,16 @@ func (c *Config) Networks() []Network {
 	return nets
 }
 
+// Healthcheck is the container's health check when the config gives one: it sets the image's
+// HEALTHCHECK or replaces it, so a stock image that declares none (postgres, redis) can still run
+// without routes or be used by another app. The json tags are load-bearing: a release snapshot
+// stores it verbatim, and a rollback starts the restored copy with it.
+type Healthcheck struct {
+	// Cmd is run by `sh -c` inside the container, as docker's CMD-SHELL; exit 0 is healthy.
+	Cmd      string `yaml:"cmd" json:"cmd"`
+	Interval string `yaml:"interval" json:"interval"`
+}
+
 // Cert describes a certificate obtained by lego over DNS-01 — the case kamal-proxy's built-in
 // autocert cannot serve, because a wildcard has no HTTP-01 challenge. Hosts not covered by it
 // keep using autocert, so an app can mix both.
@@ -126,6 +140,8 @@ type Config struct {
 	DeployTimeout string            `yaml:"deploy_timeout"`
 	// Memory is the container's hard memory limit in docker's format (512m, 1g); empty means none.
 	Memory string `yaml:"memory"`
+	// Healthcheck is the container's health check; nil leaves the image's HEALTHCHECK, if any.
+	Healthcheck *Healthcheck `yaml:"healthcheck"`
 	// Replace is how a new version takes over from the old one: ReplaceOverlap or ReplaceStopFirst.
 	// Empty means the default for the app's shape, which ReplaceMode tells.
 	Replace string `yaml:"replace"`
@@ -242,15 +258,20 @@ func Parse(data []byte) (*Config, error) {
 		}
 		return nil, err
 	}
-	// `registry:` with nothing after it decodes to no registry at all, and the image would then be
-	// pulled without a login — which fails on the server, after the deploy began, and reads as a
-	// registry outage rather than as the half-written block it is.
-	if cfg.Registry == nil {
-		var probe struct {
-			Registry yaml.Node `yaml:"registry"`
-		}
-		if yaml.Unmarshal(data, &probe) == nil && probe.Registry.Kind != 0 {
+	// A block key with nothing after it decodes to no block at all. `registry:` would then pull the
+	// image without a login — which fails on the server, after the deploy began, and reads as a
+	// registry outage rather than as the half-written block it is; `healthcheck:` would leave the
+	// image's own check, or none, in force.
+	var probe struct {
+		Registry    yaml.Node `yaml:"registry"`
+		Healthcheck yaml.Node `yaml:"healthcheck"`
+	}
+	if yaml.Unmarshal(data, &probe) == nil {
+		if cfg.Registry == nil && probe.Registry.Kind != 0 {
 			return nil, errors.New("registry: the block is empty; give host and token_env, or remove the key for a public image")
+		}
+		if cfg.Healthcheck == nil && probe.Healthcheck.Kind != 0 {
+			return nil, errors.New("healthcheck: the block is empty; give cmd, or remove the key to keep the image's HEALTHCHECK")
 		}
 	}
 	// Anything past the first document would be read by nobody, so refuse the file rather than
@@ -300,6 +321,11 @@ func (c *Config) applyDefaults() {
 	if c.Registry != nil && c.Registry.User == "" {
 		c.Registry.User = DefaultRegistryUser
 	}
+	// Filled in here rather than at `docker run`, so a release snapshot records the interval it ran
+	// with and a rollback keeps it even if the default changes.
+	if c.Healthcheck != nil && c.Healthcheck.Interval == "" {
+		c.Healthcheck.Interval = DefaultHealthInterval
+	}
 }
 
 func (c *Config) validate() error {
@@ -323,6 +349,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("deploy_timeout: %q is not a duration such as 60s or 2m", c.DeployTimeout)
 	}
 	if err := c.validateResources(); err != nil {
+		return err
+	}
+	if err := c.validateHealthcheck(); err != nil {
 		return err
 	}
 	if err := c.Cert.validate(); err != nil {
@@ -352,6 +381,29 @@ func (c *Config) validateResources() error {
 		}
 	default:
 		return fmt.Errorf("replace: %q must be %s or %s", c.Replace, ReplaceOverlap, ReplaceStopFirst)
+	}
+	return nil
+}
+
+func (c *Config) validateHealthcheck() error {
+	h := c.Healthcheck
+	if h == nil {
+		return nil
+	}
+	if strings.TrimSpace(h.Cmd) == "" {
+		return errors.New("healthcheck.cmd is required: a shell command run in the container, exit 0 meaning healthy, e.g. `pg_isready -U postgres`")
+	}
+	// Docker refuses an interval under a millisecond, and only at `docker run` — after stop-first has
+	// already taken the running copy down.
+	interval, err := time.ParseDuration(h.Interval)
+	if err != nil || interval < time.Millisecond {
+		return fmt.Errorf("healthcheck.interval: %q is not a duration of at least 1ms, such as 5s", h.Interval)
+	}
+	// Docker runs the first check one interval after the start, so a deploy that waits less than
+	// that never sees an answer and always fails.
+	if timeout, _ := time.ParseDuration(c.DeployTimeout); interval >= timeout {
+		return fmt.Errorf("healthcheck.interval: %s is not shorter than deploy_timeout %s, so the deploy would end before the first check",
+			h.Interval, c.DeployTimeout)
 	}
 	return nil
 }
@@ -467,7 +519,8 @@ func (c *Config) LegoPath() string {
 
 func (c *Config) validateLists() error {
 	// No ports is a real shape, not an oversight: a bot or a background worker publishes nothing
-	// and is judged by the image's own HEALTHCHECK instead of by a route.
+	// and is judged by its container's health check — the image's HEALTHCHECK or the config's
+	// healthcheck block — instead of by a route.
 	seenName, seenHost := map[string]bool{}, map[string]bool{}
 	for _, p := range c.Ports {
 		if err := p.validate(); err != nil {

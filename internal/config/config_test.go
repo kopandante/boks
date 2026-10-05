@@ -361,3 +361,33 @@ func TestImageHost(t *testing.T) {
 		t.Error("Logs must hold for images on the host only, and never without a registry")
 	}
 }
+
+// healthcheck gives a stock image the health check an app without routes is judged by. The interval
+// is filled in, so a release records what it ran with; one the deploy could never wait out is refused.
+func TestParseHealthcheck(t *testing.T) {
+	const bot = "app: bot\nimage: postgres\nservers: [a]\n"
+	cfg, err := Parse([]byte(bot + "healthcheck: {cmd: pg_isready -U postgres}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := cfg.Healthcheck; h == nil || h.Cmd != "pg_isready -U postgres" || h.Interval != "5s" {
+		t.Errorf("want the command and the default interval, got %+v", h)
+	}
+	rejects := map[string]string{
+		bot + "healthcheck:\n":                                              "the block is empty",
+		bot + "healthcheck: {interval: 5s}\n":                               "healthcheck.cmd is required",
+		bot + "healthcheck: {cmd: \"  \"}\n":                                "healthcheck.cmd is required",
+		bot + "healthcheck: {cmd: x, interval: 5}\n":                        "at least 1ms",
+		bot + "healthcheck: {cmd: x, interval: 0s}\n":                       "at least 1ms",
+		bot + "healthcheck: {cmd: x, interval: -1s}\n":                      "at least 1ms",
+		bot + "healthcheck: {cmd: x, interval: 500us}\n":                    "at least 1ms", // docker's minimum
+		bot + "healthcheck: {cmd: x, interval: 60s}\n":                      "not shorter than deploy_timeout",
+		bot + "deploy_timeout: 10s\nhealthcheck: {cmd: x, interval: 30s}\n": "not shorter than deploy_timeout",
+		bot + "healthcheck: {cmd: x, test: y}\n":                            "test", // strict inside the block too
+	}
+	for in, want := range rejects {
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+}

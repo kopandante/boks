@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -419,8 +420,8 @@ func TestRoutelessRefusesAnImageWithoutHealthcheck(t *testing.T) {
 		f := routelessFake("healthy")
 		f.out["docker image inspect"] = declared
 		err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
-		if err == nil || !strings.Contains(err.Error(), "HEALTHCHECK") {
-			t.Fatalf("%q: want a refusal naming HEALTHCHECK, got %v", declared, err)
+		if err == nil || !strings.Contains(err.Error(), "HEALTHCHECK") || !strings.Contains(err.Error(), "healthcheck block to boks.yml") {
+			t.Fatalf("%q: want a refusal naming both remedies, the config's block and the image's HEALTHCHECK, got %v", declared, err)
 		}
 		if f.has("docker stop") || f.has("docker run") {
 			t.Errorf("%q: the running copy must not be touched: %v", declared, f.calls)
@@ -1649,5 +1650,33 @@ func TestSnapshotNamesTheReleaseItWasDeployedOver(t *testing.T) {
 	}
 	if snap.Previous != "demo-v1-1" {
 		t.Errorf("want the release serving before, got %q", snap.Previous)
+	}
+}
+
+// A stock image with no HEALTHCHECK (postgres, redis) runs without routes once the config gives it
+// one: the image is not asked, the container is started with the check, and the release records it.
+func TestRoutelessDeploysAStockImageWithAHealthcheckBlock(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker image inspect"] = ""
+	cfg := parse(t, noPorts+"healthcheck: {cmd: pg_isready -U postgres, interval: 1s}\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if f.has("docker image inspect") {
+		t.Errorf("with a healthcheck block the image's own HEALTHCHECK does not matter: %v", f.calls)
+	}
+	run := f.calls[f.callAt("docker run")]
+	if !strings.Contains(run, " --health-cmd pg_isready -U postgres --health-interval 1s --health-start-period 2s --health-start-interval 1s ") {
+		t.Errorf("the container must be started with the configured check, failures counted only after the deploy's wait: %s", run)
+	}
+	// The fake joins arguments with spaces, so the command's boundaries are checked on the arguments:
+	// docker must get the whole command as the one value of --health-cmd.
+	opts := runOptions(cfg, "bot-v2", "v2", "bot:v2", "")
+	if i := slices.Index(opts, "--health-cmd"); i < 0 || i+1 >= len(opts) || opts[i+1] != "pg_isready -U postgres" {
+		t.Errorf("the health command must be one argument: %q", opts)
+	}
+	snap := f.uploads[".boks/bot/releases/bot-v2-1700000000.json"]
+	if !strings.Contains(snap, `"cmd": "pg_isready -U postgres"`) || !strings.Contains(snap, `"interval": "1s"`) {
+		t.Errorf("the release must record the check it ran with: %s", snap)
 	}
 }

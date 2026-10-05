@@ -314,3 +314,48 @@ func TestCheckRollbackChangesNothing(t *testing.T) {
 		t.Errorf("a check must not change the server: %v", f.calls)
 	}
 }
+
+// The health check belongs to the release: a rollback starts the restored copy with the one it
+// recorded — a stock image would otherwise come back with none — and with none when it recorded
+// none, whatever the config says today.
+func TestRollbackRestoresTheHealthcheckOfTheRelease(t *testing.T) {
+	f := botReleases("healthy")
+	f.out["docker image inspect"] = ""
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":5,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"volumes":["data:/data"],"networks":[{"name":"boks-bot","aliases":["bot"]}],
+		"env_path":".boks/bot/bot-v1-1.env","healthcheck":{"cmd":"pg_isready","interval":"1s"}}`
+	today := parse(t, noPorts+"healthcheck: {cmd: \"true\", interval: 1500ms}\n")
+	if err := Rollback(context.Background(), f, io.Discard, today, "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, " --health-cmd pg_isready --health-interval 1s ") {
+		t.Errorf("the restored copy must run the recorded check, not today's: %s", run)
+	}
+
+	g := botReleases("healthy")
+	if err := Rollback(context.Background(), g, io.Discard, parse(t, noPorts+"healthcheck: {cmd: true, interval: 1s}\n"), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := g.calls[g.callAt("docker run")]; strings.Contains(run, "--health-cmd") {
+		t.Errorf("a release recorded without a check runs with the image's own, not today's: %s", run)
+	}
+}
+
+// The recorded check meets today's deploy_timeout only at a rollback: an interval the wait does not
+// outlast is refused before anything is stopped, by the check as well as by the rollback.
+func TestRollbackRefusesAHealthcheckTheDeployTimeoutCannotWaitFor(t *testing.T) {
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":5,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"volumes":["data:/data"],"networks":[{"name":"boks-bot","aliases":["bot"]}],
+		"env_path":".boks/bot/bot-v1-1.env","healthcheck":{"cmd":"pg_isready","interval":"2s"}}`
+	cfg := parse(t, noPorts) // deploy_timeout 2s: equal is not shorter
+	if _, err := CheckRollback(context.Background(), f, cfg, ""); err == nil || !strings.Contains(err.Error(), "raise deploy_timeout") {
+		t.Errorf("the check must refuse, got %v", err)
+	}
+	if err := Rollback(context.Background(), f, io.Discard, cfg, "", quick()); err == nil || !strings.Contains(err.Error(), "raise deploy_timeout") {
+		t.Fatalf("want a refusal naming deploy_timeout, got %v", err)
+	}
+	if f.has("docker stop") || f.has("docker run") || f.has("docker create") {
+		t.Errorf("nothing may be stopped or started: %v", f.calls)
+	}
+}

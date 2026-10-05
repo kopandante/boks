@@ -30,8 +30,11 @@ import (
 // no limit, and the replace mode its shape implied. Version 3 added the networks the container
 // joined, with the aliases it answered to there; an older snapshot names the one network every app
 // shared then. Version 4 added the apps the release used, whose networks it joined: a boks that
-// does not know them would put the release back without checking that they are there.
-const FormatVersion = 4
+// does not know them would put the release back without checking that they are there. Version 5
+// added the health check the config gave the container: a boks that drops it would bring a release
+// of a stock image back with no health check, and refuse it or leave its consumers unable to tell it
+// answers. An older snapshot reads as what it ran: the image's own HEALTHCHECK, if any.
+const FormatVersion = 5
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -66,6 +69,9 @@ type Snapshot struct {
 	// a release deployed over a stop-first one was put in place stop-first and may still record
 	// overlap. Empty in a version 1 snapshot.
 	Replace string `json:"replace,omitempty"`
+	// Healthcheck is the health check the config gave the container; nil when it ran with the image's
+	// own, and before version 5.
+	Healthcheck *config.Healthcheck `json:"healthcheck,omitempty"`
 	// Previous is the release that was serving when this one was deployed: where a rollback
 	// without an id returns, and what Prune keeps. Empty for a first deploy, and in snapshots
 	// written before the field.
