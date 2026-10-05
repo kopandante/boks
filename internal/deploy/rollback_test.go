@@ -1,12 +1,18 @@
 package deploy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kopandante/boks/internal/release"
 )
 
 // The point of the journal: a rollback reproduces what actually ran — the image by digest, the
@@ -394,5 +400,46 @@ func TestRollbackMountsTheFilesOfTheRelease(t *testing.T) {
 	h.out["sh -c for f in"] = ".boks/bot/files/bot-v1-1/0-site.conf"
 	if _, err := CheckRollback(context.Background(), h, parse(t, noPorts), ""); err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
 		t.Fatalf("the check must refuse a release whose files are gone, got %v", err)
+	}
+}
+
+// sh runs the commands for real, in a directory of its own: the check of a release's files is a
+// shell script, and only the shell tells what it decides.
+type sh struct{ dir string }
+
+func (l sh) Run(ctx context.Context, args ...string) (string, error) {
+	return l.Pipe(ctx, nil, args...)
+}
+
+func (l sh) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir, cmd.Stdin = l.dir, bytes.NewReader(content)
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// The check finds a missing file wherever it is in the list, and passes when every one is there.
+func TestMissingFileAsksTheShell(t *testing.T) {
+	l := sh{t.TempDir()}
+	const dir = ".boks/bot/files/bot-v1-1"
+	if err := os.MkdirAll(filepath.Join(l.dir, dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.dir, dir, "0-site.conf"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := []release.File{{Name: "0-site.conf", Target: "/etc/a"}, {Name: "1-mime.types", Target: "/etc/b"}}
+	if gone, err := missingFile(context.Background(), l, dir, files); err != nil || gone != dir+"/1-mime.types" {
+		t.Errorf("want the second file reported missing, got %q (%v)", gone, err)
+	}
+	if err := os.WriteFile(filepath.Join(l.dir, dir, "1-mime.types"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := missingFile(context.Background(), l, dir, files); err != nil || gone != "" {
+		t.Errorf("all files are there, got %q (%v)", gone, err)
+	}
+	// A directory in a file's place is not the file the container would mount.
+	if gone, _ := missingFile(context.Background(), l, ".boks/bot/files", []release.File{{Name: "bot-v1-1"}}); gone == "" {
+		t.Errorf("a directory must not pass for a file")
 	}
 }

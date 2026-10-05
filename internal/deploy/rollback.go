@@ -185,21 +185,32 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 	// The same for the files it mounted: without them the container would start on whatever the image
 	// ships at those paths.
 	if len(snapshot.Files) > 0 {
-		dir := release.FilesDir(cfg.App, id)
-		var paths []string
-		for _, f := range snapshot.Files {
-			paths = append(paths, remote.Quote(path.Join(dir, f.Name)))
-		}
-		out, err := r.Run(ctx, "sh", "-c", "for f in "+strings.Join(paths, " ")+"; do [ -f \"$f\" ] || { echo \"$f\"; exit 0; }; done; echo present")
+		gone, err := missingFile(ctx, r, release.FilesDir(cfg.App, id), snapshot.Files)
 		if err != nil {
 			return "", nil, fmt.Errorf("checking the files of release %s: %w", id, err)
 		}
-		if out = strings.TrimSpace(out); out != "present" {
+		if gone != "" {
 			return "", nil, fmt.Errorf("a file of release %s is gone (%s): it was pruned or removed, "+
-				"so this release cannot be reproduced; deploy the tag again instead", id, out)
+				"so this release cannot be reproduced; deploy the tag again instead", id, gone)
 		}
 	}
 	return id, snapshot, nil
+}
+
+// missingFile is the first of files absent from dir on the server, or "" when all are there.
+func missingFile(ctx context.Context, r remote.Runner, dir string, files []release.File) (string, error) {
+	var paths []string
+	for _, f := range files {
+		paths = append(paths, remote.Quote(path.Join(dir, f.Name)))
+	}
+	out, err := r.Run(ctx, "sh", "-c", "for f in "+strings.Join(paths, " ")+"; do [ -f \"$f\" ] || { echo \"$f\"; exit 0; }; done; echo present")
+	if err != nil {
+		return "", err
+	}
+	if out = strings.TrimSpace(out); out != "present" {
+		return out, nil
+	}
+	return "", nil
 }
 
 // recordedNetworks checks that a snapshot's networks can be put back as recorded. From version 3 on
