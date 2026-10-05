@@ -387,4 +387,11 @@ func TestRollbackMountsTheFilesOfTheRelease(t *testing.T) {
 	if g.has("docker stop") || g.has("docker run") {
 		t.Errorf("a release that cannot be reproduced must leave the running copy alone: %v", g.calls)
 	}
+	// A fleet rollback asks every server first, by the same check.
+	h := botReleases("healthy")
+	h.out["cat .boks/bot/releases/bot-v1-1.json"] = v1
+	h.out["sh -c for f in"] = ".boks/bot/files/bot-v1-1/0-site.conf"
+	if _, err := CheckRollback(context.Background(), h, parse(t, noPorts), ""); err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
+		t.Fatalf("the check must refuse a release whose files are gone, got %v", err)
+	}
 }

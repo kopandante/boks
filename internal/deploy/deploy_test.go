@@ -1698,6 +1698,10 @@ func TestDeployMountsTheReleasesFiles(t *testing.T) {
 	if chmod < 0 || run < 0 || chmod > run {
 		t.Errorf("the file must be made readable before the container starts: %v", f.calls)
 	}
+	// The write leaves the file owner-only, so the mode is set after it, not before.
+	if w := f.writeAt(".boks/bot/files/bot-v2-1700000000/0-site.conf", "server {}"); w < 0 || w > chmod {
+		t.Errorf("the file must be written before its mode is set: write after %d commands, chmod at %d", w, chmod)
+	}
 	if !strings.Contains(f.calls[run], " -v /home/u/.boks/bot/files/bot-v2-1700000000/0-site.conf:/etc/nginx/conf.d/default.conf:ro ") {
 		t.Errorf("the file must be mounted read-only by its absolute path: %s", f.calls[run])
 	}

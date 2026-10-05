@@ -13,6 +13,8 @@ type fake struct {
 	writes  map[string]string
 	appends map[string]string
 	removed []string
+	// rmFlags is the flags of every rm, in order: a release's files are a directory, which plain -f refuses.
+	rmFlags []string
 }
 
 func newFake() *fake {
@@ -23,6 +25,7 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	if args[0] == "rm" {
 		f.removed = append(f.removed, args[2:]...)
+		f.rmFlags = append(f.rmFlags, args[1])
 	}
 	for prefix, out := range f.out {
 		if strings.HasPrefix(cmd, prefix) {
@@ -117,6 +120,9 @@ func TestPruneKeepsTheNewest(t *testing.T) {
 	}
 	if len(f.removed) != 3 || !strings.Contains(f.removed[0], "demo-v1-1.json") || f.removed[2] != ".boks/demo/files/demo-v1-1" {
 		t.Errorf("want the oldest release removed with its env and files, got %v", f.removed)
+	}
+	if strings.Join(f.rmFlags, " ") != "-rf" {
+		t.Errorf("the files are a directory, so the removal must be recursive: %v", f.rmFlags)
 	}
 }
 

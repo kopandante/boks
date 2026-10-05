@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/release"
 )
 
@@ -55,6 +56,22 @@ func TestAContainerJoinsTheNetworksOfTheAppsItUses(t *testing.T) {
 	snap := f.uploads[".boks/demo/releases/"+newCopy+".json"]
 	if !strings.Contains(snap, `"uses": [`) || !strings.Contains(snap, `"name": "boks-cache"`) || !strings.Contains(snap, fmt.Sprintf(`"version": %d`, release.FormatVersion)) {
 		t.Errorf("the snapshot records the app used and its network: %s", snap)
+	}
+}
+
+// A container that joins several networks is made by `docker create`, and its files are mounted
+// there just as `docker run` would.
+func TestACreatedContainerMountsTheReleasesFiles(t *testing.T) {
+	f := cacheFake(t)
+	f.out["sh -c cd '.boks/demo/files/"+newCopy+"' && pwd -P"] = "/home/u/.boks/demo/files/" + newCopy
+	o := fixed
+	o.Files = []config.FileContent{{Name: "0-site.conf", Target: "/etc/site.conf", Body: []byte("x")}}
+	if err := Run(context.Background(), f, io.Discard, parse(t, usesCache), "v2", o); err != nil {
+		t.Fatal(err)
+	}
+	created := f.callAt("docker create --name " + newCopy + " ")
+	if created < 0 || !strings.Contains(f.calls[created], " -v /home/u/.boks/demo/files/"+newCopy+"/0-site.conf:/etc/site.conf:ro ") {
+		t.Errorf("the created container must mount the release's files: %v", f.calls)
 	}
 }
 
