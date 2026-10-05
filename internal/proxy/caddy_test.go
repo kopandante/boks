@@ -191,6 +191,24 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 	}
 }
 
+// With TLS hosts alone, 80 is still boks's own server — the redirect, then the 404 — and Caddy's
+// redirects are off: its server of its own on 80 would redirect every host, known or not, and
+// nothing boks puts ahead of routes would run there.
+func TestConfigOwnsPort80BesideTLS(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decoded(t, b)
+	routes, _ := json.Marshal(dig(m, "apps", "http", "servers", "http", "routes"))
+	if want := `[{"handle":[{"handler":"static_response","headers":{"Location":["https://{http.request.host}{http.request.uri}"]},"status_code":308}],"match":[{"host":["a.example.com"]}],"terminal":true},{"handle":[{"handler":"static_response","status_code":404}],"terminal":true}]`; string(routes) != want {
+		t.Errorf("want 80 to redirect the TLS host and 404 the rest:\n got %s\nwant %s", routes, want)
+	}
+	if d := dig(m, "apps", "http", "servers", "https", "automatic_https", "disable_redirects"); d != true {
+		t.Errorf("want Caddy's own redirects off: %v", d)
+	}
+}
+
 // Nothing trusted stands in front of boks (#48): Caddy is told of no trusted proxy, so it sets
 // X-Forwarded-For from the connection and drops the visitor's own — measured on boks-lab. The one
 // header every route touches is Forwarded, which it deletes: kamal-proxy did, and Caddy passes it on.

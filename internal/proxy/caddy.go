@@ -201,24 +201,34 @@ func Config(fragments []Fragment) ([]byte, error) {
 			}
 		}
 	}
-	if s := servers["https"]; s != nil && len(skip) > 0 {
-		s.AutoHTTPS = &autoHTTPS{SkipCertificates: skip}
+	// Plain HTTP for a TLS host is redirected to HTTPS, as kamal-proxy did, by boks's own route on 80
+	// rather than Caddy's: Caddy inserts its redirects where its own rules put them — only while it
+	// manages some certificate, or into a server of its own on 80 that knows nothing of the routes
+	// before it — and a 404 or a filter ahead of them would change what they do. So Caddy's are off,
+	// and 80 always exists beside 443: the TLS hosts' redirect, then the 404. ACME's HTTP-01
+	// challenges are answered before any route (server.go, HandleHTTPChallenge).
+	var tlsHosts []string
+	for _, e := range all {
+		if e.r.TLS && !slices.Contains(tlsHosts, e.r.Host) {
+			tlsHosts = append(tlsHosts, e.r.Host)
+		}
 	}
-	// Plain HTTP for a TLS host is redirected to HTTPS, as kamal-proxy did. Caddy adds such redirects
-	// itself only while it manages a certificate for some host: with every TLS host under `cert:`
-	// it relies on a catch-all redirect it appends after the routes, which the 404 below would
-	// shadow. ACME's HTTP-01 challenges are answered before any route, so the redirect leaves them be.
-	if s := servers["http"]; s != nil {
-		var hosts []string
-		for _, e := range all {
-			if e.r.TLS && !slices.Contains(hosts, e.r.Host) {
-				hosts = append(hosts, e.r.Host)
-			}
+	if len(tlsHosts) > 0 {
+		s := servers["http"]
+		if s == nil {
+			s = &server{Listen: []string{":80"}}
+			servers["http"] = s
 		}
-		if len(hosts) > 0 {
-			s.Routes = append(s.Routes, caddyRoute{Match: []match{{Host: hosts}}, Handle: []handler{{Handler: "static_response",
-				StatusCode: 308, Headers: map[string][]string{"Location": {"https://{http.request.host}{http.request.uri}"}}}}, Terminal: true})
+		s.Routes = append(s.Routes, caddyRoute{Match: []match{{Host: tlsHosts}}, Handle: []handler{{Handler: "static_response",
+			StatusCode: 308, Headers: map[string][]string{"Location": {"https://{http.request.host}{http.request.uri}"}}}}, Terminal: true})
+		https := servers["https"]
+		if https.AutoHTTPS == nil {
+			https.AutoHTTPS = &autoHTTPS{}
 		}
+		https.AutoHTTPS.DisableRedirects = true
+	}
+	if len(skip) > 0 {
+		servers["https"].AutoHTTPS.SkipCertificates = skip
 	}
 	// A host no route names gets 404, as it did from kamal-proxy: Caddy alone answers it with an
 	// empty 200, which reads as a working site that lost its content.
@@ -266,6 +276,7 @@ type (
 	}
 	autoHTTPS struct {
 		SkipCertificates []string `json:"skip_certificates,omitempty"`
+		DisableRedirects bool     `json:"disable_redirects,omitempty"`
 	}
 	caddyRoute struct {
 		Match    []match   `json:"match,omitempty"`
