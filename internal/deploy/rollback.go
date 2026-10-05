@@ -155,6 +155,16 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 	if err := recordedNetworks(cfg.App, snapshot); err != nil {
 		return "", nil, fmt.Errorf("release %s cannot be reproduced: %w", id, err)
 	}
+	// The health check is the release's and the wait is today's config's, and each passed validation
+	// on its own: a recorded interval that today's deploy_timeout does not outlast would stop the
+	// running copy for one that cannot answer in time.
+	if h := snapshot.Healthcheck; h != nil {
+		interval, _ := time.ParseDuration(h.Interval)
+		if timeout, _ := time.ParseDuration(cfg.DeployTimeout); interval >= timeout {
+			return "", nil, fmt.Errorf("release %s checks its health every %s, and deploy_timeout %s ends before the first check; "+
+				"raise deploy_timeout to roll back to it", id, h.Interval, cfg.DeployTimeout)
+		}
+	}
 	// A connection that drops is not a missing file: only an answer from the server says it is gone.
 	if snapshot.EnvPath != "" {
 		out, err := r.Run(ctx, "sh", "-c", "test -f "+remote.Quote(snapshot.EnvPath)+" && echo present || true")
