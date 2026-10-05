@@ -147,9 +147,10 @@ type Config struct {
 	Healthcheck *Healthcheck `yaml:"healthcheck"`
 	// Command replaces the image's CMD, in exec form: the program, then its arguments, passed as they
 	// are. There is no shell, so `$VAR` is not expanded; an app that needs a variable writes the shell
-	// itself — ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""] — and the secret stays in
-	// the environment file rather than in boks.yml. The image's ENTRYPOINT, if any, still runs and
-	// receives these as its arguments. Empty leaves the image's CMD.
+	// itself — ["sh", "-c", "exec redis-server --requirepass \"$REDIS_PASSWORD\""], `exec` so that the
+	// stop signal reaches the program rather than the shell — and the secret stays in the environment
+	// file rather than in boks.yml. The image's ENTRYPOINT, if any, still runs and receives these as its
+	// arguments. Empty leaves the image's CMD.
 	Command []string `yaml:"command"`
 	// StopSignal is what `docker stop` sends in place of the image's STOPSIGNAL (SIGTERM unless the
 	// image says otherwise): self-hosted Convex shuts down cleanly on SIGINT.
@@ -286,6 +287,11 @@ func Parse(data []byte) (*Config, error) {
 	if yaml.Unmarshal(data, &probe) == nil {
 		if cfg.Registry == nil && probe.Registry.Kind != 0 {
 			return nil, errors.New("registry: the block is empty; give host and token_env, or remove the key for a public image")
+		}
+		// A null element (`~`, or a bare `-`) decodes to nothing rather than to "": `[redis-server, --save, ~]`
+		// would run without the argument and shift the ones after it. An empty argument is written "".
+		if probe.Command.Kind == yaml.SequenceNode && len(probe.Command.Content) != len(cfg.Command) {
+			return nil, errors.New(`command: an element is null; write "" for an empty argument`)
 		}
 		// `command:` or `command: []` would start the image's own CMD while the config looks as if it set one.
 		if len(cfg.Command) == 0 && probe.Command.Kind != 0 {

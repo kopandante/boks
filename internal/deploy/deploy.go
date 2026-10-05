@@ -1223,7 +1223,8 @@ func runArgs(cfg *config.Config, name, tag, ref, envPath string, binds []string)
 	return append([]string{"docker", "run", "-d"}, runOptions(cfg, name, tag, ref, envPath, binds)...)
 }
 
-// runOptions are what `docker run -d` and `docker create` take after the command, the image last.
+// runOptions are what `docker run -d` and `docker create` take after the command: the options, the
+// image, then the configured command, if any.
 func runOptions(cfg *config.Config, name, tag, ref, envPath string, binds []string) []string {
 	// The alias rides on the network the container starts on: it is how whoever shares that network
 	// reaches the app, under a name that outlives this container.

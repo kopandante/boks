@@ -1764,4 +1764,11 @@ func TestDeployRunsTheConfiguredCommandAndStopSignal(t *testing.T) {
 	if !strings.Contains(snap, `"stop_signal": "SIGINT"`) || !strings.Contains(snap, `"--appendonly"`) {
 		t.Errorf("the release must record the command and the signal: %s", snap)
 	}
+	// The fake joins arguments with spaces, so the command's boundaries are checked on the arguments:
+	// each element is one argument, a phrase and an empty one included.
+	cfg = parse(t, noPorts+"command: [sh, -c, 'exec redis-server --requirepass \"$P\"', \"\"]\n")
+	opts := runOptions(cfg, "bot-v2", "v2", "bot:v2", "", nil)
+	if want := []string{"bot:v2", "sh", "-c", `exec redis-server --requirepass "$P"`, ""}; len(opts) < len(want) || !slices.Equal(opts[len(opts)-len(want):], want) {
+		t.Errorf("each element of the command must be one argument after the image: %q", opts)
+	}
 }
