@@ -130,7 +130,7 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 	if err != nil {
 		return err
 	}
-	if _, err := proxy.Config(frags); err != nil {
+	if _, err := proxy.Config(proxy.Policy{}, frags); err != nil {
 		return fmt.Errorf("%w; nothing was changed", err)
 	}
 	// Fetched before kamal-proxy stops, so the time without a proxy is the swap and not a download.

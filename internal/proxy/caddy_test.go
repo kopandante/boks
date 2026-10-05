@@ -121,11 +121,11 @@ func dig(m any, keys ...string) any {
 func TestConfigIsTheSameForTheSameRoutes(t *testing.T) {
 	a := Fragment{App: "a", Routes: []Route{{Host: "z.example.com", Dial: "a:1", TLS: true}, {Host: "b.example.com", Dial: "a:2"}}}
 	b := Fragment{App: "b", Routes: []Route{{Host: "m.example.com", Dial: "b:1", TLS: true}}}
-	one, err := Config([]Fragment{a, b})
+	one, err := Config(Policy{}, []Fragment{a, b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	two, _ := Config([]Fragment{b, a})
+	two, _ := Config(Policy{}, []Fragment{b, a})
 	if string(one) != string(two) {
 		t.Errorf("same routes, different bytes:\n%s\n%s", one, two)
 	}
@@ -137,7 +137,7 @@ func TestConfigIsTheSameForTheSameRoutes(t *testing.T) {
 
 // Caddy would give a host claimed twice to the first route and drop the second without a word.
 func TestConfigRefusesAHostRoutedTwice(t *testing.T) {
-	_, err := Config([]Fragment{{App: "a", Routes: web}, {App: "b", Routes: []Route{{Host: "Demo.Example.com", Dial: "b:1"}}}})
+	_, err := Config(Policy{}, []Fragment{{App: "a", Routes: web}, {App: "b", Routes: []Route{{Host: "Demo.Example.com", Dial: "b:1"}}}})
 	if err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
 		t.Errorf("want the host refused, got %v", err)
 	}
@@ -147,7 +147,7 @@ func TestConfigRefusesAHostRoutedTwice(t *testing.T) {
 // served from its files and kept out of ACME by name, and one file pair is loaded once.
 func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 	cert := &CertFiles{Certificate: "/certs/boks/_.example.com.crt", Key: "/certs/boks/_.example.com.key"}
-	b, err := Config([]Fragment{{App: "a", Routes: []Route{
+	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{
 		{Host: "plain.example.com", Dial: "a:80"},
 		{Host: "auto.example.com", Dial: "a:81", TLS: true},
 		{Host: "w1.example.com", Dial: "a:82", TLS: true, Cert: cert},
@@ -191,7 +191,7 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 		t.Errorf("the file is the config; no autosave beside it: %v", persist)
 	}
 	// Without a TLS host there is no 443 server and no tls app.
-	plain, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "p.example.com", Dial: "a:1"}}}})
+	plain, _ := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "p.example.com", Dial: "a:1"}}}})
 	if pm := decoded(t, plain); dig(pm, "apps", "http", "servers", "https") != nil || dig(pm, "apps", "tls") != nil {
 		t.Errorf("want plain HTTP only: %s", plain)
 	}
@@ -201,7 +201,7 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 // redirects are off: its server of its own on 80 would redirect every host, known or not, and
 // nothing boks puts ahead of routes would run there.
 func TestConfigOwnsPort80BesideTLS(t *testing.T) {
-	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}}}})
+	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestConfigOwnsPort80BesideTLS(t *testing.T) {
 // X-Forwarded-For from the connection and drops the visitor's own — measured on boks-lab. The one
 // header every route touches is Forwarded, which it deletes: kamal-proxy did, and Caddy passes it on.
 func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
-	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
+	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 // A reload must not cut the WebSockets of the apps it does not change: every route keeps its streams
 // open past the unload of the config they came through. And every route bounds the wait for headers.
 func TestConfigKeepsStreamsAcrossAReload(t *testing.T) {
-	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:80"}, {Host: "s.example.com", Dial: "a:81", TLS: true}}}})
+	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:80"}, {Host: "s.example.com", Dial: "a:81", TLS: true}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestSetRoutesReloadsAndThenRecords(t *testing.T) {
 	if !strings.Contains(d.files[Dir+"/routes/demo.json"], `"dial": "demo:3000"`) {
 		t.Errorf("want the fragment recorded: %q", d.files[Dir+"/routes/demo.json"])
 	}
-	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	want, _ := Config(Policy{}, []Fragment{{App: "demo", Routes: web}})
 	if d.files[Dir+"/caddy.json"] != string(want) || d.files[Dir+"/caddy.next.json"] != "" {
 		t.Errorf("want the applied config in place and no next left: %v", d.files)
 	}
@@ -311,7 +311,7 @@ func TestSetRoutesKeepsTheRoutesOfARunCutAfterItsReload(t *testing.T) {
 	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", other); err != nil {
 		t.Fatal(err)
 	}
-	want, _ := Config([]Fragment{{App: "demo", Routes: web}, {App: "other", Routes: other}})
+	want, _ := Config(Policy{}, []Fragment{{App: "demo", Routes: web}, {App: "other", Routes: other}})
 	if d.files[Dir+"/caddy.json"] != string(want) || !d.ran(reloadNext) {
 		t.Errorf("want the other app's reload to keep demo on its new copy: %s", d.files[Dir+"/caddy.json"])
 	}
@@ -334,7 +334,7 @@ func TestSetRoutesLeavesAnUnchangedProxyAlone(t *testing.T) {
 // fragment and reloads nothing, since the proxy already runs that config.
 func TestSetRoutesCatchesUpALaggingFragment(t *testing.T) {
 	d := newDisk()
-	body, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	body, _ := Config(Policy{}, []Fragment{{App: "demo", Routes: web}})
 	d.files[Dir+"/caddy.json"] = string(body)
 	reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
 	if err != nil || reloaded || d.ran("docker exec") || d.files[Dir+"/routes/demo.json"] == "" {
@@ -360,7 +360,7 @@ func TestSetRoutesCatchesUpAFragmentThatDiffersOnlyInRouting(t *testing.T) {
 			Headers: &Headers{Request: rewritten[0].Headers.Request, Response: map[string]string{"X-Content-Type-Options": ""}}}}},
 	} {
 		d := newDisk()
-		body, _ := Config([]Fragment{{App: "demo", Routes: c.routed}})
+		body, _ := Config(Policy{}, []Fragment{{App: "demo", Routes: c.routed}})
 		d.files[Dir+"/caddy.json"] = string(body)
 		frag, _ := json.MarshalIndent(Fragment{App: "demo", Routes: c.old}, "", "  ")
 		d.files[Dir+"/routes/demo.json"] = string(frag) + "\n"
@@ -450,7 +450,7 @@ func TestSetRoutesRemovesAnAppsRoutes(t *testing.T) {
 	if err != nil || !reloaded {
 		t.Fatalf("want a reload, got %v %v", reloaded, err)
 	}
-	want, _ := Config([]Fragment{{App: "other", Routes: other}})
+	want, _ := Config(Policy{}, []Fragment{{App: "other", Routes: other}})
 	if _, ok := d.files[Dir+"/routes/demo.json"]; ok || d.files[Dir+"/caddy.json"] != string(want) {
 		t.Errorf("want demo's routes gone and other's kept: %v", d.files)
 	}
@@ -470,7 +470,7 @@ func TestRestoreRoutesReloadsEvenWhenNothingChanged(t *testing.T) {
 	if !d.ran(reloadNext + " --force") {
 		t.Errorf("want a forced reload: %v", d.calls)
 	}
-	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	want, _ := Config(Policy{}, []Fragment{{App: "demo", Routes: web}})
 	if d.files[Dir+"/caddy.json"] != string(want) || d.files[Dir+"/caddy.next.json"] != "" {
 		t.Errorf("want the restored config applied: %v", d.files)
 	}
@@ -506,7 +506,7 @@ func TestRestoreRoutesThatFailsLeavesTheFragmentOnTheKeptCopy(t *testing.T) {
 // A wildcard goes after every exact host, whatever their spelling sorts to: Caddy takes the first route
 // that matches, and kamal-proxy served an exact host before a wildcard that covers it.
 func TestConfigPutsAWildcardAfterTheExactHosts(t *testing.T) {
-	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}},
+	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}},
 		{App: "b", Routes: []Route{{Host: "api.example.com", Dial: "b:80"}, {Host: "zz.example.com", Dial: "b:81"}}}})
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +529,7 @@ func TestConfigPutsAWildcardAfterTheExactHosts(t *testing.T) {
 // plain HTTP gets Caddy's redirect, as kamal-proxy redirected it. Hosts it does not cover, a wildcard
 // with TLS, and a host two labels deeper stay out of it.
 func TestConfigWildcardWithoutTLSLeavesTheTLSHostsItCovers(t *testing.T) {
-	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}},
+	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}},
 		{App: "b", Routes: []Route{{Host: "API.example.com", Dial: "b:80", TLS: true}, {Host: "b.example.com", Dial: "b:81", TLS: true},
 			{Host: "plain.example.com", Dial: "b:82"}, {Host: "x.y.example.com", Dial: "b:83", TLS: true},
 			{Host: "other.org", Dial: "b:84", TLS: true}, {Host: "*.tls.example.com", Dial: "b:85", TLS: true}}}})
@@ -547,7 +547,7 @@ func TestConfigWildcardWithoutTLSLeavesTheTLSHostsItCovers(t *testing.T) {
 		t.Errorf("want only the exact TLS hosts it covers left out, got %s", got)
 	}
 	// No TLS host under it: the match is the host alone, the bytes as before.
-	c, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}}})
+	c, _ := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}}})
 	if strings.Contains(string(c), `"not"`) {
 		t.Errorf("no negation without a TLS host to leave out:\n%s", c)
 	}
@@ -572,7 +572,7 @@ func TestValidateChangesNothing(t *testing.T) {
 // The other way round: a wildcard with TLS leaves out the exact hosts without TLS it covers, so HTTPS
 // for one of them does not reach the wildcard's app — kamal-proxy gave the exact host to its own app.
 func TestConfigWildcardWithTLSLeavesThePlainHostsItCovers(t *testing.T) {
-	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:443", TLS: true,
+	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:443", TLS: true,
 		Cert: &CertFiles{Certificate: "/certs/boks/_.example.com.crt", Key: "/certs/boks/_.example.com.key"}}}},
 		{App: "b", Routes: []Route{{Host: "api.example.com", Dial: "b:80"}, {Host: "secure.example.com", Dial: "b:81", TLS: true}}}})
 	if err != nil {
@@ -627,7 +627,7 @@ func TestValidateAsksAboutTheConfigTheReloadWouldLoad(t *testing.T) {
 	if err := Validate(context.Background(), p, "demo", web); err != nil {
 		t.Fatal(err)
 	}
-	want, err := Config([]Fragment{{App: "demo", Routes: web}, {App: "other", Routes: certified}})
+	want, err := Config(Policy{}, []Fragment{{App: "demo", Routes: web}, {App: "other", Routes: certified}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +682,7 @@ func TestReloadLoadsWhatTheFragmentsSay(t *testing.T) {
 	if err := Reload(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
-	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	want, _ := Config(Policy{}, []Fragment{{App: "demo", Routes: web}})
 	if d.files[Dir+"/caddy.json"] != string(want) {
 		t.Errorf("want the reload to load demo's new routes: %s", d.files[Dir+"/caddy.json"])
 	}
@@ -716,7 +716,7 @@ func index(calls []string, prefix string) int {
 // path before the shorter and the bare host last, and whatever no route names gets 404 — which is
 // what kamal-proxy answered and not Caddy's own empty 200.
 func TestConfigOrdersRoutesSoTheMostSpecificWins(t *testing.T) {
-	b, err := Config([]Fragment{
+	b, err := Config(Policy{}, []Fragment{
 		{App: "site", Routes: []Route{{Host: "cars.example.com", Dial: "site:3000"}, {Host: "*.example.com", Dial: "site:3001"}}},
 		{App: "gw", Routes: []Route{{Host: "cars.example.com", Path: "/api/cn/images", Dial: "gw:8080"}}},
 		{App: "api", Routes: []Route{{Host: "api.example.com", Dial: "api:1"}, {Host: "cars.example.com", Path: "/api", Dial: "api:2"}}},
@@ -746,14 +746,14 @@ func TestConfigOrdersRoutesSoTheMostSpecificWins(t *testing.T) {
 		t.Errorf("want the 404 last on a plain-only server: %s", last)
 	}
 	// Host and path are unique together, across apps.
-	if _, err := Config([]Fragment{
+	if _, err := Config(Policy{}, []Fragment{
 		{App: "a", Routes: []Route{{Host: "h.example.com", Path: "/x", Dial: "a:1"}}},
 		{App: "b", Routes: []Route{{Host: "H.example.com", Path: "/x", Dial: "b:1"}}},
 	}); err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
 		t.Errorf("want a refusal of one host and path routed twice, got %v", err)
 	}
 	// Caddy matches paths without regard to case: the same path in capitals is the same route.
-	if _, err := Config([]Fragment{
+	if _, err := Config(Policy{}, []Fragment{
 		{App: "a", Routes: []Route{{Host: "h.example.com", Path: "/img", Dial: "a:1"}}},
 		{App: "b", Routes: []Route{{Host: "h.example.com", Path: "/Img", Dial: "b:1"}}},
 	}); err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
@@ -761,7 +761,7 @@ func TestConfigOrdersRoutesSoTheMostSpecificWins(t *testing.T) {
 	}
 	// A bare host in capitals still goes after a path of the same host; by spelling it would sort
 	// first and take the path's requests.
-	b, err = Config([]Fragment{
+	b, err = Config(Policy{}, []Fragment{
 		{App: "a", Routes: []Route{{Host: "API.example.com", Dial: "a:1"}}},
 		{App: "b", Routes: []Route{{Host: "api.example.com", Path: "/images", Dial: "b:1"}}},
 	})
@@ -781,7 +781,7 @@ func TestConfigRefusesAHostWithAndWithoutTLS(t *testing.T) {
 		{{App: "a", Routes: []Route{{Host: "h.example.com", Dial: "a:1", TLS: true}}}, {App: "b", Routes: []Route{{Host: "h.example.com", Path: "/b", Dial: "b:1"}}}},
 		{{App: "b", Routes: []Route{{Host: "h.example.com", Path: "/b", Dial: "b:1"}}}, {App: "a", Routes: []Route{{Host: "H.example.com", Dial: "a:1", TLS: true}}}},
 	} {
-		if _, err := Config(fs); err == nil || !strings.Contains(err.Error(), "with TLS by a and without it by b") {
+		if _, err := Config(Policy{}, fs); err == nil || !strings.Contains(err.Error(), "with TLS by a and without it by b") {
 			t.Errorf("want the mixed host refused, got %v", err)
 		}
 	}
@@ -790,7 +790,7 @@ func TestConfigRefusesAHostWithAndWithoutTLS(t *testing.T) {
 // A route rewrites the path when it asks — strip the prefix, or put another in its place, measured on
 // boks-lab to keep the query — and changes headers on the request and the response; "" removes one.
 func TestConfigRewritesPathsAndHeaders(t *testing.T) {
-	b, err := Config([]Fragment{{App: "gw", Routes: []Route{
+	b, err := Config(Policy{}, []Fragment{{App: "gw", Routes: []Route{
 		{Host: "cars.example.com", Path: "/api/cn/images", PathRewrite: "/img", Dial: "gw:8080",
 			Headers: &Headers{Request: map[string]string{"Cookie": "", "X-Gateway": "images"}, Response: map[string]string{"Set-Cookie": "", "X-Content-Type-Options": "nosniff"}}},
 		{Host: "cars.example.com", Path: "/old", StripPath: true, Dial: "gw:8081"},
@@ -825,7 +825,7 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 		t.Errorf("unexpected strip: %s", h)
 	}
 	// `$` in the new prefix is a character of the path, not a regexp group.
-	q, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "h", Path: "/v1.0", PathRewrite: "/v$1", Dial: "a:1"}}}})
+	q, _ := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "h", Path: "/v1.0", PathRewrite: "/v$1", Dial: "a:1"}}}})
 	if !strings.Contains(string(q), `"replace": "/v$$1/"`) || !strings.Contains(string(q), `"uri": "/v$1"`) {
 		t.Errorf("want $ literal in the rewrite: %s", q)
 	}
@@ -836,7 +836,7 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 // name it once.
 func TestConfigNamesAHostOnceInAMatcher(t *testing.T) {
 	cert := &CertFiles{Certificate: "/certs/boks/x.crt", Key: "/certs/boks/x.key"}
-	b, err := Config([]Fragment{
+	b, err := Config(Policy{}, []Fragment{
 		{App: "plain", Routes: []Route{{Host: "*.example.com", Dial: "p:1"}}},
 		{App: "tls", Routes: []Route{
 			{Host: "api.example.com", Path: "/one", Dial: "t:1", TLS: true, Cert: cert},

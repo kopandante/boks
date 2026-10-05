@@ -111,7 +111,7 @@ func TestANewProxyGetsAConfigToLoad(t *testing.T) {
 	if at(f.calls, "sh -c umask 077") < 0 || at(f.calls, "sh -c umask 077") > at(f.calls, "docker create") {
 		t.Errorf("want the config written before the container is created: %v", f.calls)
 	}
-	empty, _ := Config(nil)
+	empty, _ := Config(Policy{}, nil)
 	g := &fake{state: "", out: map[string]string{"sh -c if [ -f ": "present\n" + strings.TrimSuffix(string(empty), "\n")}}
 	if err := Boot(context.Background(), g, io.Discard, "img"); err != nil || at(g.calls, "sh -c umask 077") >= 0 {
 		t.Errorf("an applied config that is what the fragments make is kept as it is: %v %v", err, g.calls)
@@ -134,7 +134,7 @@ func TestBootCatchesARunningProxyUp(t *testing.T) {
 	if at(f.calls, "docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json") < 0 {
 		t.Errorf("want a reload with the assembled config: %v", f.calls)
 	}
-	empty, _ := Config(nil)
+	empty, _ := Config(Policy{}, nil)
 	g := &fake{state: "running\tcaddy", out: map[string]string{"sh -c if [ -f ": "present\n" + strings.TrimSuffix(string(empty), "\n")}}
 	if err := Boot(context.Background(), g, io.Discard, "img"); err != nil || at(g.calls, "docker exec boks-proxy caddy reload") >= 0 {
 		t.Errorf("want no reload of a proxy that runs what the fragments make: %v %v", err, g.calls)

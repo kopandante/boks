@@ -103,7 +103,7 @@ func appliedPath() string { return path.Join(Dir, "caddy.json") }
 // does it become appliedPath: a config Caddy refused must not be what it loads on its next start.
 func nextPath() string { return path.Join(Dir, "caddy.next.json") }
 
-// Config assembles Caddy's JSON config from the fragments of every app, in a stable order so that the
+// Config assembles Caddy's JSON config from the server's policy and the fragments of every app, in a stable order so that the
 // same routes always make the same bytes: comparing bytes is how a run tells whether the proxy has to
 // be reloaded at all. A host claimed twice is refused: Caddy would send it to the first route and
 // silently drop the second.
@@ -115,7 +115,7 @@ func nextPath() string { return path.Join(Dir, "caddy.next.json") }
 //
 // There is no trusted_proxies: nothing trusted stands in front of boks, so Caddy sets X-Forwarded-For
 // to the address of the connection and drops what the visitor sent (#48) — its default.
-func Config(fragments []Fragment) ([]byte, error) {
+func Config(p Policy, fragments []Fragment) ([]byte, error) {
 	type entry struct {
 		app string
 		r   Route
@@ -262,6 +262,12 @@ func Config(fragments []Fragment) ([]byte, error) {
 	if len(skip) > 0 {
 		servers["https"].AutoHTTPS.SkipCertificates = skip
 	}
+	// The policy's blocks go before everything else on each server — app routes, the redirect, the 404.
+	if bots := botRoutes(p); len(bots) > 0 {
+		for _, s := range servers {
+			s.Routes = append(slices.Clone(bots), s.Routes...)
+		}
+	}
 	// A host no route names gets 404, as it did from kamal-proxy: Caddy alone answers it with an
 	// empty 200, which reads as a working site that lost its content.
 	for _, s := range servers {
@@ -318,12 +324,15 @@ type (
 		Terminal bool      `json:"terminal"`
 	}
 	match struct {
-		Host       []string             `json:"host,omitempty"`
-		Path       []string             `json:"path,omitempty"`
-		VarsRegexp map[string]varRegexp `json:"vars_regexp,omitempty"`
-		Not        []match              `json:"not,omitempty"`
+		Host       []string               `json:"host,omitempty"`
+		Path       []string               `json:"path,omitempty"`
+		VarsRegexp map[string]regexpMatch `json:"vars_regexp,omitempty"`
+		// HeaderRegexp matches header values by pattern; Host is the request's host.
+		HeaderRegexp map[string]regexpMatch `json:"header_regexp,omitempty"`
+		// Not refuses the request when any one of its matcher sets matches it.
+		Not []match `json:"not,omitempty"`
 	}
-	varRegexp struct {
+	regexpMatch struct {
 		Pattern string `json:"pattern"`
 	}
 	handler struct {
@@ -423,7 +432,7 @@ func routeHandle(r Route) []handler {
 		// ASCII they agree letter for letter — so only such a path is rewritten, and any other is
 		// refused (400) rather than passed on with its prefix unstripped, where the app would resolve
 		// it outside the new one. Browsers send clean paths.
-		routes := []caddyRoute{{Group: "path", Match: []match{{VarsRegexp: map[string]varRegexp{"{http.request.uri.path}": {Pattern: uncleanPath}}}},
+		routes := []caddyRoute{{Group: "path", Match: []match{{VarsRegexp: map[string]regexpMatch{"{http.request.uri.path}": {Pattern: uncleanPath}}}},
 			Handle: []handler{{Handler: "static_response", StatusCode: 400}}}}
 		if r.StripPath {
 			routes = append(routes, caddyRoute{Group: "path", Handle: []handler{{Handler: "rewrite", StripPathPrefix: r.Path}}})
@@ -522,7 +531,7 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 // CheckHosts refuses routes whose host another app's fragment already holds, before anything changes:
 // found only when the config is assembled, it would stop a run whose new copy already serves.
 func CheckHosts(fragments []Fragment, app string, routes []Route) error {
-	_, err := Config(withRoutes(fragments, app, routes))
+	_, err := Config(Policy{}, withRoutes(fragments, app, routes))
 	return err
 }
 
@@ -586,7 +595,7 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 		return false, err
 	}
 	next := withRoutes(fs, app, routes)
-	if _, err := Config(next); err != nil {
+	if _, err := Config(Policy{}, next); err != nil {
 		return false, err
 	}
 	record := func() error {
@@ -640,7 +649,11 @@ func Validate(ctx context.Context, r remote.Runner, app string, routes []Route) 
 	if err != nil {
 		return err
 	}
-	body, err := Config(withRoutes(fs, app, routes))
+	pol, err := ReadPolicy(ctx, r)
+	if err != nil {
+		return err
+	}
+	body, err := Config(pol, withRoutes(fs, app, routes))
 	if err != nil {
 		return err
 	}
@@ -661,7 +674,11 @@ func checkPath() string { return path.Join(Dir, "caddy.check.json") }
 // Lags says whether an applied config is there and differs from the one the fragments fs assemble:
 // a run was cut after writing its fragment, and the proxy has not caught up.
 func Lags(ctx context.Context, r remote.Runner, fs []Fragment) (bool, error) {
-	body, err := Config(fs)
+	pol, err := ReadPolicy(ctx, r)
+	if err != nil {
+		return false, err
+	}
+	body, err := Config(pol, fs)
 	if err != nil {
 		return false, err
 	}
@@ -669,14 +686,19 @@ func Lags(ctx context.Context, r remote.Runner, fs []Fragment) (bool, error) {
 	return present && applied != string(body), err
 }
 
-// converge makes the proxy run the config the fragments fs assemble, and records it as applied: a
+// converge makes the proxy run the config the fragments fs and the server's recorded policy assemble,
+// and records it as applied: a
 // reload when the applied config differs (or force, for a reload whose answer was lost), and for a
 // proxy that is not running, the applied config alone — what it loads when it starts. Every way
 // boks makes the proxy load a config goes through here, so none of them loads caddy.json as it lies:
 // a run cut after writing its fragment leaves caddy.json behind the fragments, and loading it would
 // send that run's routes back to the copies it left. The caller holds the server's admission lock.
 func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment, force bool, what string) (bool, error) {
-	body, err := Config(fs)
+	pol, err := ReadPolicy(ctx, r)
+	if err != nil {
+		return false, err
+	}
+	body, err := Config(pol, fs)
 	if err != nil {
 		return false, err
 	}

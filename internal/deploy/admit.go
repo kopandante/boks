@@ -39,8 +39,8 @@ type admission struct {
 }
 
 // proxyHolder holds the admission lock for a proxy boot outside any deploy (`boks proxy boot`, `boks
-// cert`). It is no app's name — those cannot start with an underscore — so no deploy takes the lock
-// back from it as its own leftover.
+// cert`) and for a change of the server's policy (`boks server`). It is no app's name — those cannot
+// start with an underscore — so no deploy takes the lock back from it as its own leftover.
 const proxyHolder = "_proxy"
 
 // BootProxy starts the proxy if it is not running and puts it on the networks its routes need,
@@ -117,7 +117,7 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 		}
 		if owner != "" && owner != waiting {
 			if owner == proxyHolder {
-				fmt.Fprintln(log, "waiting for a `boks proxy boot` or `boks cert` run to finish with the proxy on this server")
+				fmt.Fprintln(log, "waiting for a `boks proxy boot`, `boks cert` or `boks server` run to finish with the proxy on this server")
 			} else {
 				fmt.Fprintf(log, "waiting for the deploy of %s to finish admitting its container on this server\n", owner)
 			}
@@ -129,7 +129,7 @@ func admit(ctx context.Context, r remote.Runner, log io.Writer, app string, o Op
 			}
 			// Not having let go in this long does not prove the owner died, so the lock is not taken over.
 			if owner == proxyHolder {
-				return nil, fmt.Errorf("a `boks proxy boot` or `boks cert` run has held the admission lock %s for over %s; "+
+				return nil, fmt.Errorf("a `boks proxy boot`, `boks cert` or `boks server` run has held the admission lock %s for over %s; "+
 					"if none is running, `boks unlock` clears it", admitLock, wait)
 			}
 			return nil, fmt.Errorf("the deploy of %s has held the admission lock %s for over %s; "+

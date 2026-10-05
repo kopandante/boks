@@ -308,7 +308,9 @@ func TestRunHappyPath(t *testing.T) {
 		// The proxy is on the networks of the copies its routes dial.
 		proxyNets,
 		inspectOf("demo-v1-1"),
-		// And runs what the fragments make: a cut run may have left the applied config behind them.
+		// And runs what the fragments and the server's policy make: a cut run may have left the applied
+		// config behind them.
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		"sh -c if [ -f '.boks/_proxy/caddy.json' ]; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		admitGive("demo"),
 		// What the proxy serves for the app now: where a failed switch would send the routes back.
@@ -337,6 +339,7 @@ func TestRunHappyPath(t *testing.T) {
 		// One reload moves every route, under the lock again: the config is every app's.
 		admitTake("demo"),
 		fragsRead,
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		proxyProbe,
 		reloadVia,
@@ -442,6 +445,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		// be the kamal-proxy whose routes to it this boks cannot drop.
 		proxyState + " --format {{.State}}\t{{.Label \"boks.proxy\"}}",
 		// A removal a cut run wrote to the fragments but never got into the proxy's config.
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
 		admitTake("bot"),
@@ -961,7 +965,7 @@ func TestRoutelessFinishesARemovalACutRunLeft(t *testing.T) {
 		}
 		both = append(both, x)
 	}
-	stale, _ := proxy.Config(both)
+	stale, _ := proxy.Config(proxy.Policy{}, both)
 	f.out[applied] = "present\n" + strings.TrimSuffix(string(stale), "\n")
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
