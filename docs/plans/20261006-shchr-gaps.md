@@ -30,7 +30,9 @@ health check контейнера — `HEALTHCHECK` образа или блок
 - [x] **G1 `healthcheck:`** (PR feat/healthcheck)
   - [x] `healthcheck: {cmd, interval}` в конфиге: `cmd` — строка для `sh -c` (`--health-cmd`),
         `interval` — длительность, по умолчанию 5s (не 30s Docker: деплой ждёт первый ответ)
-  - [x] `docker run` получает `--health-cmd` / `--health-interval`
+  - [x] `docker run` получает `--health-cmd` / `--health-interval` и `--health-start-period
+        <deploy_timeout>`: без него Docker объявляет копию unhealthy после трёх неудач подряд (15 с
+        при 5s), и деплой отказывал задолго до `deploy_timeout`; `interval` не меньше 1ms (минимум Docker)
   - [x] предпроверка «образ без HEALTHCHECK» отказывает, только если нет и блока
   - [x] снимок релиза — формат 5 с полем `healthcheck`; откат запускает копию с записанным
   - [x] тексты отказов называют оба способа

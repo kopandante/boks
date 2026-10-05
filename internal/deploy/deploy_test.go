@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1665,8 +1666,14 @@ func TestRoutelessDeploysAStockImageWithAHealthcheckBlock(t *testing.T) {
 		t.Errorf("with a healthcheck block the image's own HEALTHCHECK does not matter: %v", f.calls)
 	}
 	run := f.calls[f.callAt("docker run")]
-	if !strings.Contains(run, " --health-cmd pg_isready -U postgres --health-interval 1s ") {
-		t.Errorf("the container must be started with the configured check: %s", run)
+	if !strings.Contains(run, " --health-cmd pg_isready -U postgres --health-interval 1s --health-start-period 2s ") {
+		t.Errorf("the container must be started with the configured check, failures counted only after the deploy's wait: %s", run)
+	}
+	// The fake joins arguments with spaces, so the command's boundaries are checked on the arguments:
+	// docker must get the whole command as the one value of --health-cmd.
+	opts := runOptions(cfg, "bot-v2", "v2", "bot:v2", "")
+	if i := slices.Index(opts, "--health-cmd"); i < 0 || i+1 >= len(opts) || opts[i+1] != "pg_isready -U postgres" {
+		t.Errorf("the health command must be one argument: %q", opts)
 	}
 	snap := f.uploads[".boks/bot/releases/bot-v2-1700000000.json"]
 	if !strings.Contains(snap, `"cmd": "pg_isready -U postgres"`) || !strings.Contains(snap, `"interval": "1s"`) {

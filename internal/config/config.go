@@ -22,9 +22,9 @@ const (
 	DefaultProxyImage    = "basecamp/kamal-proxy:v0.10.0"
 	DefaultKeep          = 3
 	DefaultDeployTimeout = "60s"
-	// DefaultHealthInterval is shorter than docker's 30s on purpose: docker runs the first check only
-	// after one interval, and a deploy without routes waits on that answer — at 30s a 60s deploy_timeout
-	// would see two checks at most.
+	// DefaultHealthInterval is shorter than docker's 30s on purpose: without a start interval (docker
+	// before 25) the first check runs only after one interval, and a deploy without routes waits on
+	// that answer — at 30s a 60s deploy_timeout would see two checks at most.
 	DefaultHealthInterval = "5s"
 
 	// ReplaceOverlap starts the new copy beside the old one and moves the routes once it is healthy:
@@ -393,12 +393,14 @@ func (c *Config) validateHealthcheck() error {
 	if strings.TrimSpace(h.Cmd) == "" {
 		return errors.New("healthcheck.cmd is required: a shell command run in the container, exit 0 meaning healthy, e.g. `pg_isready -U postgres`")
 	}
+	// Docker refuses an interval under a millisecond, and only at `docker run` — after stop-first has
+	// already taken the running copy down.
 	interval, err := time.ParseDuration(h.Interval)
-	if err != nil || interval <= 0 {
-		return fmt.Errorf("healthcheck.interval: %q is not a positive duration such as 5s", h.Interval)
+	if err != nil || interval < time.Millisecond {
+		return fmt.Errorf("healthcheck.interval: %q is not a duration of at least 1ms, such as 5s", h.Interval)
 	}
-	// Docker runs the first check one interval after the start, so a deploy that waits less than
-	// that never sees an answer and always fails.
+	// Without a start interval (docker before 25) the first check runs one interval after the start,
+	// so a deploy that waits less than that never sees an answer and always fails.
 	if timeout, _ := time.ParseDuration(c.DeployTimeout); interval >= timeout {
 		return fmt.Errorf("healthcheck.interval: %s is not shorter than deploy_timeout %s, so the deploy would end before the first check",
 			h.Interval, c.DeployTimeout)

@@ -370,15 +370,17 @@ func TestParseHealthcheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h := cfg.Healthcheck; h == nil || h.Cmd != "pg_isready -U postgres" || h.Interval != DefaultHealthInterval {
+	if h := cfg.Healthcheck; h == nil || h.Cmd != "pg_isready -U postgres" || h.Interval != "5s" {
 		t.Errorf("want the command and the default interval, got %+v", h)
 	}
 	rejects := map[string]string{
 		bot + "healthcheck:\n":                                              "the block is empty",
 		bot + "healthcheck: {interval: 5s}\n":                               "healthcheck.cmd is required",
 		bot + "healthcheck: {cmd: \"  \"}\n":                                "healthcheck.cmd is required",
-		bot + "healthcheck: {cmd: x, interval: 5}\n":                        "not a positive duration",
-		bot + "healthcheck: {cmd: x, interval: 0s}\n":                       "not a positive duration",
+		bot + "healthcheck: {cmd: x, interval: 5}\n":                        "at least 1ms",
+		bot + "healthcheck: {cmd: x, interval: 0s}\n":                       "at least 1ms",
+		bot + "healthcheck: {cmd: x, interval: -1s}\n":                      "at least 1ms",
+		bot + "healthcheck: {cmd: x, interval: 500us}\n":                    "at least 1ms", // docker's minimum
 		bot + "healthcheck: {cmd: x, interval: 60s}\n":                      "not shorter than deploy_timeout",
 		bot + "deploy_timeout: 10s\nhealthcheck: {cmd: x, interval: 30s}\n": "not shorter than deploy_timeout",
 		bot + "healthcheck: {cmd: x, test: y}\n":                            "test", // strict inside the block too
