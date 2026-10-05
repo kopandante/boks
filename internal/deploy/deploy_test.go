@@ -1651,3 +1651,25 @@ func TestSnapshotNamesTheReleaseItWasDeployedOver(t *testing.T) {
 		t.Errorf("want the release serving before, got %q", snap.Previous)
 	}
 }
+
+// A stock image with no HEALTHCHECK (postgres, redis) runs without routes once the config gives it
+// one: the image is not asked, the container is started with the check, and the release records it.
+func TestRoutelessDeploysAStockImageWithAHealthcheckBlock(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker image inspect"] = ""
+	cfg := parse(t, noPorts+"healthcheck: {cmd: pg_isready -U postgres, interval: 1s}\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if f.has("docker image inspect") {
+		t.Errorf("with a healthcheck block the image's own HEALTHCHECK does not matter: %v", f.calls)
+	}
+	run := f.calls[f.callAt("docker run")]
+	if !strings.Contains(run, " --health-cmd pg_isready -U postgres --health-interval 1s ") {
+		t.Errorf("the container must be started with the configured check: %s", run)
+	}
+	snap := f.uploads[".boks/bot/releases/bot-v2-1700000000.json"]
+	if !strings.Contains(snap, `"cmd": "pg_isready -U postgres"`) || !strings.Contains(snap, `"interval": "1s"`) {
+		t.Errorf("the release must record the check it ran with: %s", snap)
+	}
+}

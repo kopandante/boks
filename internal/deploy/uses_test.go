@@ -50,7 +50,7 @@ func TestAContainerJoinsTheNetworksOfTheAppsItUses(t *testing.T) {
 		t.Errorf("the proxy joins the app's network, not those it uses: %v", f.calls)
 	}
 	snap := f.uploads[".boks/demo/releases/"+newCopy+".json"]
-	if !strings.Contains(snap, `"uses": [`) || !strings.Contains(snap, `"name": "boks-cache"`) || !strings.Contains(snap, `"version": 4`) {
+	if !strings.Contains(snap, `"uses": [`) || !strings.Contains(snap, `"name": "boks-cache"`) || !strings.Contains(snap, `"version": 5`) {
 		t.Errorf("the snapshot records the app used and its network: %s", snap)
 	}
 }

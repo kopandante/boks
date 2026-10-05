@@ -84,6 +84,8 @@ func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	target.Uses = snapshot.Uses
 	// The limit is the release's too, absence included: a release recorded without one ran without one.
 	target.Memory = snapshot.Memory
+	// So is the health check: one the release did not record ran with the image's own.
+	target.Healthcheck = snapshot.Healthcheck
 	// The replace mode is the one field where the release and today's config both have a say, and
 	// either asking for stop-first wins: the release may have written its volume with one writer, and
 	// the config may say that it does now — overlapping on the word of either side alone could put two

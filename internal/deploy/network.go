@@ -203,8 +203,8 @@ func checkUse(ctx context.Context, r remote.Runner, cfg *config.Config, name, de
 		case "healthy":
 			serving++
 		case "":
-			return refuse("%s has no HEALTHCHECK: %s reaches it by name, past the proxy, so only the image's own health check "+
-				"says it answers — add one to its image", b.name, cfg.App)
+			return refuse("%s has no HEALTHCHECK: %s reaches it by name, past the proxy, so only the container's own health check "+
+				"says it answers — add a healthcheck block to its boks.yml (or a HEALTHCHECK to its image) and deploy it again", b.name, cfg.App)
 		default:
 			return refuse("its copy %s is %s, and %s reaching %s by name could land on it", b.name, b.health, cfg.App, dep)
 		}

@@ -118,9 +118,10 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := pull(ctx, r, log, l.ref, l.pull || missing(ctx, r, l.ref), o.Login); err != nil {
 		return err
 	}
-	// Whether the image declares a HEALTHCHECK is known before anything is touched. A deploy that
-	// is bound to be refused must not first take the running copy down.
-	if !routed && declaresNoHealthcheck(ctx, r, l.ref) {
+	// Whether the container will have a health check is known before anything is touched: from the
+	// config, or else from the image. A deploy that is bound to be refused must not first take the
+	// running copy down.
+	if !routed && cfg.Healthcheck == nil && declaresNoHealthcheck(ctx, r, l.ref) {
 		return noHealthcheck(cfg)
 	}
 	if routed {
@@ -451,7 +452,7 @@ func declaresNoHealthcheck(ctx context.Context, r remote.Runner, ref string) boo
 
 func noHealthcheck(cfg *config.Config) error {
 	return fmt.Errorf("%s has no HEALTHCHECK: an app without routes is judged by its own "+
-		"health check, so add one to the image or publish a port", cfg.Image)
+		"health check, so add a healthcheck block to boks.yml (or a HEALTHCHECK to the image), or publish a port", cfg.Image)
 }
 
 // running lists the containers of this app that are up right now.
@@ -875,7 +876,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
 		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(), Uses: cfg.Uses,
 		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, Replace: cfg.ReplaceMode(),
-		Previous: op.from, CreatedAt: now,
+		Healthcheck: cfg.Healthcheck, Previous: op.from, CreatedAt: now,
 	}
 	if cfg.Cert != nil {
 		snapshot.CertDomains = cfg.Cert.Domains
@@ -1166,6 +1167,9 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string) []string {
 		"--label", "boks.ports="+portLabel(cfg.Ports), "--label", "boks.replace="+cfg.ReplaceMode())
 	if cfg.Memory != "" {
 		a = append(a, "--memory", cfg.Memory)
+	}
+	if h := cfg.Healthcheck; h != nil {
+		a = append(a, "--health-cmd", h.Cmd, "--health-interval", h.Interval)
 	}
 	if envPath != "" {
 		a = append(a, "--env-file", envPath)
