@@ -49,6 +49,8 @@ var (
 	// repository belongs in image.
 	registryHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
 	envNameRe      = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	// signalRe is a signal as docker names it, written the one way that cannot be misread.
+	signalRe       = regexp.MustCompile(`^SIG[A-Z0-9]+$`)
 	registryUserRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+-]*$`)
 )
 
@@ -143,6 +145,16 @@ type Config struct {
 	Memory string `yaml:"memory"`
 	// Healthcheck is the container's health check; nil leaves the image's HEALTHCHECK, if any.
 	Healthcheck *Healthcheck `yaml:"healthcheck"`
+	// Command replaces the image's CMD, in exec form: the program, then its arguments, passed as they
+	// are. There is no shell, so `$VAR` is not expanded; an app that needs a variable writes the shell
+	// itself — ["sh", "-c", "exec redis-server --requirepass \"$REDIS_PASSWORD\""], `exec` so that the
+	// stop signal reaches the program rather than the shell — and the secret stays in the environment
+	// file rather than in boks.yml. The image's ENTRYPOINT, if any, still runs and receives these as its
+	// arguments. Empty leaves the image's CMD.
+	Command []string `yaml:"command"`
+	// StopSignal is what `docker stop` sends in place of the image's STOPSIGNAL (SIGTERM unless the
+	// image says otherwise): self-hosted Convex shuts down cleanly on SIGINT.
+	StopSignal string `yaml:"stop_signal"`
 	// Files are files of the app's repository the container reads, each `local:/container/path`,
 	// the local path relative to boks.yml. Every release gets its own copy on the server, mounted
 	// read-only, so a rollback reads the files it ran with.
@@ -270,10 +282,25 @@ func Parse(data []byte) (*Config, error) {
 	var probe struct {
 		Registry    yaml.Node `yaml:"registry"`
 		Healthcheck yaml.Node `yaml:"healthcheck"`
+		Command     yaml.Node `yaml:"command"`
 	}
 	if yaml.Unmarshal(data, &probe) == nil {
 		if cfg.Registry == nil && probe.Registry.Kind != 0 {
 			return nil, errors.New("registry: the block is empty; give host and token_env, or remove the key for a public image")
+		}
+		// A null element (`~`, or a bare `-`) decodes to nothing rather than to "": `[redis-server, --save, ~]`
+		// would run without the argument and shift the ones after it. An empty argument is written "".
+		// An alias (`command: *cmd`) is decoded through to the list it names, and so is checked there.
+		seq := &probe.Command
+		for seq.Kind == yaml.AliasNode && seq.Alias != nil {
+			seq = seq.Alias
+		}
+		if seq.Kind == yaml.SequenceNode && len(seq.Content) != len(cfg.Command) {
+			return nil, errors.New(`command: an element is null; write "" for an empty argument`)
+		}
+		// `command:` or `command: []` would start the image's own CMD while the config looks as if it set one.
+		if len(cfg.Command) == 0 && probe.Command.Kind != 0 {
+			return nil, errors.New("command: give the program and its arguments, or remove the key to keep the image's CMD")
 		}
 		if cfg.Healthcheck == nil && probe.Healthcheck.Kind != 0 {
 			return nil, errors.New("healthcheck: the block is empty; give cmd, or remove the key to keep the image's HEALTHCHECK")
@@ -358,6 +385,12 @@ func (c *Config) validate() error {
 	}
 	if err := c.validateHealthcheck(); err != nil {
 		return err
+	}
+	if len(c.Command) > 0 && strings.TrimSpace(c.Command[0]) == "" {
+		return errors.New("command: the first element is the program to run and cannot be empty")
+	}
+	if c.StopSignal != "" && !signalRe.MatchString(c.StopSignal) {
+		return fmt.Errorf("stop_signal: %q must be a signal name such as SIGINT or SIGQUIT", c.StopSignal)
 	}
 	if err := c.Cert.validate(); err != nil {
 		return err

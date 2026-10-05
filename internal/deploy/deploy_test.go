@@ -1747,3 +1747,28 @@ func TestDeployRefusesFilesItCouldNotMakeReadable(t *testing.T) {
 		t.Errorf("no container may start with unreadable files, and the old copy must come back: %v", f.calls)
 	}
 }
+
+// The command follows the image on `docker run`, the stop signal goes with the options, and the
+// release records both.
+func TestDeployRunsTheConfiguredCommandAndStopSignal(t *testing.T) {
+	f := routelessFake("healthy")
+	cfg := parse(t, noPorts+"command: [redis-server, --appendonly, \"yes\"]\nstop_signal: SIGINT\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	run := f.calls[f.callAt("docker run")]
+	if !strings.HasSuffix(run, " ghcr.io/x/bot:v2 redis-server --appendonly yes") || !strings.Contains(run, " --stop-signal SIGINT ") {
+		t.Errorf("want the signal among the options and the command after the image: %s", run)
+	}
+	snap := f.uploads[".boks/bot/releases/bot-v2-1700000000.json"]
+	if !strings.Contains(snap, `"stop_signal": "SIGINT"`) || !strings.Contains(snap, `"--appendonly"`) {
+		t.Errorf("the release must record the command and the signal: %s", snap)
+	}
+	// The fake joins arguments with spaces, so the command's boundaries are checked on the arguments:
+	// each element is one argument, a phrase and an empty one included.
+	cfg = parse(t, noPorts+"command: [sh, -c, 'exec redis-server --requirepass \"$P\"', \"\"]\n")
+	opts := runOptions(cfg, "bot-v2", "v2", "bot:v2", "", nil)
+	if want := []string{"bot:v2", "sh", "-c", `exec redis-server --requirepass "$P"`, ""}; len(opts) < len(want) || !slices.Equal(opts[len(opts)-len(want):], want) {
+		t.Errorf("each element of the command must be one argument after the image: %q", opts)
+	}
+}

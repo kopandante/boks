@@ -443,3 +443,26 @@ func TestMissingFileAsksTheShell(t *testing.T) {
 		t.Errorf("a directory must not pass for a file")
 	}
 }
+
+// The command and the stop signal belong to the release: a rollback runs the recorded ones, and the
+// image's own when the release recorded none, whatever the config says today.
+func TestRollbackRestoresTheCommandOfTheRelease(t *testing.T) {
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":7,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
+		"command":["redis-server","--save",""],"stop_signal":"SIGQUIT"}`
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := f.calls[f.callAt("docker run")]; !strings.HasSuffix(run, "ghcr.io/x/bot@sha256:old redis-server --save ") || !strings.Contains(run, " --stop-signal SIGQUIT ") {
+		t.Errorf("the restored copy must run the recorded command and signal: %s", run)
+	}
+
+	g := botReleases("healthy")
+	if err := Rollback(context.Background(), g, io.Discard, parse(t, noPorts+"command: [x]\nstop_signal: SIGINT\n"), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := g.calls[g.callAt("docker run")]; !strings.HasSuffix(run, "ghcr.io/x/bot@sha256:old") || strings.Contains(run, "--stop-signal") {
+		t.Errorf("a release recorded without them runs the image's own, not today's: %s", run)
+	}
+}

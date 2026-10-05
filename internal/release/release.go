@@ -36,7 +36,9 @@ import (
 // answers. An older snapshot reads as what it ran: the image's own HEALTHCHECK, if any. Version 6
 // added the files mounted into the container: a boks that drops them would bring a release back
 // without its configuration files, and the container would start on whatever the image ships.
-const FormatVersion = 6
+// Version 7 added the command and the stop signal: without them a release of a stock image (redis
+// started with a password) would come back running the image's own CMD.
+const FormatVersion = 7
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -77,6 +79,10 @@ type Snapshot struct {
 	// Files are the files mounted read-only into the container, each kept on the server under
 	// FilesDir of this release. Empty before version 6.
 	Files []File `json:"files,omitempty"`
+	// Command is the CMD the config gave the container, and StopSignal what `docker stop` sent it;
+	// empty when the release ran with the image's own, and before version 7.
+	Command    []string `json:"command,omitempty"`
+	StopSignal string   `json:"stop_signal,omitempty"`
 	// Previous is the release that was serving when this one was deployed: where a rollback
 	// without an id returns, and what Prune keeps. Empty for a first deploy, and in snapshots
 	// written before the field.

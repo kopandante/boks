@@ -442,3 +442,37 @@ func TestFileContents(t *testing.T) {
 		t.Errorf("a file that cannot be read must refuse the deploy, got %v", err)
 	}
 }
+
+// command replaces the image's CMD in exec form, and stop_signal is a signal docker understands; a
+// key written with nothing after it would quietly keep the image's own CMD.
+func TestParseCommandAndStopSignal(t *testing.T) {
+	const bot = "app: cache\nimage: redis\nservers: [a]\nhealthcheck: {cmd: redis-cli ping}\n"
+	cfg, err := Parse([]byte(bot + "command: [sh, -c, 'redis-server --requirepass \"$P\"']\nstop_signal: SIGINT\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Command) != 3 || cfg.Command[2] != `redis-server --requirepass "$P"` || cfg.StopSignal != "SIGINT" {
+		t.Errorf("want the command verbatim and the signal, got %q %q", cfg.Command, cfg.StopSignal)
+	}
+	if cfg, err = Parse([]byte(bot + "command: [redis-server, --save, \"\"]\n")); err != nil || len(cfg.Command) != 3 || cfg.Command[2] != "" {
+		t.Errorf("an empty argument written \"\" is kept: %q %v", cfg.Command, err)
+	}
+	rejects := map[string]string{
+		bot + "command:\n":                              "give the program",
+		bot + "command: []\n":                           "give the program",
+		bot + "command: [\"\", x]\n":                    "cannot be empty",
+		bot + "command: [null, x]\n":                    "is null",
+		bot + "command: [x, --save, ~, y]\n":            "is null",
+		bot + "command:\n  -\n  - x\n":                  "is null",
+		bot + "<<: {command: &c [x, ~]}\ncommand: *c\n": "is null",
+		bot + "command: [~]\n":                          "is null",
+		bot + "stop_signal: int\n":                      "signal name",
+		bot + "stop_signal: 2\n":                        "signal name",
+		bot + "stop_signal: SIGINT x\n":                 "signal name",
+	}
+	for in, want := range rejects {
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+}
