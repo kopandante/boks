@@ -1,12 +1,18 @@
 package deploy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kopandante/boks/internal/release"
 )
 
 // The point of the journal: a rollback reproduces what actually ran — the image by digest, the
@@ -281,7 +287,7 @@ func TestRollbackPrunesReleasesBeyondKeep(t *testing.T) {
 	if err := Rollback(context.Background(), f, io.Discard, cfg, "", quick()); err != nil {
 		t.Fatal(err)
 	}
-	if !f.has("rm -f .boks/bot/releases/bot-v2-2.json") || f.has("rm -f .boks/bot/releases/bot-v1-1.json") {
+	if !f.has("rm -rf .boks/bot/releases/bot-v2-2.json") || f.has("rm -rf .boks/bot/releases/bot-v1-1.json") {
 		t.Errorf("want the release left behind pruned and the restored one kept: %v", f.calls)
 	}
 }
@@ -357,5 +363,83 @@ func TestRollbackRefusesAHealthcheckTheDeployTimeoutCannotWaitFor(t *testing.T) 
 	}
 	if f.has("docker stop") || f.has("docker run") || f.has("docker create") {
 		t.Errorf("nothing may be stopped or started: %v", f.calls)
+	}
+}
+
+// A rollback mounts the files its release ran with, from that release's own directory, and refuses
+// before anything changes when they are gone.
+func TestRollbackMountsTheFilesOfTheRelease(t *testing.T) {
+	v1 := `{"version":6,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1","digest":"sha256:old","ports":[],
+		"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
+		"files":[{"name":"0-site.conf","target":"/etc/site.conf"},{"name":"1-mime.types","target":"/etc/mime.types"}]}`
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = v1
+	f.out["sh -c for f in '.boks/bot/files/bot-v1-1/0-site.conf' '.boks/bot/files/bot-v1-1/1-mime.types';"] = "present"
+	f.out["sh -c cd '.boks/bot/files/bot-v1-1' && pwd -P"] = "/home/u/.boks/bot/files/bot-v1-1"
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, " -v /home/u/.boks/bot/files/bot-v1-1/0-site.conf:/etc/site.conf:ro ") ||
+		!strings.Contains(run, " -v /home/u/.boks/bot/files/bot-v1-1/1-mime.types:/etc/mime.types:ro ") {
+		t.Errorf("the restored copy must mount the release's own files: %s", run)
+	}
+
+	g := botReleases("healthy")
+	g.out["cat .boks/bot/releases/bot-v1-1.json"] = v1
+	g.out["sh -c for f in"] = ".boks/bot/files/bot-v1-1/1-mime.types"
+	err := Rollback(context.Background(), g, io.Discard, parse(t, noPorts), "", quick())
+	if err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
+		t.Fatalf("want a refusal naming the missing file, got %v", err)
+	}
+	if g.has("docker stop") || g.has("docker run") {
+		t.Errorf("a release that cannot be reproduced must leave the running copy alone: %v", g.calls)
+	}
+	// A fleet rollback asks every server first, by the same check.
+	h := botReleases("healthy")
+	h.out["cat .boks/bot/releases/bot-v1-1.json"] = v1
+	h.out["sh -c for f in"] = ".boks/bot/files/bot-v1-1/0-site.conf"
+	if _, err := CheckRollback(context.Background(), h, parse(t, noPorts), ""); err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
+		t.Fatalf("the check must refuse a release whose files are gone, got %v", err)
+	}
+}
+
+// sh runs the commands for real, in a directory of its own: the check of a release's files is a
+// shell script, and only the shell tells what it decides.
+type sh struct{ dir string }
+
+func (l sh) Run(ctx context.Context, args ...string) (string, error) {
+	return l.Pipe(ctx, nil, args...)
+}
+
+func (l sh) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir, cmd.Stdin = l.dir, bytes.NewReader(content)
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// The check finds a missing file wherever it is in the list, and passes when every one is there.
+func TestMissingFileAsksTheShell(t *testing.T) {
+	l := sh{t.TempDir()}
+	const dir = ".boks/bot/files/bot-v1-1"
+	if err := os.MkdirAll(filepath.Join(l.dir, dir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.dir, dir, "0-site.conf"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	files := []release.File{{Name: "0-site.conf", Target: "/etc/a"}, {Name: "1-mime.types", Target: "/etc/b"}}
+	if gone, err := missingFile(context.Background(), l, dir, files); err != nil || gone != dir+"/1-mime.types" {
+		t.Errorf("want the second file reported missing, got %q (%v)", gone, err)
+	}
+	if err := os.WriteFile(filepath.Join(l.dir, dir, "1-mime.types"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if gone, err := missingFile(context.Background(), l, dir, files); err != nil || gone != "" {
+		t.Errorf("all files are there, got %q (%v)", gone, err)
+	}
+	// A directory in a file's place is not the file the container would mount.
+	if gone, _ := missingFile(context.Background(), l, ".boks/bot/files", []release.File{{Name: "bot-v1-1"}}); gone == "" {
+		t.Errorf("a directory must not pass for a file")
 	}
 }

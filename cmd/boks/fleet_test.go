@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -105,6 +107,57 @@ func TestRollbackRefusesWhenAServerLacksTheRelease(t *testing.T) {
 	}
 	if a.ran("mkdir") || a.ran("docker") {
 		t.Errorf("server a must be left alone: %v", a.calls)
+	}
+}
+
+// A release whose files are gone on the second server stops the rollback before the first one changes.
+func TestRollbackRefusesWhenAServerLacksTheReleasesFiles(t *testing.T) {
+	const v2 = `{"version":6,"id":"bot-v2-2","app":"bot","image":"ghcr.io/x/bot","tag":"v2","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"files":[{"name":"0-site.conf","target":"/etc/site.conf"}]}`
+	a, b := botServer("bot-v3-3", "bot-v2-2"), botServer("bot-v3-3", "bot-v2-2")
+	a.server["cat .boks/bot/releases/bot-v2-2"], b.server["cat .boks/bot/releases/bot-v2-2"] = v2, v2
+	a.server["sh -c for f in"], b.server["sh -c for f in"] = "present", ".boks/bot/files/bot-v2-2/0-site.conf"
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	err := dispatch(context.Background(), parseConfig(t, twoServers), []string{"rollback"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "no server was rolled back") || !strings.Contains(err.Error(), "0-site.conf") {
+		t.Fatalf("want a refusal naming the missing file before anything changed, got %v", err)
+	}
+	if a.ran("mkdir") || a.ran("docker") {
+		t.Errorf("server a must be left alone: %v", a.calls)
+	}
+}
+
+// The files are read from beside boks.yml and go to every server; one that cannot be read refuses
+// the deploy before any server is reached.
+func TestDeployCarriesTheFilesOfTheConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "site.conf"), []byte("server {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newServer := func() *recorder {
+		return &recorder{server: server{"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`,
+			"docker inspect --format": "healthy", noNetwork: "absent", "sh -c cd": "/home/u/.boks/bot/files/x"}}
+	}
+	a, b := newServer(), newServer()
+	fleet(t, map[string]*recorder{"a": a, "b": b}, func() time.Time { return time.Unix(1600000000, 0) })
+	cfg := parseConfig(t, twoServers+"files: [site.conf:/etc/site.conf]\n")
+	cfg.Dir = dir
+	if err := dispatch(context.Background(), cfg, []string{"deploy", "v4"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]*recorder{"a": a, "b": b} {
+		if !slices.Contains(s.stdin, "server {}") || !s.ran("docker run -d --name bot-v4-1600000000 ") {
+			t.Errorf("server %s must get the file and start the release: %v", name, s.calls)
+		}
+	}
+
+	c := newServer()
+	fleet(t, map[string]*recorder{"a": c, "b": c}, time.Now)
+	cfg.Files = []string{"missing.conf:/etc/site.conf"}
+	if err := dispatch(context.Background(), cfg, []string{"deploy", "v5"}, io.Discard); err == nil || !strings.Contains(err.Error(), "missing.conf") {
+		t.Fatalf("want a refusal naming the file, got %v", err)
+	}
+	if len(c.calls) != 0 {
+		t.Errorf("no server may be reached before the files are read: %v", c.calls)
 	}
 }
 

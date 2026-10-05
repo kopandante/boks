@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -142,6 +143,10 @@ type Config struct {
 	Memory string `yaml:"memory"`
 	// Healthcheck is the container's health check; nil leaves the image's HEALTHCHECK, if any.
 	Healthcheck *Healthcheck `yaml:"healthcheck"`
+	// Files are files of the app's repository the container reads, each `local:/container/path`,
+	// the local path relative to boks.yml. Every release gets its own copy on the server, mounted
+	// read-only, so a rollback reads the files it ran with.
+	Files []string `yaml:"files"`
 	// Replace is how a new version takes over from the old one: ReplaceOverlap or ReplaceStopFirst.
 	// Empty means the default for the app's shape, which ReplaceMode tells.
 	Replace string `yaml:"replace"`
@@ -541,6 +546,19 @@ func (c *Config) validateLists() error {
 			return err
 		}
 	}
+	targets := map[string]bool{}
+	for _, f := range c.Files {
+		_, target, err := splitFile(f)
+		if err != nil {
+			return err
+		}
+		// Two files at one path: docker would mount both, and which one the container reads depends on
+		// the order of the mounts.
+		if targets[target] {
+			return fmt.Errorf("files: %s is the target of two files", target)
+		}
+		targets[target] = true
+	}
 	seen := map[string]bool{}
 	for _, dep := range c.Uses {
 		switch {
@@ -575,6 +593,47 @@ func validateVolume(v string) error {
 		return fmt.Errorf("volumes: %q must be name:/absolute/path", v)
 	}
 	return nil
+}
+
+// splitFile reads one `files` entry. The target goes to `docker run -v host:target:ro`, so it is a
+// clean absolute path without the colon that separates the parts there.
+func splitFile(v string) (source, target string, err error) {
+	source, target, ok := strings.Cut(v, ":")
+	switch {
+	case !ok || source == "":
+		return "", "", fmt.Errorf("files: %q must be local/path:/absolute/path/in/container", v)
+	case !strings.HasPrefix(target, "/") || target == "/" || path.Clean(target) != target:
+		return "", "", fmt.Errorf("files: %q — the container path must be a clean absolute path to a file, such as /etc/nginx/conf.d/default.conf", v)
+	case strings.Contains(target, ":"):
+		return "", "", fmt.Errorf("files: %q — the container path cannot contain a colon", v)
+	}
+	return source, target, nil
+}
+
+// FileContent is one file of `files` as it goes to the server: Name is its file name in the
+// release's directory there, unique even when two sources share a base name.
+type FileContent struct {
+	Name   string
+	Target string
+	Body   []byte
+}
+
+// FileContents reads the files the config names, from the paths relative to boks.yml. A file that
+// cannot be read refuses the deploy before any server is reached.
+func (c *Config) FileContents() ([]FileContent, error) {
+	var out []FileContent
+	for i, f := range c.Files {
+		source, target, err := splitFile(f)
+		if err != nil {
+			return nil, err
+		}
+		body, err := os.ReadFile(c.resolve(source))
+		if err != nil {
+			return nil, fmt.Errorf("files: %w", err)
+		}
+		out = append(out, FileContent{Name: fmt.Sprintf("%d-%s", i, filepath.Base(source)), Target: target, Body: body})
+	}
+	return out, nil
 }
 
 // EnvContent is the env-file body sent to the server: env_file contents (if any) followed by

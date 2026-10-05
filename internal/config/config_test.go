@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -389,5 +390,55 @@ func TestParseHealthcheck(t *testing.T) {
 		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want error containing %q, got %v", in, want, err)
 		}
+	}
+}
+
+// files mount a file of the repository at a path in the container: the path goes to `docker run -v`,
+// so it is clean and absolute, without the colon -v splits on, and no two files share it.
+func TestParseFiles(t *testing.T) {
+	const bot = "app: bot\nimage: nginx\nservers: [a]\nports: [{name: w, port: 80, host: h}]\n"
+	if _, err := Parse([]byte(bot + "files: [nginx.conf:/etc/nginx/conf.d/default.conf]\n")); err != nil {
+		t.Fatal(err)
+	}
+	rejects := map[string]string{
+		bot + "files: [nginx.conf]\n":         "must be local/path:/absolute",
+		bot + "files: [\":/etc/x\"]\n":        "must be local/path:/absolute",
+		bot + "files: [a:etc/x]\n":            "clean absolute path",
+		bot + "files: [a:/]\n":                "clean absolute path",
+		bot + "files: [a:/etc/../x]\n":        "clean absolute path",
+		bot + "files: [a:/etc/x/]\n":          "clean absolute path",
+		bot + "files: [\"a:/etc/x:ro\"]\n":    "cannot contain a colon",
+		bot + "files: [a:/etc/x, b:/etc/x]\n": "target of two files",
+	}
+	for in, want := range rejects {
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+}
+
+// The files are read from beside boks.yml, and two sources with one base name stay apart on the server.
+func TestFileContents(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{"a/site.conf": "A", "b/site.conf": "B"} {
+		if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &Config{Dir: dir, Files: []string{"a/site.conf:/etc/a.conf", "b/site.conf:/etc/b.conf"}}
+	got, err := cfg.FileContents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []FileContent{{Name: "0-site.conf", Target: "/etc/a.conf", Body: []byte("A")}, {Name: "1-site.conf", Target: "/etc/b.conf", Body: []byte("B")}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("want each file under a distinct name with its own body and target, got %+v", got)
+	}
+	cfg.Files = []string{"missing.conf:/etc/m.conf"}
+	if _, err := cfg.FileContents(); err == nil || !strings.Contains(err.Error(), "missing.conf") {
+		t.Errorf("a file that cannot be read must refuse the deploy, got %v", err)
 	}
 }

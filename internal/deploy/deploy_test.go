@@ -1671,12 +1671,79 @@ func TestRoutelessDeploysAStockImageWithAHealthcheckBlock(t *testing.T) {
 	}
 	// The fake joins arguments with spaces, so the command's boundaries are checked on the arguments:
 	// docker must get the whole command as the one value of --health-cmd.
-	opts := runOptions(cfg, "bot-v2", "v2", "bot:v2", "")
+	opts := runOptions(cfg, "bot-v2", "v2", "bot:v2", "", nil)
 	if i := slices.Index(opts, "--health-cmd"); i < 0 || i+1 >= len(opts) || opts[i+1] != "pg_isready -U postgres" {
 		t.Errorf("the health command must be one argument: %q", opts)
 	}
 	snap := f.uploads[".boks/bot/releases/bot-v2-1700000000.json"]
 	if !strings.Contains(snap, `"cmd": "pg_isready -U postgres"`) || !strings.Contains(snap, `"interval": "1s"`) {
 		t.Errorf("the release must record the check it ran with: %s", snap)
+	}
+}
+
+// A release's files go to a directory of their own on the server, readable by the container's user
+// whatever it is, and are mounted read-only by their absolute path; the release records them. Every
+// one of them: a second file dropped would leave the container on what its image ships there.
+func TestDeployMountsTheReleasesFiles(t *testing.T) {
+	const dir = ".boks/bot/files/bot-v2-1700000000"
+	f := routelessFake("healthy")
+	f.out["sh -c cd '"+dir+"' && pwd -P"] = "/home/u/" + dir
+	o := quick()
+	o.Files = []config.FileContent{
+		{Name: "0-site.conf", Target: "/etc/nginx/conf.d/default.conf", Body: []byte("server {}")},
+		{Name: "1-mime.types", Target: "/etc/nginx/mime.types", Body: []byte("types {}")},
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", o); err != nil {
+		t.Fatal(err)
+	}
+	chmod, run := f.callAt("chmod 0644 "+dir+"/0-site.conf "+dir+"/1-mime.types"), f.callAt("docker run")
+	if chmod < 0 || run < 0 || chmod > run {
+		t.Errorf("the files must be made readable before the container starts: %v", f.calls)
+	}
+	snap := f.uploads[".boks/bot/releases/bot-v2-1700000000.json"]
+	for _, c := range o.Files {
+		if f.uploads[dir+"/"+c.Name] != string(c.Body) {
+			t.Errorf("%s must be written into the release's directory: %v", c.Name, f.uploads)
+		}
+		// The write leaves the file owner-only, so the mode is set after it, not before.
+		if w := f.writeAt(dir+"/"+c.Name, string(c.Body)); w < 0 || w > chmod {
+			t.Errorf("%s must be written before its mode is set: write after %d commands, chmod at %d", c.Name, w, chmod)
+		}
+		if !strings.Contains(f.calls[run], " -v /home/u/"+dir+"/"+c.Name+":"+c.Target+":ro ") {
+			t.Errorf("%s must be mounted read-only by its absolute path: %s", c.Name, f.calls[run])
+		}
+		if !strings.Contains(snap, `"name": "`+c.Name+`"`) || !strings.Contains(snap, `"target": "`+c.Target+`"`) {
+			t.Errorf("the release must record %s: %s", c.Name, snap)
+		}
+	}
+}
+
+// Docker reads a relative bind source as a volume name, so a directory that does not resolve to an
+// absolute path is a failed start, not a container started without its files.
+func TestDeployRefusesAFilesDirectoryItCannotResolve(t *testing.T) {
+	f := routelessFake("healthy")
+	o := quick()
+	o.Files = []config.FileContent{{Name: "0-site.conf", Target: "/etc/site.conf", Body: []byte("x")}}
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", o)
+	if err == nil || !strings.Contains(err.Error(), "cannot mount") {
+		t.Fatalf("want a refusal naming the mount, got %v", err)
+	}
+	if f.has("docker run") || !f.has("docker start bot-v1-1") {
+		t.Errorf("no container may start without its files, and the old copy must come back: %v", f.calls)
+	}
+}
+
+// A file the container's user may not be able to read is not mounted: a failed chmod fails the start.
+func TestDeployRefusesFilesItCouldNotMakeReadable(t *testing.T) {
+	f := routelessFake("healthy")
+	f.fail["chmod 0644"] = errors.New("Operation not permitted")
+	o := quick()
+	o.Files = []config.FileContent{{Name: "0-site.conf", Target: "/etc/site.conf", Body: []byte("x")}}
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", o)
+	if err == nil || !strings.Contains(err.Error(), "readable") {
+		t.Fatalf("want a refusal naming the file mode, got %v", err)
+	}
+	if f.has("docker run") || !f.has("docker start bot-v1-1") {
+		t.Errorf("no container may start with unreadable files, and the old copy must come back: %v", f.calls)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
 	"slices"
 	"strings"
 	"time"
@@ -50,7 +51,12 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 		action: "rollback", again: "boks rollback " + id, tag: snapshot.Tag, ref: ref,
 		stopFirst: cfg.ReplaceMode() == config.ReplaceStopFirst,
 		start: func(ctx context.Context, name string) error {
-			return run(ctx, r, log, target, name, snapshot.Tag, ref, snapshot.EnvPath)
+			// The files are the release's own copies, kept under its id, not this run's container name.
+			binds, err := mounts(ctx, r, cfg.App, id, snapshot.Files)
+			if err != nil {
+				return err
+			}
+			return run(ctx, r, log, target, name, snapshot.Tag, ref, snapshot.EnvPath, binds)
 		},
 		// The release being restored keeps its own identity: `current` points back at its snapshot,
 		// which still names the release it was deployed over, rather than at a copy under a new id.
@@ -176,7 +182,35 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 				"so this release cannot be reproduced; deploy the tag again instead", id, snapshot.EnvPath)
 		}
 	}
+	// The same for the files it mounted: without them the container would start on whatever the image
+	// ships at those paths.
+	if len(snapshot.Files) > 0 {
+		gone, err := missingFile(ctx, r, release.FilesDir(cfg.App, id), snapshot.Files)
+		if err != nil {
+			return "", nil, fmt.Errorf("checking the files of release %s: %w", id, err)
+		}
+		if gone != "" {
+			return "", nil, fmt.Errorf("a file of release %s is gone (%s): it was pruned or removed, "+
+				"so this release cannot be reproduced; deploy the tag again instead", id, gone)
+		}
+	}
 	return id, snapshot, nil
+}
+
+// missingFile is the first of files absent from dir on the server, or "" when all are there.
+func missingFile(ctx context.Context, r remote.Runner, dir string, files []release.File) (string, error) {
+	var paths []string
+	for _, f := range files {
+		paths = append(paths, remote.Quote(path.Join(dir, f.Name)))
+	}
+	out, err := r.Run(ctx, "sh", "-c", "for f in "+strings.Join(paths, " ")+"; do [ -f \"$f\" ] || { echo \"$f\"; exit 0; }; done; echo present")
+	if err != nil {
+		return "", err
+	}
+	if out = strings.TrimSpace(out); out != "present" {
+		return out, nil
+	}
+	return "", nil
 }
 
 // recordedNetworks checks that a snapshot's networks can be put back as recorded. From version 3 on

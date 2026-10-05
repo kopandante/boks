@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -21,6 +22,8 @@ import (
 
 type Options struct {
 	Env []byte
+	// Files are the files the release mounts, read from the app's repository before any server is reached.
+	Files []config.FileContent
 	// Login is the registry login every pull of the app's image goes through; nil for a public image.
 	Login *Login
 	Now   func() time.Time
@@ -65,9 +68,11 @@ func Run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	defer unlock(context.WithoutCancel(ctx), r, log, cfg.App)
 	return put(ctx, r, log, cfg, launch{
 		action: "deploy", again: "boks deploy " + tag, tag: tag, ref: cfg.Image + ":" + tag, pull: true,
-		start: func(ctx context.Context, name string) error { return start(ctx, r, log, cfg, name, tag, o.Env) },
+		start: func(ctx context.Context, name string) error {
+			return start(ctx, r, log, cfg, name, tag, o.Env, o.Files)
+		},
 		record: func(ctx context.Context, name string, op operation) error {
-			return record(ctx, r, log, cfg, name, tag, op, o.Env, o.Now())
+			return record(ctx, r, log, cfg, name, tag, op, o.Env, fileRecords(o.Files), o.Now())
 		},
 	}, o)
 }
@@ -867,7 +872,8 @@ func finish(ctx context.Context, r remote.Runner, log io.Writer, app, op, result
 // The order is deliberate: the snapshot exists before anything claims to be current, and the
 // journal closes last, so an interruption always leaves more evidence rather than less. Any of the
 // three failing is an error, because the caller retires the previous containers only after it.
-func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag string, op operation, env []byte, now time.Time) error {
+func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag string, op operation, env []byte,
+	files []release.File, now time.Time) error {
 	digest, err := digestOf(ctx, r, cfg.Image, tag)
 	if err != nil {
 		return err
@@ -876,7 +882,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
 		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(), Uses: cfg.Uses,
 		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, Replace: cfg.ReplaceMode(),
-		Healthcheck: cfg.Healthcheck, Previous: op.from, CreatedAt: now,
+		Healthcheck: cfg.Healthcheck, Files: files, Previous: op.from, CreatedAt: now,
 	}
 	if cfg.Cert != nil {
 		snapshot.CertDomains = cfg.Cert.Domains
@@ -1101,27 +1107,89 @@ func parsePorts(label string) map[string]config.Port {
 	return out
 }
 
-func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag string, env []byte) error {
+func start(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag string, env []byte, files []config.FileContent) error {
 	envPath := envFile(cfg.App, name, env)
 	if envPath != "" {
 		if err := remote.Upload(ctx, r, env, envPath); err != nil {
 			return err
 		}
 	}
-	return run(ctx, r, log, cfg, name, tag, cfg.Image+":"+tag, envPath)
+	if err := uploadFiles(ctx, r, cfg.App, name, files); err != nil {
+		return err
+	}
+	binds, err := mounts(ctx, r, cfg.App, name, fileRecords(files))
+	if err != nil {
+		return err
+	}
+	return run(ctx, r, log, cfg, name, tag, cfg.Image+":"+tag, envPath, binds)
+}
+
+// fileRecords is what a release records of the files it mounts.
+func fileRecords(files []config.FileContent) []release.File {
+	var out []release.File
+	for _, f := range files {
+		out = append(out, release.File{Name: f.Name, Target: f.Target})
+	}
+	return out
+}
+
+// uploadFiles writes a release's files into a directory of its own, so a later deploy never
+// changes what an earlier release reads. The directories keep the owner-only mode every boks write
+// has, which keeps the files from other users of the server; the files themselves are readable by
+// all, because the container reads them as whatever user its image runs as, and a bind-mounted
+// file is checked against its own mode, not against the directories above it on the host.
+func uploadFiles(ctx context.Context, r remote.Runner, app, id string, files []config.FileContent) error {
+	if len(files) == 0 {
+		return nil
+	}
+	chmod := []string{"chmod", "0644"}
+	for _, f := range files {
+		p := path.Join(release.FilesDir(app, id), f.Name)
+		if err := remote.UploadAtomic(ctx, r, f.Body, p); err != nil {
+			return err
+		}
+		chmod = append(chmod, p)
+	}
+	if _, err := r.Run(ctx, chmod...); err != nil {
+		return fmt.Errorf("making the files of %s readable to the container: %w", id, err)
+	}
+	return nil
+}
+
+// mounts are the `docker run -v` arguments for a release's files. Docker takes a bind source only
+// as an absolute path — a relative one reads as a volume name — and the release's directory lives
+// under the SSH user's home, so it is resolved on the server.
+func mounts(ctx context.Context, r remote.Runner, app, id string, files []release.File) ([]string, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+	dir := release.FilesDir(app, id)
+	abs, err := r.Run(ctx, "sh", "-c", "cd "+remote.Quote(dir)+" && pwd -P")
+	if err != nil {
+		return nil, fmt.Errorf("resolving %s on the server: %w", dir, err)
+	}
+	// The colon separates the parts of -v; a home directory with one in it cannot be written there.
+	if !strings.HasPrefix(abs, "/") || strings.Contains(abs, ":") {
+		return nil, fmt.Errorf("%s resolves to %q, which docker cannot mount", dir, abs)
+	}
+	var out []string
+	for _, f := range files {
+		out = append(out, abs+"/"+f.Name+":"+f.Target+":ro")
+	}
+	return out, nil
 }
 
 // run starts container name from image ref, labelled as version tag of the app cfg describes.
-func run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, ref, envPath string) error {
+func run(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name, tag, ref, envPath string, binds []string) error {
 	fmt.Fprintf(log, "run %s\n", name)
 	nets := cfg.Networks()
 	if len(nets) == 1 {
-		_, err := r.Run(ctx, runArgs(cfg, name, tag, ref, envPath)...)
+		_, err := r.Run(ctx, runArgs(cfg, name, tag, ref, envPath, binds)...)
 		return err
 	}
 	// `docker run` attaches one network; the others are joined before the container starts, or the
 	// app would start unable to reach the apps it uses, and fail or retry on its own schedule.
-	_, err := r.Run(ctx, append([]string{"docker", "create"}, runOptions(cfg, name, tag, ref, envPath)...)...)
+	_, err := r.Run(ctx, append([]string{"docker", "create"}, runOptions(cfg, name, tag, ref, envPath, binds)...)...)
 	if err == nil {
 		if err = joinAll(ctx, r, name, nets[1:]); err == nil {
 			_, err = r.Run(ctx, "docker", "start", name)
@@ -1150,12 +1218,12 @@ func joinAll(ctx context.Context, r remote.Runner, name string, nets []config.Ne
 	return nil
 }
 
-func runArgs(cfg *config.Config, name, tag, ref, envPath string) []string {
-	return append([]string{"docker", "run", "-d"}, runOptions(cfg, name, tag, ref, envPath)...)
+func runArgs(cfg *config.Config, name, tag, ref, envPath string, binds []string) []string {
+	return append([]string{"docker", "run", "-d"}, runOptions(cfg, name, tag, ref, envPath, binds)...)
 }
 
 // runOptions are what `docker run -d` and `docker create` take after the command, the image last.
-func runOptions(cfg *config.Config, name, tag, ref, envPath string) []string {
+func runOptions(cfg *config.Config, name, tag, ref, envPath string, binds []string) []string {
 	// The alias rides on the network the container starts on: it is how whoever shares that network
 	// reaches the app, under a name that outlives this container.
 	n := cfg.Networks()[0]
@@ -1184,6 +1252,9 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string) []string {
 	for _, v := range cfg.Volumes {
 		vol, path, _ := strings.Cut(v, ":")
 		a = append(a, "-v", cfg.App+proxy.NameSep+vol+":"+path)
+	}
+	for _, b := range binds {
+		a = append(a, "-v", b)
 	}
 	// An image on the private registry is fetched by pull alone, logged in. Left to itself, docker
 	// would fetch one that went missing without the login — refused, or worse, let through by a login

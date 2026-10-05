@@ -45,6 +45,20 @@ func TestUploadAtomicReplacesTheFileAndLeavesNoTemporary(t *testing.T) {
 	}
 }
 
+// The directories a write creates are the owner's alone: a release's files are made readable by all
+// for the container, and only these directories keep other users of the server from them.
+func TestUploadAtomicCreatesOwnerOnlyDirectories(t *testing.T) {
+	l := local{t.TempDir()}
+	if err := UploadAtomic(context.Background(), l, []byte("x"), ".boks/demo/files/demo-v1-1/0-site.conf"); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{".boks", ".boks/demo", ".boks/demo/files", ".boks/demo/files/demo-v1-1"} {
+		if info, err := os.Stat(filepath.Join(l.dir, d)); err != nil || info.Mode().Perm() != 0o700 {
+			t.Errorf("%s must be 0700: %v %v", d, info, err)
+		}
+	}
+}
+
 func TestAppendKeepsWhatWasThere(t *testing.T) {
 	l := local{t.TempDir()}
 	for _, line := range []string{"a\n", "b\n"} {
