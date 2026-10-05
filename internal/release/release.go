@@ -33,8 +33,10 @@ import (
 // does not know them would put the release back without checking that they are there. Version 5
 // added the health check the config gave the container: a boks that drops it would bring a release
 // of a stock image back with no health check, and refuse it or leave its consumers unable to tell it
-// answers. An older snapshot reads as what it ran: the image's own HEALTHCHECK, if any.
-const FormatVersion = 5
+// answers. An older snapshot reads as what it ran: the image's own HEALTHCHECK, if any. Version 6
+// added the files mounted into the container: a boks that drops them would bring a release back
+// without its configuration files, and the container would start on whatever the image ships.
+const FormatVersion = 6
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -72,11 +74,20 @@ type Snapshot struct {
 	// Healthcheck is the health check the config gave the container; nil when it ran with the image's
 	// own, and before version 5.
 	Healthcheck *config.Healthcheck `json:"healthcheck,omitempty"`
+	// Files are the files mounted read-only into the container, each kept on the server under
+	// FilesDir of this release. Empty before version 6.
+	Files []File `json:"files,omitempty"`
 	// Previous is the release that was serving when this one was deployed: where a rollback
 	// without an id returns, and what Prune keeps. Empty for a first deploy, and in snapshots
 	// written before the field.
 	Previous  string    `json:"previous,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// File is one file a release mounted: Name in the release's FilesDir, read by the container at Target.
+type File struct {
+	Name   string `json:"name"`
+	Target string `json:"target"`
 }
 
 // Entry is one line of the operation journal. Started without Finished is the state that used to
@@ -106,8 +117,11 @@ func Dir(app string) string { return ".boks/" + app }
 // writes it there and Prune deletes it from there.
 func EnvPath(app, id string) string      { return path.Join(Dir(app), id+".env") }
 func snapshotPath(app, id string) string { return path.Join(Dir(app), "releases", id+".json") }
-func currentPath(app string) string      { return path.Join(Dir(app), "current") }
-func journalPath(app string) string      { return path.Join(Dir(app), "journal.jsonl") }
+
+// FilesDir holds the files release id mounts. One owner for the name, as for EnvPath.
+func FilesDir(app, id string) string { return path.Join(Dir(app), "files", id) }
+func currentPath(app string) string  { return path.Join(Dir(app), "current") }
+func journalPath(app string) string  { return path.Join(Dir(app), "journal.jsonl") }
 
 // Save writes a snapshot. The write is atomic because a half-written snapshot is worse than a
 // missing one: rollback would run something that never existed.
@@ -226,7 +240,7 @@ func predecessor(ctx context.Context, r remote.Runner, app string, ids []string,
 	return prev, nil
 }
 
-// Prune keeps `keep` snapshots and their env files: first the releases a rollback walks back
+// Prune keeps `keep` snapshots with their env files and mounted files: first the releases a rollback walks back
 // through from the current one, then the newest of the rest. Age alone is not enough once a
 // rollback has happened: after v1, v2, v3, two rollbacks to v1 and a deploy of v4, the newest
 // three are v2, v3 and v4, and pruning by age would delete v1 — the release v4 was deployed over
@@ -251,7 +265,7 @@ func Prune(ctx context.Context, r remote.Runner, app, current string, keep int) 
 		if kept[id] {
 			continue
 		}
-		if _, err := r.Run(ctx, "rm", "-f", snapshotPath(app, id), EnvPath(app, id)); err != nil {
+		if _, err := r.Run(ctx, "rm", "-rf", snapshotPath(app, id), EnvPath(app, id), FilesDir(app, id)); err != nil {
 			return err
 		}
 	}

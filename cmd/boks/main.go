@@ -89,7 +89,11 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		if err != nil {
 			return err
 		}
-		o := deploy.Options{Env: env, Login: login, Stamp: now()}
+		files, err := cfg.FileContents()
+		if err != nil {
+			return err
+		}
+		o := deploy.Options{Env: env, Files: files, Login: login, Stamp: now()}
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return deploy.Run(ctx, r, out, cfg, rest[0], o)
 		})
