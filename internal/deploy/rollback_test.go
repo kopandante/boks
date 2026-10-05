@@ -324,11 +324,12 @@ func TestRollbackRestoresTheHealthcheckOfTheRelease(t *testing.T) {
 	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":5,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
 		"digest":"sha256:old","ports":[],"volumes":["data:/data"],"networks":[{"name":"boks-bot","aliases":["bot"]}],
 		"env_path":".boks/bot/bot-v1-1.env","healthcheck":{"cmd":"pg_isready","interval":"1s"}}`
-	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
+	today := parse(t, noPorts+"healthcheck: {cmd: \"true\", interval: 1500ms}\n")
+	if err := Rollback(context.Background(), f, io.Discard, today, "", quick()); err != nil {
 		t.Fatal(err)
 	}
 	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, " --health-cmd pg_isready --health-interval 1s ") {
-		t.Errorf("the restored copy must run the recorded check: %s", run)
+		t.Errorf("the restored copy must run the recorded check, not today's: %s", run)
 	}
 
 	g := botReleases("healthy")

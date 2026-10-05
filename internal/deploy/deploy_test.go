@@ -1666,7 +1666,7 @@ func TestRoutelessDeploysAStockImageWithAHealthcheckBlock(t *testing.T) {
 		t.Errorf("with a healthcheck block the image's own HEALTHCHECK does not matter: %v", f.calls)
 	}
 	run := f.calls[f.callAt("docker run")]
-	if !strings.Contains(run, " --health-cmd pg_isready -U postgres --health-interval 1s --health-start-period 2s ") {
+	if !strings.Contains(run, " --health-cmd pg_isready -U postgres --health-interval 1s --health-start-period 2s --health-start-interval 1s ") {
 		t.Errorf("the container must be started with the configured check, failures counted only after the deploy's wait: %s", run)
 	}
 	// The fake joins arguments with spaces, so the command's boundaries are checked on the arguments:

@@ -1173,7 +1173,10 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string) []string {
 		// in a row — 15s at the default interval — and waitHealthy gives up on the first unhealthy, so
 		// without it a copy that needs longer to come up than that would be refused well inside
 		// deploy_timeout. Failures inside the period do not count; the first success still ends it.
-		a = append(a, "--health-cmd", h.Cmd, "--health-interval", h.Interval, "--health-start-period", cfg.DeployTimeout)
+		// Inside the period docker checks at its own start interval, 5s unless told, which would put the
+		// first check past a deploy_timeout under 5s; it is the configured interval instead.
+		a = append(a, "--health-cmd", h.Cmd, "--health-interval", h.Interval,
+			"--health-start-period", cfg.DeployTimeout, "--health-start-interval", h.Interval)
 	}
 	if envPath != "" {
 		a = append(a, "--env-file", envPath)
