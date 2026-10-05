@@ -87,7 +87,7 @@
     {
       "id": "proxy",
       "type": "backend",
-      "label": "kamal-proxy",
+      "label": "Caddy",
       "sublabel": "домен → порт, TLS",
       "pos": [
         940,
@@ -248,7 +248,7 @@
       "id": "install-files",
       "from": "lego",
       "to": "certs",
-      "label": "boksd кладёт: 640, uid прокси",
+      "label": "boksd кладёт: 640, root",
       "fromSide": "right",
       "toSide": "left",
       "labelDy": -24
@@ -257,7 +257,7 @@
       "id": "reload",
       "from": "certs",
       "to": "proxy",
-      "label": "перечитывает при deploy или рестарте",
+      "label": "перечитывает при reload",
       "variant": "security",
       "fromSide": "top",
       "toSide": "bottom"
