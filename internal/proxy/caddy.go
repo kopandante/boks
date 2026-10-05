@@ -204,6 +204,22 @@ func Config(fragments []Fragment) ([]byte, error) {
 	if s := servers["https"]; s != nil && len(skip) > 0 {
 		s.AutoHTTPS = &autoHTTPS{SkipCertificates: skip}
 	}
+	// Plain HTTP for a TLS host is redirected to HTTPS, as kamal-proxy did. Caddy adds such redirects
+	// itself only while it manages a certificate for some host: with every TLS host under `cert:`
+	// it relies on a catch-all redirect it appends after the routes, which the 404 below would
+	// shadow. ACME's HTTP-01 challenges are answered before any route, so the redirect leaves them be.
+	if s := servers["http"]; s != nil {
+		var hosts []string
+		for _, e := range all {
+			if e.r.TLS && !slices.Contains(hosts, e.r.Host) {
+				hosts = append(hosts, e.r.Host)
+			}
+		}
+		if len(hosts) > 0 {
+			s.Routes = append(s.Routes, caddyRoute{Match: []match{{Host: hosts}}, Handle: []handler{{Handler: "static_response",
+				StatusCode: 308, Headers: map[string][]string{"Location": {"https://{http.request.host}{http.request.uri}"}}}}, Terminal: true})
+		}
+	}
 	// A host no route names gets 404, as it did from kamal-proxy: Caddy alone answers it with an
 	// empty 200, which reads as a working site that lost its content.
 	for _, s := range servers {
@@ -264,10 +280,12 @@ type (
 	handler struct {
 		Handler string `json:"handler"`
 		// reverse_proxy
-		Upstreams        []upstream    `json:"upstreams,omitempty"`
-		StreamCloseDelay string        `json:"stream_close_delay,omitempty"`
-		Transport        *transport    `json:"transport,omitempty"`
-		Headers          *proxyHeaders `json:"headers,omitempty"`
+		Upstreams        []upstream `json:"upstreams,omitempty"`
+		StreamCloseDelay string     `json:"stream_close_delay,omitempty"`
+		Transport        *transport `json:"transport,omitempty"`
+		// Headers is *proxyHeaders for reverse_proxy and the response's headers for static_response:
+		// Caddy names both "headers".
+		Headers any `json:"headers,omitempty"`
 		// rewrite
 		StripPathPrefix string          `json:"strip_path_prefix,omitempty"`
 		PathRegexp      []regexpReplace `json:"path_regexp,omitempty"`

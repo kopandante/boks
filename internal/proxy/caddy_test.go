@@ -161,8 +161,15 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 	if p, _ := json.Marshal(dig(https, "protocols")); string(p) != `["h1","h2"]` {
 		t.Errorf("want no HTTP/3 on a port whose udp is not published: %s", p)
 	}
-	if l := dig(http, "listen").([]any); l[0] != ":80" || len(dig(http, "routes").([]any)) != 2 {
-		t.Errorf("want the plain host alone on 80, then the 404: %v", http)
+	if l := dig(http, "listen").([]any); l[0] != ":80" || len(dig(http, "routes").([]any)) != 3 {
+		t.Errorf("want the plain host on 80, the TLS hosts' redirect, then the 404: %v", http)
+	}
+	// Caddy adds redirects of its own before the 404 only while it manages some certificate; with
+	// every TLS host under `cert:` it would not, so boks's redirect is what keeps plain HTTP for
+	// them from answering 404.
+	redir, _ := json.Marshal(dig(http, "routes").([]any)[1])
+	if want := `{"handle":[{"handler":"static_response","headers":{"Location":["https://{http.request.host}{http.request.uri}"]},"status_code":308}],"match":[{"host":["auto.example.com","w1.example.com","w2.example.com"]}],"terminal":true}`; string(redir) != want {
+		t.Errorf("want plain HTTP for the TLS hosts redirected:\n got %s\nwant %s", redir, want)
 	}
 	if s, _ := json.Marshal(dig(https, "automatic_https", "skip_certificates")); string(s) != `["w1.example.com","w2.example.com"]` {
 		t.Errorf("want the hosts under the certificate kept out of ACME: %s", s)
