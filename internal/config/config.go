@@ -55,7 +55,11 @@ var (
 	registryHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$`)
 	envNameRe      = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 	// signalRe is a signal as docker names it, written the one way that cannot be misread.
-	signalRe       = regexp.MustCompile(`^SIG[A-Z0-9]+$`)
+	signalRe = regexp.MustCompile(`^SIG[A-Z0-9]+$`)
+	// pathRe is a route prefix: absolute, segments of URL-safe characters, no trailing slash.
+	pathRe = regexp.MustCompile(`^(/[A-Za-z0-9._~!$&'()+,;=:@%-]+)+$`)
+	// headerRe is a header field name as HTTP defines a token, narrowed to what headers are written with.
+	headerRe       = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 	registryUserRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@+-]*$`)
 )
 
@@ -71,11 +75,29 @@ const minMemory = 6 << 20
 // container's `boks.ports` label and in the release snapshot a rollback reads back, so the
 // field names must survive a rename of the Go fields.
 type Port struct {
-	Name       string `yaml:"name" json:"name"`
-	Port       int    `yaml:"port" json:"port"`
+	Name string `yaml:"name" json:"name"`
+	Port int    `yaml:"port" json:"port"`
+	// Host is the domain the port is served on; `*.example.com` serves every name one label below it,
+	// and needs a `cert:` covering it, since HTTP-01 cannot issue a wildcard.
 	Host       string `yaml:"host" json:"host"`
 	HealthPath string `yaml:"health_path" json:"health_path"`
 	HealthPort int    `yaml:"health_port" json:"health_port"`
+	// Path serves only requests under this prefix — the path itself and anything below it — so ports,
+	// and apps, can share a host on different paths; empty is the whole host.
+	Path string `yaml:"path" json:"path,omitempty"`
+	// StripPath removes Path from the request before it reaches the app; PathRewrite puts another
+	// prefix in its place (`/api/cn/images` → `/img`). At most one of them.
+	StripPath   bool   `yaml:"strip_path" json:"strip_path,omitempty"`
+	PathRewrite string `yaml:"path_rewrite" json:"path_rewrite,omitempty"`
+	// Headers are set on the request to the app and on the response to the visitor; an empty value
+	// removes the header.
+	Headers *Headers `yaml:"headers" json:"headers,omitempty"`
+}
+
+// Headers changes headers on a port's way to the app and back.
+type Headers struct {
+	Request  map[string]string `yaml:"request" json:"request,omitempty"`
+	Response map[string]string `yaml:"response" json:"response,omitempty"`
 }
 
 // Network is a Docker network a container of the app joins, with the aliases it answers to there.
@@ -428,6 +450,13 @@ func (c *Config) validate() error {
 	if err := c.Cert.validate(); err != nil {
 		return err
 	}
+	// HTTP-01, which serves every other TLS host, cannot issue a wildcard: one is served with the
+	// certificate of `cert:` over DNS-01, or not with TLS.
+	for _, p := range c.Ports {
+		if strings.HasPrefix(p.Host, "*.") && c.TLS && !c.Cert.Covers(p.Host) {
+			return fmt.Errorf("ports[%s]: %s needs a cert: block whose domains include it — a wildcard cannot be issued over HTTP-01", p.Name, p.Host)
+		}
+	}
 	if err := c.validateRegistry(); err != nil {
 		return err
 	}
@@ -602,10 +631,10 @@ func (c *Config) validateLists() error {
 		}
 		// Two ports on one host would be two routes for one host: the proxy would send it to the
 		// first and never to the second.
-		if seenHost[p.Host] {
-			return fmt.Errorf("ports: duplicate host %q", p.Host)
+		if seenHost[p.Host+" "+p.Path] {
+			return fmt.Errorf("ports: duplicate host %q", p.Host+p.Path)
 		}
-		seenName[p.Name], seenHost[p.Host] = true, true
+		seenName[p.Name], seenHost[p.Host+" "+p.Path] = true, true
 	}
 	for _, v := range c.Volumes {
 		if err := validateVolume(v); err != nil {
@@ -665,6 +694,33 @@ func (p Port) validate() error {
 	}
 	if p.Host == "" {
 		return fmt.Errorf("ports[%s]: host is required", p.Name)
+	}
+	if rest, wild := strings.CutPrefix(p.Host, "*."); strings.Contains(rest, "*") || (!wild && strings.Contains(p.Host, "*")) || rest == "" {
+		return fmt.Errorf("ports[%s]: host %q — a wildcard is `*.` before a domain, once, such as *.example.com", p.Name, p.Host)
+	}
+	if p.Path != "" && !pathRe.MatchString(p.Path) {
+		return fmt.Errorf("ports[%s]: path %q must be an absolute prefix without a trailing slash, such as /api", p.Name, p.Path)
+	}
+	switch {
+	case (p.StripPath || p.PathRewrite != "") && p.Path == "":
+		return fmt.Errorf("ports[%s]: strip_path and path_rewrite change the path, and need path", p.Name)
+	case p.StripPath && p.PathRewrite != "":
+		return fmt.Errorf("ports[%s]: strip_path and path_rewrite both rewrite the path; give one", p.Name)
+	case p.PathRewrite != "" && !pathRe.MatchString(p.PathRewrite):
+		return fmt.Errorf("ports[%s]: path_rewrite %q must be an absolute prefix without a trailing slash, such as /img", p.Name, p.PathRewrite)
+	}
+	if h := p.Headers; h != nil {
+		for side, m := range map[string]map[string]string{"request": h.Request, "response": h.Response} {
+			for name := range m {
+				if !headerRe.MatchString(name) {
+					return fmt.Errorf("ports[%s]: headers.%s: %q is not a header name", p.Name, side, name)
+				}
+				// The proxy owns these (#48): a port that set them would hand the app what the visitor claims.
+				if l := strings.ToLower(name); strings.HasPrefix(l, "x-forwarded-") || l == "forwarded" {
+					return fmt.Errorf("ports[%s]: headers.%s: %s is set by the proxy from the connection and cannot be changed", p.Name, side, name)
+				}
+			}
+		}
 	}
 	return nil
 }

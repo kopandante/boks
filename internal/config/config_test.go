@@ -550,3 +550,57 @@ func TestParseSchedules(t *testing.T) {
 		}
 	}
 }
+
+// A port may serve a path of a host, rewrite it, change headers, or serve a wildcard — each in the
+// one form that cannot be misread.
+func TestParsePortRouting(t *testing.T) {
+	const app = "app: gw\nimage: x\nservers: [a]\n"
+	ok := app + `ports:
+  - {name: img, port: 8080, host: cars.example.com, path: /api/cn/images, path_rewrite: /img,
+     headers: {request: {Cookie: ""}, response: {Set-Cookie: "", X-Content-Type-Options: nosniff}}}
+  - {name: old, port: 8081, host: cars.example.com, path: /old, strip_path: true}
+  - {name: site, port: 3000, host: cars.example.com}
+`
+	cfg, err := Parse([]byte(ok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cfg.Ports[0]; p.Path != "/api/cn/images" || p.PathRewrite != "/img" || p.Headers.Request["Cookie"] != "" || p.Headers.Response["X-Content-Type-Options"] != "nosniff" {
+		t.Errorf("want the routing verbatim, got %+v", p)
+	}
+	wild := app + "tls: true\ncert: {domains: ['*.example.com'], dns: cloudflare, email: a@b.c}\nports: [{name: w, port: 1, host: '*.example.com'}]\n"
+	if _, err := Parse([]byte(wild)); err != nil {
+		t.Errorf("a wildcard under the cert must parse: %v", err)
+	}
+	if _, err := Parse([]byte(app + "ports: [{name: w, port: 1, host: '*.example.com'}]\n")); err != nil {
+		t.Errorf("a wildcard without TLS needs no certificate: %v", err)
+	}
+	port := func(extra string) string {
+		return app + "ports: [{name: p, port: 1, host: h.example.com, " + extra + "}]\n"
+	}
+	rejects := map[string]string{
+		port("path: api"):        "absolute prefix",
+		port("path: /api/"):      "absolute prefix",
+		port("path: '/a b'"):     "absolute prefix",
+		port("strip_path: true"): "need path",
+		port("path_rewrite: /x"): "need path",
+		port("path: /a, strip_path: true, path_rewrite: /b"):                                            "give one",
+		port("path: /a, path_rewrite: b"):                                                               "path_rewrite",
+		port("headers: {request: {'Bad Name': x}}"):                                                     "not a header name",
+		port("headers: {request: {X-Forwarded-For: x}}"):                                                "set by the proxy",
+		port("headers: {request: {Forwarded: x}}"):                                                      "set by the proxy",
+		app + "ports: [{name: a, port: 1, host: 'a.*.example.com'}]\n":                                  "wildcard",
+		app + "ports: [{name: a, port: 1, host: '*.*.example.com'}]\n":                                  "wildcard",
+		app + "tls: true\nports: [{name: w, port: 1, host: '*.example.com'}]\n":                         "needs a cert",
+		app + "ports: [{name: a, port: 1, host: h, path: /x}, {name: b, port: 2, host: h, path: /x}]\n": "duplicate host",
+	}
+	for in, want := range rejects {
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+	// One host on different paths is fine within an app.
+	if _, err := Parse([]byte(app + "ports: [{name: a, port: 1, host: h, path: /x}, {name: b, port: 2, host: h}]\n")); err != nil {
+		t.Errorf("one host on two paths must parse: %v", err)
+	}
+}

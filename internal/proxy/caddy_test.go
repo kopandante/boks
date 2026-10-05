@@ -154,14 +154,14 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 	}
 	m := decoded(t, b)
 	https, http := dig(m, "apps", "http", "servers", "https"), dig(m, "apps", "http", "servers", "http")
-	if l := dig(https, "listen").([]any); l[0] != ":443" || len(dig(https, "routes").([]any)) != 3 {
-		t.Errorf("want the three TLS hosts on 443: %v", https)
+	if l := dig(https, "listen").([]any); l[0] != ":443" || len(dig(https, "routes").([]any)) != 4 {
+		t.Errorf("want the three TLS hosts on 443, then the 404 for any other: %v", https)
 	}
 	if p, _ := json.Marshal(dig(https, "protocols")); string(p) != `["h1","h2"]` {
 		t.Errorf("want no HTTP/3 on a port whose udp is not published: %s", p)
 	}
-	if l := dig(http, "listen").([]any); l[0] != ":80" || len(dig(http, "routes").([]any)) != 1 {
-		t.Errorf("want the plain host alone on 80: %v", http)
+	if l := dig(http, "listen").([]any); l[0] != ":80" || len(dig(http, "routes").([]any)) != 2 {
+		t.Errorf("want the plain host alone on 80, then the 404: %v", http)
 	}
 	if s, _ := json.Marshal(dig(https, "automatic_https", "skip_certificates")); string(s) != `["w1.example.com","w2.example.com"]` {
 		t.Errorf("want the hosts under the certificate kept out of ACME: %s", s)
@@ -217,8 +217,9 @@ func TestConfigKeepsStreamsAcrossAReload(t *testing.T) {
 	}
 	for _, srv := range []string{"http", "https"} {
 		routes, _ := dig(decoded(t, b), "apps", "http", "servers", srv, "routes").([]any)
-		if len(routes) != 1 {
-			t.Fatalf("%s: want one route, got %v", srv, routes)
+		// The app's route comes first; what follows is boks's own (the 404 for any other host).
+		if len(routes) == 0 {
+			t.Fatalf("%s: want the app's route, got none", srv)
 		}
 		h := dig(routes[0], "handle").([]any)[0]
 		if d := dig(h, "stream_close_delay"); d != "24h" {
@@ -443,6 +444,9 @@ func TestConfigPutsAWildcardAfterTheExactHosts(t *testing.T) {
 	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
 	var hosts []any
 	for _, rt := range routes {
+		if dig(rt, "match") == nil {
+			continue // the 404 for any other host
+		}
 		hosts = append(hosts, dig(rt, "match").([]any)[0].(map[string]any)["host"].([]any)[0])
 	}
 	if len(hosts) != 3 || hosts[0] != "api.example.com" || hosts[1] != "zz.example.com" || hosts[2] != "*.example.com" {
@@ -463,10 +467,10 @@ func TestConfigWildcardWithoutTLSLeavesTheTLSHostsItCovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
-	last := dig(routes[len(routes)-1], "match").([]any)[0].(map[string]any)
+	last := matchFor(routes, "*.example.com")
 	not, _ := last["not"].([]any)
-	if last["host"].([]any)[0] != "*.example.com" || len(not) != 1 {
-		t.Fatalf("want the wildcard last, with one negated set: %v", last)
+	if last == nil || len(not) != 1 {
+		t.Fatalf("want the wildcard with one negated set: %v", routes)
 	}
 	got := fmt.Sprint(not[0].(map[string]any)["host"])
 	if got != "[API.example.com b.example.com]" {
@@ -505,11 +509,24 @@ func TestConfigWildcardWithTLSLeavesThePlainHostsItCovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)
-	last := dig(routes[len(routes)-1], "match").([]any)[0].(map[string]any)
+	last := matchFor(routes, "*.example.com")
 	not, _ := last["not"].([]any)
-	if last["host"].([]any)[0] != "*.example.com" || len(not) != 1 || fmt.Sprint(not[0].(map[string]any)["host"]) != "[api.example.com]" {
+	if last == nil || len(not) != 1 || fmt.Sprint(not[0].(map[string]any)["host"]) != "[api.example.com]" {
 		t.Errorf("want the TLS wildcard to leave out the plain exact host only: %v", last)
 	}
+}
+
+// matchFor is the matcher set of the route for host among routes — not the last route: boks's own
+// (the redirect, the 404 for any other host) come after the apps'.
+func matchFor(routes []any, host string) map[string]any {
+	for _, rt := range routes {
+		if m, ok := dig(rt, "match").([]any); ok {
+			if set := m[0].(map[string]any); set["host"] != nil && set["host"].([]any)[0] == host {
+				return set
+			}
+		}
+	}
+	return nil
 }
 
 // peek is a disk that keeps what the config Validate asked about said when Caddy was asked.
@@ -623,4 +640,74 @@ func index(calls []string, prefix string) int {
 		}
 	}
 	return -1
+}
+
+// Caddy takes the first route that matches: exact hosts come before wildcards, on one host the longer
+// path before the shorter and the bare host last, and whatever no route names gets 404 — which is
+// what kamal-proxy answered and not Caddy's own empty 200.
+func TestConfigOrdersRoutesSoTheMostSpecificWins(t *testing.T) {
+	b, err := Config([]Fragment{
+		{App: "site", Routes: []Route{{Host: "cars.example.com", Dial: "site:3000"}, {Host: "*.example.com", Dial: "site:3001"}}},
+		{App: "gw", Routes: []Route{{Host: "cars.example.com", Path: "/api/cn/images", Dial: "gw:8080"}}},
+		{App: "api", Routes: []Route{{Host: "api.example.com", Dial: "api:1"}, {Host: "cars.example.com", Path: "/api", Dial: "api:2"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any) {
+		m, _ := json.Marshal(r.(map[string]any)["match"])
+		got = append(got, string(m))
+	}
+	want := []string{
+		`[{"host":["api.example.com"]}]`,
+		`[{"host":["cars.example.com"],"path":["/api/cn/images","/api/cn/images/*"]}]`,
+		`[{"host":["cars.example.com"],"path":["/api","/api/*"]}]`,
+		`[{"host":["cars.example.com"]}]`,
+		`[{"host":["*.example.com"]}]`,
+		`null`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("routes in this order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// Host and path are unique together, across apps.
+	if _, err := Config([]Fragment{
+		{App: "a", Routes: []Route{{Host: "h.example.com", Path: "/x", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "H.example.com", Path: "/x", Dial: "b:1"}}},
+	}); err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
+		t.Errorf("want a refusal of one host and path routed twice, got %v", err)
+	}
+}
+
+// A route rewrites the path when it asks — strip the prefix, or put another in its place, measured on
+// boks-lab to keep the query — and changes headers on the request and the response; "" removes one.
+func TestConfigRewritesPathsAndHeaders(t *testing.T) {
+	b, err := Config([]Fragment{{App: "gw", Routes: []Route{
+		{Host: "cars.example.com", Path: "/api/cn/images", PathRewrite: "/img", Dial: "gw:8080",
+			Headers: &Headers{Request: map[string]string{"Cookie": ""}, Response: map[string]string{"Set-Cookie": "", "X-Content-Type-Options": "nosniff"}}},
+		{Host: "cars.example.com", Path: "/old", StripPath: true, Dial: "gw:8081"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
+	handle := func(i int) string {
+		h, _ := json.Marshal(routes[i].(map[string]any)["handle"])
+		return string(h)
+	}
+	if h := handle(0); h != `[{"handler":"rewrite","path_regexp":[{"find":"^/api/cn/images","replace":"/img"}]},`+
+		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"]},"response":{"delete":["Set-Cookie"],`+
+		`"set":{"X-Content-Type-Options":["nosniff"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
+		`"upstreams":[{"dial":"gw:8080"}]}]` {
+		t.Errorf("unexpected rewrite and headers: %s", h)
+	}
+	if h := handle(1); h != `[{"handler":"rewrite","strip_path_prefix":"/old"},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"]}},`+
+		`"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},"upstreams":[{"dial":"gw:8081"}]}]` {
+		t.Errorf("unexpected strip: %s", h)
+	}
+	// A path with regexp characters is matched literally.
+	q, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "h", Path: "/v1.0", PathRewrite: "/v", Dial: "a:1"}}}})
+	if !strings.Contains(string(q), `"find": "^/v1\\.0"`) {
+		t.Errorf("want the path quoted in the regexp: %s", q)
+	}
 }

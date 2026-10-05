@@ -1113,16 +1113,24 @@ func covered(cfg *config.Config) bool {
 func routesTo(cfg *config.Config, target string) []proxy.Route {
 	var routes []proxy.Route
 	for _, p := range cfg.Ports {
-		rt := proxy.Route{Host: p.Host, Dial: fmt.Sprintf("%s:%d", target, p.Port), TLS: cfg.TLS}
-		// Hosts outside the certificate keep the proxy's automatic HTTPS, so one app can mix a
-		// wildcard with plain HTTP-01 domains.
-		if cfg.Cert.Covers(p.Host) {
-			crt, key := cert.ServerPaths(cfg.Cert)
-			rt.Cert = &proxy.CertFiles{Certificate: crt, Key: key}
-		}
-		routes = append(routes, rt)
+		routes = append(routes, routeOf(p, fmt.Sprintf("%s:%d", target, p.Port), cfg.TLS, cfg.Cert))
 	}
 	return routes
+}
+
+// routeOf is the proxy's route for port p, dialled at dial: the one place a port becomes a route, for
+// a deploy and for a migration alike. Hosts outside the certificate keep the proxy's automatic HTTPS,
+// so one app can mix a wildcard with plain HTTP-01 domains.
+func routeOf(p config.Port, dial string, tls bool, c *config.Cert) proxy.Route {
+	rt := proxy.Route{Host: p.Host, Path: p.Path, StripPath: p.StripPath, PathRewrite: p.PathRewrite, Dial: dial, TLS: tls}
+	if c.Covers(p.Host) {
+		crt, key := cert.ServerPaths(c)
+		rt.Cert = &proxy.CertFiles{Certificate: crt, Key: key}
+	}
+	if p.Headers != nil {
+		rt.Headers = &proxy.Headers{Request: p.Headers.Request, Response: p.Headers.Response}
+	}
+	return rt
 }
 
 // defaultHealthPath is kamal-proxy's, so an app that relied on its default is checked the same way.

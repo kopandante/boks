@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -52,10 +53,26 @@ const (
 // server is the record of what the proxy serves.
 type Route struct {
 	Host string `json:"host"`
-	Dial string `json:"dial"`
-	TLS  bool   `json:"tls"`
+	// Path narrows the route to requests under a prefix — the path itself and anything below it; empty
+	// is the whole host. Routes of one host, from one app or several, differ by path.
+	Path string `json:"path,omitempty"`
+	// StripPath removes Path before the request reaches the app; PathRewrite puts another prefix in
+	// its place. At most one of them is set.
+	StripPath   bool   `json:"strip_path,omitempty"`
+	PathRewrite string `json:"path_rewrite,omitempty"`
+	Dial        string `json:"dial"`
+	TLS         bool   `json:"tls"`
 	// Cert is the certificate file pair of a host under `cert:`; nil leaves a TLS host to Caddy's ACME.
 	Cert *CertFiles `json:"cert,omitempty"`
+	// Headers are set on the request to the app and the response to the visitor; "" removes one.
+	Headers *Headers `json:"headers,omitempty"`
+}
+
+// Headers changes headers on the way to the app (Request) and back to the visitor (Response); an
+// empty value removes the header.
+type Headers struct {
+	Request  map[string]string `json:"request,omitempty"`
+	Response map[string]string `json:"response,omitempty"`
 }
 
 // CertFiles are the paths of a certificate and its key as the proxy sees them.
@@ -100,23 +117,30 @@ func Config(fragments []Fragment) ([]byte, error) {
 	owner := map[string]string{}
 	for _, f := range fragments {
 		for _, r := range f.Routes {
-			host := strings.ToLower(r.Host)
-			if o, ok := owner[host]; ok {
-				return nil, fmt.Errorf("host %s is routed by both %s and %s", r.Host, o, f.App)
+			key := strings.ToLower(r.Host) + " " + r.Path
+			if o, ok := owner[key]; ok {
+				return nil, fmt.Errorf("host %s%s is routed by both %s and %s", r.Host, r.Path, o, f.App)
 			}
-			owner[host] = f.App
+			owner[key] = f.App
 			all = append(all, entry{f.App, r})
 		}
 	}
-	// Hosts are unique, so ordering by host alone is total, whatever order the fragments came in. A
-	// wildcard goes after every exact host: Caddy takes the first route that matches, and kamal-proxy
-	// served an exact host before a wildcard that also covers it.
+	// Caddy takes the first route that matches, so the order is the routing rule: exact hosts before
+	// wildcards (`*` sorts before letters, and `*.example.com` would otherwise take `api.example.com`
+	// from the app that names it), and on one host the longer path before the shorter, the bare host
+	// last. Host and path are unique together, so the order is total whatever order the fragments came in.
 	sort.Slice(all, func(i, j int) bool {
-		wi, wj := strings.HasPrefix(all[i].r.Host, "*"), strings.HasPrefix(all[j].r.Host, "*")
-		if wi != wj {
-			return wj
+		a, b := all[i].r, all[j].r
+		if wa, wb := strings.HasPrefix(a.Host, "*."), strings.HasPrefix(b.Host, "*."); wa != wb {
+			return wb
 		}
-		return all[i].r.Host < all[j].r.Host
+		if a.Host != b.Host {
+			return a.Host < b.Host
+		}
+		if len(a.Path) != len(b.Path) {
+			return len(a.Path) > len(b.Path)
+		}
+		return a.Path < b.Path
 	})
 
 	// A wildcard and an exact host it covers can sit on different servers, one with TLS and one
@@ -151,7 +175,7 @@ func Config(fragments []Fragment) ([]byte, error) {
 			}
 			servers[name] = s
 		}
-		m := match{Host: []string{e.r.Host}}
+		m := routeMatch(e.r)
 		if suffix, ok := strings.CutPrefix(strings.ToLower(e.r.Host), "*"); ok {
 			var covered []string
 			for _, h := range exact[!e.r.TLS] {
@@ -164,15 +188,8 @@ func Config(fragments []Fragment) ([]byte, error) {
 				m.Not = []match{{Host: covered}}
 			}
 		}
-		s.Routes = append(s.Routes, caddyRoute{
-			Match: []match{m},
-			Handle: []handler{{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: e.r.Dial}}, StreamCloseDelay: streamCloseDelay,
-				Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
-				// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on.
-				Headers: &proxyHeaders{Request: &headerOps{Delete: []string{"Forwarded"}}}}},
-			Terminal: true,
-		})
-		if e.r.TLS && e.r.Cert != nil {
+		s.Routes = append(s.Routes, caddyRoute{Match: []match{m}, Handle: routeHandle(e.r), Terminal: true})
+		if e.r.TLS && e.r.Cert != nil && !slices.Contains(skip, e.r.Host) {
 			// Left out of ACME by name rather than by Caddy noticing the loaded certificate covers it:
 			// what Caddy counts as covered is its rule, and an attempt at HTTP-01 for a host behind a
 			// wildcard is a failure in the log every few minutes, or a rate limit spent.
@@ -185,6 +202,11 @@ func Config(fragments []Fragment) ([]byte, error) {
 	}
 	if s := servers["https"]; s != nil && len(skip) > 0 {
 		s.AutoHTTPS = &autoHTTPS{SkipCertificates: skip}
+	}
+	// A host no route names gets 404, as it did from kamal-proxy: Caddy alone answers it with an
+	// empty 200, which reads as a working site that lost its content.
+	for _, s := range servers {
+		s.Routes = append(s.Routes, caddyRoute{Handle: []handler{{Handler: "static_response", StatusCode: 404}}, Terminal: true})
 	}
 	c := caddyConfig{Admin: admin{Listen: "localhost:2019"}, Apps: apps{HTTP: httpApp{Servers: servers}}}
 	if len(files) > 0 {
@@ -229,30 +251,43 @@ type (
 		SkipCertificates []string `json:"skip_certificates,omitempty"`
 	}
 	caddyRoute struct {
-		Match    []match   `json:"match"`
+		Match    []match   `json:"match,omitempty"`
 		Handle   []handler `json:"handle"`
 		Terminal bool      `json:"terminal"`
 	}
 	match struct {
 		Host []string `json:"host,omitempty"`
+		Path []string `json:"path,omitempty"`
 		Not  []match  `json:"not,omitempty"`
 	}
 	handler struct {
-		Handler          string        `json:"handler"`
-		Upstreams        []upstream    `json:"upstreams"`
+		Handler string `json:"handler"`
+		// reverse_proxy
+		Upstreams        []upstream    `json:"upstreams,omitempty"`
 		StreamCloseDelay string        `json:"stream_close_delay,omitempty"`
 		Transport        *transport    `json:"transport,omitempty"`
 		Headers          *proxyHeaders `json:"headers,omitempty"`
+		// rewrite
+		StripPathPrefix string          `json:"strip_path_prefix,omitempty"`
+		PathRegexp      []regexpReplace `json:"path_regexp,omitempty"`
+		// static_response
+		StatusCode int `json:"status_code,omitempty"`
 	}
 	proxyHeaders struct {
-		Request *headerOps `json:"request,omitempty"`
+		Request  *headerOps `json:"request,omitempty"`
+		Response *headerOps `json:"response,omitempty"`
 	}
 	headerOps struct {
-		Delete []string `json:"delete,omitempty"`
+		Set    map[string][]string `json:"set,omitempty"`
+		Delete []string            `json:"delete,omitempty"`
 	}
 	transport struct {
 		Protocol              string `json:"protocol"`
 		ResponseHeaderTimeout string `json:"response_header_timeout,omitempty"`
+	}
+	regexpReplace struct {
+		Find    string `json:"find"`
+		Replace string `json:"replace"`
 	}
 	upstream struct {
 		Dial string `json:"dial"`
@@ -268,6 +303,65 @@ type (
 		Key         string `json:"key"`
 	}
 )
+
+// routeMatch is the host and, for a route under a path, the path itself and everything below it —
+// not every path that merely starts with the same letters (`/img` must not take `/images`).
+func routeMatch(r Route) match {
+	m := match{Host: []string{r.Host}}
+	if r.Path != "" {
+		m.Path = []string{r.Path, r.Path + "/*"}
+	}
+	return m
+}
+
+// routeHandle rewrites the path if the route asks, then proxies with its header changes.
+func routeHandle(r Route) []handler {
+	var hs []handler
+	switch {
+	case r.StripPath:
+		hs = append(hs, handler{Handler: "rewrite", StripPathPrefix: r.Path})
+	case r.PathRewrite != "":
+		hs = append(hs, handler{Handler: "rewrite", PathRegexp: []regexpReplace{{Find: "^" + regexp.QuoteMeta(r.Path), Replace: r.PathRewrite}}})
+	}
+	// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on; the
+	// port's own header changes come after.
+	req, resp := &headerOps{}, (*headerOps)(nil)
+	if r.Headers != nil {
+		if o := ops(r.Headers.Request); o != nil {
+			req = o
+		}
+		resp = ops(r.Headers.Response)
+	}
+	req.Delete = append([]string{"Forwarded"}, req.Delete...)
+	rp := handler{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: r.Dial}}, StreamCloseDelay: streamCloseDelay,
+		Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
+		Headers:   &proxyHeaders{Request: req, Response: resp}}
+	return append(hs, rp)
+}
+
+// ops turns name→value into Caddy's set and delete lists, in a stable order: "" deletes.
+func ops(h map[string]string) *headerOps {
+	if len(h) == 0 {
+		return nil
+	}
+	o := &headerOps{}
+	names := make([]string, 0, len(h))
+	for n := range h {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if h[n] == "" {
+			o.Delete = append(o.Delete, n)
+			continue
+		}
+		if o.Set == nil {
+			o.Set = map[string][]string{}
+		}
+		o.Set[n] = []string{h[n]}
+	}
+	return o
+}
 
 // Fragments reads the routes of every app from the server, sorted by app. A server without any has
 // none, which is an answer; a failed read is an error, not an empty proxy.
