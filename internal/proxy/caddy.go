@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -587,12 +588,14 @@ func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment
 	return true, nil
 }
 
-// sameRoutes compares two route lists; nil and empty are the same: no routes.
+// sameRoutes compares two route lists field by field; nil and empty are the same: no routes. Every
+// field counts: a fragment that differs only in a path or a header would otherwise stay behind the
+// applied config, and the next run of any app would assemble the old routes from it.
 func sameRoutes(a, b []Route) bool {
-	return slices.EqualFunc(a, b, func(x, y Route) bool {
-		return x.Host == y.Host && x.Dial == y.Dial && x.TLS == y.TLS &&
-			(x.Cert == nil) == (y.Cert == nil) && (x.Cert == nil || *x.Cert == *y.Cert)
-	})
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // Reload makes the proxy load its config again although it has not changed — what a certificate

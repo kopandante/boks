@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -301,6 +302,31 @@ func TestSetRoutesCatchesUpALaggingFragment(t *testing.T) {
 	reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
 	if err != nil || reloaded || d.ran("docker exec") || d.files[Dir+"/routes/demo.json"] == "" {
 		t.Errorf("want the fragment written and no reload: %v %v %v", reloaded, err, d.calls)
+	}
+}
+
+// A lagging fragment that differs from the new routes only in what C2–C4 added — the path, the
+// rewrite, a header — is still caught up: it is what the next run of any app assembles from.
+func TestSetRoutesCatchesUpAFragmentThatDiffersOnlyInRouting(t *testing.T) {
+	routed := []Route{{Host: "demo.example.com", Path: "/api", StripPath: true, Dial: "demo:3000",
+		Headers: &Headers{Response: map[string]string{"X-Content-Type-Options": "nosniff"}}}}
+	for name, old := range map[string][]Route{
+		"path":    {{Host: "demo.example.com", Path: "/v1", StripPath: true, Dial: "demo:3000", Headers: routed[0].Headers}},
+		"strip":   {{Host: "demo.example.com", Path: "/api", Dial: "demo:3000", Headers: routed[0].Headers}},
+		"headers": {{Host: "demo.example.com", Path: "/api", StripPath: true, Dial: "demo:3000"}},
+	} {
+		d := newDisk()
+		body, _ := Config([]Fragment{{App: "demo", Routes: routed}})
+		d.files[Dir+"/caddy.json"] = string(body)
+		frag, _ := json.MarshalIndent(Fragment{App: "demo", Routes: old}, "", "  ")
+		d.files[Dir+"/routes/demo.json"] = string(frag) + "\n"
+		if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", routed); err != nil {
+			t.Fatal(err)
+		}
+		fs, _ := Fragments(context.Background(), d)
+		if !reflect.DeepEqual(Of(fs, "demo"), routed) {
+			t.Errorf("%s: want the fragment caught up, got %+v", name, Of(fs, "demo"))
+		}
 	}
 }
 
