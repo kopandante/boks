@@ -420,8 +420,8 @@ func TestRoutelessRefusesAnImageWithoutHealthcheck(t *testing.T) {
 		f := routelessFake("healthy")
 		f.out["docker image inspect"] = declared
 		err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
-		if err == nil || !strings.Contains(err.Error(), "HEALTHCHECK") {
-			t.Fatalf("%q: want a refusal naming HEALTHCHECK, got %v", declared, err)
+		if err == nil || !strings.Contains(err.Error(), "HEALTHCHECK") || !strings.Contains(err.Error(), "healthcheck block to boks.yml") {
+			t.Fatalf("%q: want a refusal naming both remedies, the config's block and the image's HEALTHCHECK, got %v", declared, err)
 		}
 		if f.has("docker stop") || f.has("docker run") {
 			t.Errorf("%q: the running copy must not be touched: %v", declared, f.calls)

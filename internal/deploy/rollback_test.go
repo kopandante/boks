@@ -347,8 +347,8 @@ func TestRollbackRefusesAHealthcheckTheDeployTimeoutCannotWaitFor(t *testing.T) 
 	f := botReleases("healthy")
 	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":5,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
 		"digest":"sha256:old","ports":[],"volumes":["data:/data"],"networks":[{"name":"boks-bot","aliases":["bot"]}],
-		"env_path":".boks/bot/bot-v1-1.env","healthcheck":{"cmd":"pg_isready","interval":"5s"}}`
-	cfg := parse(t, noPorts)
+		"env_path":".boks/bot/bot-v1-1.env","healthcheck":{"cmd":"pg_isready","interval":"2s"}}`
+	cfg := parse(t, noPorts) // deploy_timeout 2s: equal is not shorter
 	if _, err := CheckRollback(context.Background(), f, cfg, ""); err == nil || !strings.Contains(err.Error(), "raise deploy_timeout") {
 		t.Errorf("the check must refuse, got %v", err)
 	}

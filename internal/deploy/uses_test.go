@@ -88,8 +88,9 @@ func TestADependencyThatCannotBeReachedRefusesTheDeploy(t *testing.T) {
 		if err == nil || !changedNothing(f) {
 			t.Errorf("%s: want a refusal before any change, got %v: %v", name, err, f.calls)
 		}
-		if name == "no HEALTHCHECK" && (err == nil || !strings.Contains(err.Error(), "has no HEALTHCHECK")) {
-			t.Errorf("an image without a health check is named as that: %v", err)
+		if name == "no HEALTHCHECK" && (err == nil || !strings.Contains(err.Error(), "has no HEALTHCHECK") ||
+			!strings.Contains(err.Error(), "healthcheck block to its boks.yml")) {
+			t.Errorf("an image without a health check is named as that, with both remedies: %v", err)
 		}
 	}
 	// A stopped copy beside the healthy one answers nothing and is no obstacle.
