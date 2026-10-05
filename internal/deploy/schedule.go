@@ -17,7 +17,9 @@ import (
 // socket, and a container's labels do not say which copy of an app is the one that serves. Cron
 // fires the script; the script finds the serving copy and the release's command, and runs it there.
 
-// runnerPath is the script cron calls, `boks-job <app> <job>`.
+// runnerPath is the script cron calls, `sh boks-job <app> <job>`. Cron runs it through `sh`, so it
+// needs no execute bit: the script is shared by every app on the server, and a rewrite that lands
+// before a separate chmod — or a run cut between the two — would stop the jobs of all of them.
 const runnerPath = ".boks/bin/boks-job"
 
 // runner finds the copy that serves from release.ServingPath — the release and its container,
@@ -86,7 +88,7 @@ func cronBlock(app string, schedules []config.Schedule) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# boks:%s begin\n", app)
 	for _, s := range schedules {
-		fmt.Fprintf(&b, "%s $HOME/%s %s %s\n", strings.Join(strings.Fields(s.Cron), " "), runnerPath, app, s.Name)
+		fmt.Fprintf(&b, "%s sh $HOME/%s %s %s\n", strings.Join(strings.Fields(s.Cron), " "), runnerPath, app, s.Name)
 	}
 	fmt.Fprintf(&b, "# boks:%s end\n", app)
 	return b.String()
@@ -114,9 +116,6 @@ func applySchedules(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 		return nil
 	}
 	if err := remote.UploadAtomic(ctx, r, []byte(runner), runnerPath); err != nil {
-		return err
-	}
-	if _, err := r.Run(ctx, "chmod", "0700", runnerPath); err != nil {
 		return err
 	}
 	if err := remote.UploadAtomic(ctx, r, []byte(block), blockPath); err != nil {
