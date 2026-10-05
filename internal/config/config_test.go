@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -432,8 +433,9 @@ func TestFileContents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].Name == got[1].Name || string(got[0].Body) != "A" || got[1].Target != "/etc/b.conf" {
-		t.Errorf("want two files under distinct names, got %+v", got)
+	want := []FileContent{{Name: "0-site.conf", Target: "/etc/a.conf", Body: []byte("A")}, {Name: "1-site.conf", Target: "/etc/b.conf", Body: []byte("B")}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("want each file under a distinct name with its own body and target, got %+v", got)
 	}
 	cfg.Files = []string{"missing.conf:/etc/m.conf"}
 	if _, err := cfg.FileContents(); err == nil || !strings.Contains(err.Error(), "missing.conf") {
