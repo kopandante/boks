@@ -495,6 +495,43 @@ func TestValidateChangesNothing(t *testing.T) {
 	}
 }
 
+// peek is a disk that keeps what the config Validate asked about said when Caddy was asked.
+type peek struct {
+	*disk
+	asked string
+}
+
+func (p *peek) Run(ctx context.Context, args ...string) (string, error) {
+	if strings.HasPrefix(strings.Join(args, " "), "docker exec boks-proxy caddy validate") {
+		p.asked = p.files[Dir+"/caddy.check.json"]
+	}
+	return p.disk.Run(ctx, args...)
+}
+
+// What Caddy is asked about is the config the reload would load: the app's new routes in place of its
+// old ones, and every other app's routes, certificate files included.
+func TestValidateAsksAboutTheConfigTheReloadWouldLoad(t *testing.T) {
+	d := newDisk()
+	certified := []Route{{Host: "w.example.com", Dial: "other:80", TLS: true, Cert: &CertFiles{Certificate: "/certs/boks/w.crt", Key: "/certs/boks/w.key"}}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", certified); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}); err != nil {
+		t.Fatal(err)
+	}
+	p := &peek{disk: d}
+	if err := Validate(context.Background(), p, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	want, err := Config([]Fragment{{App: "demo", Routes: web}, {App: "other", Routes: certified}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.asked != string(want) {
+		t.Errorf("Caddy was asked about\n%s\nwant\n%s", p.asked, want)
+	}
+}
+
 // A host another app holds is refused before anything changes.
 func TestCheckHostsRefusesAnotherAppsHost(t *testing.T) {
 	d := newDisk()

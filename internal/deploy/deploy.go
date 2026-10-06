@@ -387,7 +387,7 @@ func unrecorded(err error, again, name string, old []container) error {
 func keptOld(err error, again string, old []container) error {
 	return fmt.Errorf("the new version is up, but removing the app's routes from the proxy failed: %w\n"+
 		"the previous containers %v were not removed, so no route points at a deleted container; "+
-		"check `boks proxy list` and run `%s` again",
+		"run `%s` again (until then the proxy may still serve the app's routes, which `boks proxy list` no longer shows)",
 		err, names(old), again)
 }
 
