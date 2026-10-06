@@ -91,7 +91,12 @@ type Fragment struct {
 // boks of C1 reads the fragments as one stream of route objects and stops at the number with an error:
 // it would otherwise drop the paths, rewrites and header rules it does not know and reload the proxy
 // without them. A boks that finds a format newer than its own refuses the same way.
-const FragmentFormat = 2
+//
+// Format 3 is the server's policy (C5): a boks of format 2 would assemble the config without it and
+// drop the bot filter on its next reload. `boks server apply` puts a file holding the format alone
+// among the fragments (policyMarker), so a server with a policy refuses that boks even before any app
+// is deployed again.
+const FragmentFormat = 3
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 

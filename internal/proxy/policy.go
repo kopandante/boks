@@ -50,6 +50,11 @@ type BotAllow struct {
 	UserAgent string   `json:"user_agent,omitempty"`
 }
 
+// policyMarker sits among the fragments and holds FragmentFormat alone: an older boks reading the
+// fragments stops at it rather than reload the proxy without the policy. No app's name starts with an
+// underscore.
+func policyMarker() string { return path.Join(Dir, "routes", "_server.json") }
+
 func policyPath() string         { return path.Join(ServerDir, "policy.json") }
 func historyPath(rev int) string { return path.Join(ServerDir, "history", strconv.Itoa(rev)+".json") }
 
@@ -152,6 +157,9 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	}
 	if _, err := Config(p, fs); err != nil {
 		return err
+	}
+	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", FragmentFormat), policyMarker()); err != nil {
+		return fmt.Errorf("marking the server's routes for this boks: %w", err)
 	}
 	if err := remote.UploadAtomic(ctx, r, marshal(p), policyPath()); err != nil {
 		return fmt.Errorf("recording the server's policy: %w", err)
