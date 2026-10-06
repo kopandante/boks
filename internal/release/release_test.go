@@ -201,6 +201,11 @@ func TestUnfinishedPicksTheNewestOpenEntry(t *testing.T) {
 }
 
 func TestSaveWritesTheFormatVersion(t *testing.T) {
+	// 9 is the first format with a port's path, rewrite and headers: a boks reading 8 must refuse
+	// such a release rather than route its paths to the whole host.
+	if FormatVersion < 9 {
+		t.Errorf("format %d cannot carry routing by path", FormatVersion)
+	}
 	f := newFake()
 	if err := Save(context.Background(), f, Snapshot{ID: "demo-v1-1", App: "demo"}); err != nil {
 		t.Fatal(err)
