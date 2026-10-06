@@ -39,6 +39,10 @@ const usage = `usage: boks [-f boks.yml] <command>
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
   cert renew       same, but lego skips the run unless the certificate is due (safe in a cron)
   cert status      subject and expiry of the certificate each server currently serves
+  server install <server.yml>
+                   make the servers it lists ready for boks — Docker, cron, flock, the SSH user
+                   in group docker — and start the proxy; refuses, before any change, a server
+                   it cannot share (another proxy on 80/443, Swarm, an unknown firewall)
   server apply <server.yml>
                    apply the server's policy (the bot filter) to the servers it lists; the
                    file's revision must be the one after the highest each server applied
@@ -387,7 +391,7 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 
 func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) < 2 {
-		return fmt.Errorf("server needs one of: apply <server.yml>, rollback <server.yml> <revision>, status <server.yml>")
+		return fmt.Errorf("server needs one of: install <server.yml>, apply <server.yml>, rollback <server.yml> <revision>, status <server.yml>")
 	}
 	sc, err := config.LoadServer(args[1])
 	if err != nil {
@@ -414,7 +418,26 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 	}
 	o := deploy.Options{Now: now}
 	switch {
+	case args[0] == "install" && len(args) == 2:
+		if err := askAll(func(ctx context.Context, r remote.Runner) error {
+			_, err := deploy.CheckInstall(ctx, r)
+			return err
+		}); err != nil {
+			return err
+		}
+		for _, s := range sc.Servers {
+			fmt.Fprintf(out, "== %s\n", s)
+			// A user just added to group docker has it only in a new login, not on a shared connection.
+			fresh := func() remote.Runner { return remote.SSH{Host: s} }
+			if err := deploy.Install(ctx, connect(s), fresh, out, config.DefaultProxyImage, o); err != nil {
+				return fmt.Errorf("%s: %w", s, err)
+			}
+		}
+		return nil
 	case args[0] == "apply" && len(args) == 2:
+		if sc.Revision < 1 {
+			return fmt.Errorf("%s: revision: required for apply, a whole number from 1", args[1])
+		}
 		next := policyOf(sc)
 		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next) }); err != nil {
 			return err
