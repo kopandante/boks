@@ -548,7 +548,9 @@ SSH остаётся ровно для того, без чего API не сущ
 - `daemon.json` или флаг dockerd задаёт `iptables: false` или `bridge: none`;
 - nftables включён с `flush ruleset`.
 
-Чужую инфраструктуру boks не мигрирует.
+На Debian 12 пакет `docker.io` — 20.10, поэтому там Docker Engine ставится заранее из репозитория
+Docker (docs.docker.com/engine/install), и уже потом `boks server install`; с пустого сервера одной
+командой — Ubuntu 22.04+ и Debian 13+. Чужую инфраструктуру boks не мигрирует.
 
 Затем, под замком допуска и с записью в `.boks/_server/journal.jsonl`, факты перечитываются и
 выполняются шаги:
