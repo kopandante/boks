@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,6 +49,7 @@ dockerup=yes
 api=1.47
 swarm=inactive
 running=1
+proxyup=yes
 network=boks-web
 ports=boks-proxy 0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp
 listen=LISTEN 0 4096 0.0.0.0:80 0.0.0.0:* users:(("docker-proxy",pid=812,fd=7))
@@ -305,8 +307,92 @@ func TestInstallTwiceChangesNothing(t *testing.T) {
 			t.Errorf("a ready server changed: %s", c)
 		}
 	}
-	if len(f.uploads) > 0 || len(f.appends) > 0 {
-		t.Errorf("want nothing written, not even the journal: %v %v", f.uploads, f.appends)
+	if len(f.uploads) > 0 || len(f.appends) > 0 || len(f.stdin) > 0 {
+		t.Errorf("want nothing written, not even the journal: %v %v %v", f.uploads, f.appends, f.stdin)
+	}
+	// The running proxy is left as it is.
+	for _, c := range fresh.calls {
+		for _, change := range []string{"docker create", "docker run", "docker start", "docker network create", "docker rm"} {
+			if strings.HasPrefix(c, change) {
+				t.Errorf("a ready server's proxy changed: %s", c)
+			}
+		}
+	}
+	if len(fresh.uploads) > 0 || len(fresh.appends) > 0 || len(fresh.stdin) > 0 {
+		t.Errorf("the new login wrote: %v %v %v", fresh.uploads, fresh.appends, fresh.stdin)
+	}
+}
+
+// A server prepared but without its proxy — a first run that failed pulling it — gets the proxy as a
+// change of its own: journaled, and not reported as nothing to change.
+func TestInstallJournalsAProxyBootAlone(t *testing.T) {
+	ready := strings.Replace(readyNoble, "proxyup=yes\n", "", 1) + daemonLine(`{"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"},"default-address-pools":[{"base":"10.240.0.0/16","size":24}]}`)
+	f, fresh := installFake(ready), installFake("")
+	var log strings.Builder
+	if err := Install(context.Background(), f, func() remote.Runner { return fresh }, &log, "caddy:2.11.7-alpine", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if j := f.appends[serverLog]; !strings.Contains(j, `"action":"server install"`) || !strings.Contains(j, `"result":"ok"`) || strings.Contains(log.String(), "nothing to change") {
+		t.Errorf("journal %s, log %s", j, log.String())
+	}
+	if f.has("apt-get") || f.has("sudo -n env") {
+		t.Errorf("a prepared server ran apt: %v", f.calls)
+	}
+}
+
+// A fresh image may ship no package index: the docker.io version is read after apt-get update, and an
+// old one is still refused before any change.
+func TestInstallReadsAnUnknownCandidateAfterUpdate(t *testing.T) {
+	facts := strings.Replace(emptyNoble, "candidate=27.5.1-0ubuntu3~24.04.2", "candidate=", 1)
+	if _, err := plan(t, facts); err != nil {
+		t.Fatalf("an empty index refused before apt-get update: %v", err)
+	}
+	for candidate, ok := range map[string]bool{"29.1.3-0ubuntu3~24.04.2": true, "24.0.7-0ubuntu4": false, "": false} {
+		f, fresh := installFake(facts), installFake("")
+		f.out["sh -c "+candidateScript] = candidate
+		err := install(f, fresh)
+		update, read, daemon := f.callAt("env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update"), f.callAt("sh -c "+candidateScript), f.writeAt("/etc/docker/daemon.json", "")
+		if ok {
+			if err != nil || update < 0 || read < update || daemon < read {
+				t.Errorf("%q: got %v; update %d read %d daemon.json %d", candidate, err, update, read, daemon)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), "older than Docker 25") || len(f.uploads) > 0 || len(f.appends) > 0 || f.has("env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install") || !f.has(admitGive("_proxy")) {
+			t.Errorf("%q: want a refusal with nothing changed and the lock given back, got %v; %v", candidate, err, f.calls)
+		}
+	}
+}
+
+// dockerd restarts right after daemon.json is written: a step failing later must not leave the keys in
+// the file and the daemon without them.
+func TestInstallRestartsDockerRightAfterTheWrite(t *testing.T) {
+	idle := strings.NewReplacer("running=1\n", "running=0\n", "network=boks-web\n", "", "crontab=yes\n", "").Replace(readyNoble)
+	f, fresh := installFake(idle), installFake("")
+	f.fail["sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install"] = errors.New("E: broken")
+	if err := install(f, fresh); err == nil {
+		t.Fatal("want the apt failure")
+	}
+	restart := f.callAt("sudo -n systemctl restart docker")
+	if restart < 0 || f.callAt("sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install") < restart {
+		t.Errorf("want dockerd restarted before apt: %v", f.calls)
+	}
+}
+
+// A daemon.json cut short on the way is not moved into place: its length is checked first.
+func TestWriteRootChecksTheLength(t *testing.T) {
+	f := newFake()
+	body := []byte(`{"log-driver": "json-file"}` + "\n")
+	if err := writeRoot(context.Background(), f, []string{"sudo", "-n"}, body, "/etc/docker/daemon.json", true); err != nil {
+		t.Fatal(err)
+	}
+	for cmd := range f.stdin {
+		if want := "-eq " + strconv.Itoa(len(body)) + " ]"; !strings.Contains(cmd, want) || strings.Index(cmd, want) > strings.Index(cmd, " mv ") {
+			t.Errorf("want the length checked before the move: %s", cmd)
+		}
+	}
+	if len(f.stdin) != 1 {
+		t.Errorf("writes: %v", f.stdin)
 	}
 }
 

@@ -47,13 +47,14 @@ command -v flock >/dev/null && echo flock=yes
 id -nG "$(id -un)" | tr ' ' '\n' | grep -qx docker && echo indocker=yes
 echo "dockerenabled=$(systemctl is-enabled docker 2>/dev/null)"
 echo "cronactive=$(systemctl is-active cron 2>/dev/null)"
-if ! command -v dockerd >/dev/null; then echo "candidate=$(apt-cache policy docker.io 2>/dev/null | awk '/Candidate:/{print $2}')"; fi
+if ! command -v dockerd >/dev/null; then echo "candidate=$(` + candidateScript + `)"; fi
 if $S docker info >/dev/null 2>&1; then
   echo dockerup=yes
   echo "api=$($S docker version --format '{{.Server.APIVersion}}' 2>/dev/null)"
   echo "swarm=$($S docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null)"
   $S docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless && echo rootless=yes
   echo "running=$($S docker ps -q | wc -l | tr -d ' ')"
+  $S docker ps -q --filter name=^` + proxy.Container + `$ --filter label=boks.proxy=` + proxy.Kind + ` | grep -q . && echo proxyup=yes
   $S docker network ls --format '{{.Name}}' | grep -vxE 'bridge|host|none' | sed 's/^/network=/'
   $S docker ps --format '{{.Names}} {{.Ports}}' | sed 's/^/ports=/'
 fi
@@ -68,6 +69,9 @@ fi
 ip -4 route show table all 2>/dev/null | awk '{print "route=" $1 " " $2}'
 `
 
+// candidateScript reads the version apt would install of docker.io, empty when it has none.
+const candidateScript = `apt-cache policy docker.io 2>/dev/null | awk '/Candidate:/{print $2}'`
+
 // hostFacts is what factsScript found.
 type hostFacts struct {
 	user, os, version, kernel, candidate, api, swarm string
@@ -77,6 +81,7 @@ type hostFacts struct {
 	uid, running                                            int
 	sudo, systemd, migrateReq, dockerd, crontab, flock      bool
 	inDocker, dockerUp, rootless, dockerEnabled, cronActive bool
+	proxyUp                                                 bool
 	networks, publish, listen, nftFlush                     []string
 	routes                                                  []netip.Prefix
 	daemon                                                  map[string]any
@@ -124,6 +129,8 @@ func parseFacts(out string) (hostFacts, error) {
 			f.candidate = v
 		case "dockerup":
 			f.dockerUp = yes
+		case "proxyup":
+			f.proxyUp = yes
 		case "api":
 			f.api = v
 		case "swarm":
@@ -167,7 +174,7 @@ func parseFacts(out string) (hostFacts, error) {
 
 // installPlan is what an install does on one server: packages to add, the daemon.json to write (nil:
 // leave it), whether dockerd must restart for it, services to enable, the user to add to the docker
-// group — and what it leaves alone and why.
+// group, whether the proxy is to be started — and what it leaves alone and why.
 type installPlan struct {
 	packages      []string
 	daemon        map[string]any
@@ -175,11 +182,24 @@ type installPlan struct {
 	enableDocker  bool
 	enableCron    bool
 	addToDocker   bool
-	notes         []string
+	bootProxy     bool
+	// candidateUnknown: apt has no index of docker.io yet (a fresh image may ship none), so its version
+	// is checked after apt-get update, still before any change.
+	candidateUnknown bool
+	notes            []string
 }
 
 func (p installPlan) empty() bool {
-	return len(p.packages) == 0 && p.daemon == nil && !p.restartDocker && !p.enableDocker && !p.enableCron && !p.addToDocker
+	return len(p.packages) == 0 && p.daemon == nil && !p.restartDocker && !p.enableDocker && !p.enableCron && !p.addToDocker && !p.bootProxy
+}
+
+// checkCandidate refuses a docker.io package older than Docker 25, or none at all.
+func checkCandidate(candidate string) error {
+	if major, _, _ := strings.Cut(candidate, "."); atoi(major) < 25 {
+		return fmt.Errorf("this system's docker.io package is %q, older than Docker 25 that boks needs; install Docker Engine from "+
+			"Docker's own repository (docs.docker.com/engine/install), then install again", candidate)
+	}
+	return nil
 }
 
 // planInstall decides from the facts, changing nothing; an error is a refusal, with what to do.
@@ -224,9 +244,10 @@ func planInstall(f hostFacts) (installPlan, error) {
 			return p, fmt.Errorf("Docker Engine API %s here is older than %.2f (Docker 25), which boks needs; upgrade Docker, then install again", f.api, minDockerAPI)
 		}
 	} else if !f.dockerd {
-		if major, _, _ := strings.Cut(f.candidate, "."); f.candidate == "" || atoi(major) < 25 {
-			return p, fmt.Errorf("this system's docker.io package is %q, older than Docker 25 that boks needs; install Docker Engine from "+
-				"Docker's own repository (docs.docker.com/engine/install), then install again", f.candidate)
+		if f.candidate == "" {
+			p.candidateUnknown = true
+		} else if err := checkCandidate(f.candidate); err != nil {
+			return p, err
 		}
 		p.packages = append(p.packages, "docker.io")
 	} else {
@@ -247,6 +268,7 @@ func planInstall(f hostFacts) (installPlan, error) {
 	if f.uid != 0 && !f.inDocker {
 		p.addToDocker = true
 	}
+	p.bootProxy = !f.proxyUp
 	planDaemon(f, &p)
 	return p, nil
 }
@@ -451,6 +473,26 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 		sudo = []string{"sudo", "-n"}
 	}
 	as := func(args ...string) []string { return append(slices.Clone(sudo), args...) }
+	apt := func(args ...string) []string {
+		return as(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-o", "DPkg::Lock::Timeout=300"}, args...)...)
+	}
+	// The package index is read before the journal opens: refreshing it changes nothing boks is
+	// responsible for, and a docker.io too old for boks, seen only once it is fresh, is still a refusal
+	// before any change.
+	if len(p.packages) > 0 {
+		if _, err := r.Run(ctx, apt("update", "-q")...); err != nil {
+			return fmt.Errorf("apt-get update: %w", err)
+		}
+		if p.candidateUnknown {
+			out, err := r.Run(ctx, "sh", "-c", candidateScript)
+			if err != nil {
+				return fmt.Errorf("reading the docker.io package: %w", err)
+			}
+			if err := checkCandidate(strings.TrimSpace(out)); err != nil {
+				return err
+			}
+		}
+	}
 	op := ""
 	if !p.empty() {
 		if op, err = beginServer(ctx, r, log, o, installAction, "", strings.Join(p.packages, " ")); err != nil {
@@ -470,24 +512,23 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 			return fail(err)
 		}
 	}
+	// Right after the write, not after the other steps: a run that failed between the two would leave
+	// the keys in the file and dockerd without them, and the next run, seeing the keys, would not restart.
+	if p.restartDocker {
+		fmt.Fprintln(log, "docker: restarting dockerd for the new daemon.json (no container runs)")
+		if _, err := r.Run(ctx, as("systemctl", "restart", "docker")...); err != nil {
+			return fail(fmt.Errorf("restarting docker: %w", err))
+		}
+	}
 	if len(p.packages) > 0 {
 		fmt.Fprintf(log, "apt: installing %s\n", strings.Join(p.packages, " "))
-		if _, err := r.Run(ctx, as("env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-o", "DPkg::Lock::Timeout=300", "update", "-q")...); err != nil {
-			return fail(fmt.Errorf("apt-get update: %w", err))
-		}
-		if _, err := r.Run(ctx, as(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-o", "DPkg::Lock::Timeout=300", "install", "-y", "-q", "--no-install-recommends"}, p.packages...)...)...); err != nil {
+		if _, err := r.Run(ctx, apt(append([]string{"install", "-y", "-q", "--no-install-recommends"}, p.packages...)...)...); err != nil {
 			return fail(fmt.Errorf("apt-get install: %w", err))
 		}
 	}
 	if p.enableDocker || slices.Contains(p.packages, "docker.io") {
 		if _, err := r.Run(ctx, as("systemctl", "enable", "--now", "docker")...); err != nil {
 			return fail(fmt.Errorf("enabling docker: %w", err))
-		}
-	}
-	if p.restartDocker {
-		fmt.Fprintln(log, "docker: restarting dockerd for the new daemon.json (no container runs)")
-		if _, err := r.Run(ctx, as("systemctl", "restart", "docker")...); err != nil {
-			return fail(fmt.Errorf("restarting docker: %w", err))
 		}
 	}
 	if p.enableCron {
@@ -523,12 +564,14 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 	return nil
 }
 
-// writeRoot puts body at a root-owned path through sudo when needed: a temporary file next to it,
-// checked by dockerd when it is installed, then moved over atomically. The previous file, if any, is
+// writeRoot puts body at a root-owned path through sudo when needed: a temporary file next to it, of
+// the length sent, checked by dockerd when it is installed, then moved over atomically. The previous file, if any, is
 // kept as path.boks-bak.
 func writeRoot(ctx context.Context, r remote.Runner, sudo []string, body []byte, path string, validate bool) error {
 	q, tmp := remote.Quote(path), remote.Quote(path+".boks-new")
-	script := "mkdir -p \"$(dirname " + q + ")\" && cat > " + tmp
+	// The byte count catches an upload cut short that still ended in EOF (remote.UploadAtomic does the same).
+	script := "mkdir -p \"$(dirname " + q + ")\" && cat > " + tmp +
+		" && { [ $(($(wc -c < " + tmp + "))) -eq " + strconv.Itoa(len(body)) + " ] || { rm -f " + tmp + "; exit 1; }; }"
 	if validate {
 		script += " && dockerd --validate --config-file " + tmp + " >/dev/null"
 	}
