@@ -70,7 +70,7 @@ func run(args []string, out, errw io.Writer) int {
 		fmt.Fprint(errw, usage)
 		return 2
 	}
-	if m, err := remote.NewMux(); err != nil {
+	if m, err := remote.NewMux(socketRoot); err != nil {
 		fmt.Fprintf(errw, "warning: %v; every remote call opens its own connection\n", err)
 	} else {
 		sshMux = m
@@ -161,12 +161,14 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 }
 
 // connect, now and lookupEnv are what a command reaches the servers, the clock and its environment
-// through. sshMux is the run's shared SSH connections; nil opens one per call.
+// through. sshMux is the run's shared SSH connections, their sockets under socketRoot; nil opens
+// one per call.
 var (
-	connect   = func(host string) remote.Runner { return sshMux.SSH(host) }
-	now       = time.Now
-	lookupEnv = os.LookupEnv
-	sshMux    *remote.Mux
+	connect    = func(host string) remote.Runner { return sshMux.SSH(host) }
+	now        = time.Now
+	lookupEnv  = os.LookupEnv
+	sshMux     *remote.Mux
+	socketRoot = "/tmp"
 )
 
 // sameRollback asks every server, before any of them changes, where a rollback would take it, and

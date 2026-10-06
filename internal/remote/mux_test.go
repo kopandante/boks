@@ -36,11 +36,11 @@ func calls(t *testing.T, log string) []string {
 func TestMuxSharesAConnectionPerRunAndClosesIt(t *testing.T) {
 	log := fakeSSH(t, "")
 	t.Setenv("BOKS_SSH_MUX", "")
-	m, err := NewMux()
+	m, err := NewMux("/tmp")
 	if err != nil || m == nil {
 		t.Fatalf("want a mux, got %v %v", m, err)
 	}
-	other, err := NewMux()
+	other, err := NewMux("/tmp")
 	if err != nil || other == nil {
 		t.Fatalf("want a second mux, got %v %v", other, err)
 	}
@@ -62,7 +62,8 @@ func TestMuxSharesAConnectionPerRunAndClosesIt(t *testing.T) {
 		t.Fatalf("want three shared calls and two exits, got:\n%s", strings.Join(got, "\n"))
 	}
 	for i, host := range []string{"a", "a", "b"} {
-		want := "-o ControlMaster=auto -o ControlPath=" + m.dir + "/%C -o ControlPersist=60s " + host + " "
+		want := "-o ControlMaster=auto -o ControlPath=" + m.dir + "/%C -o ControlPersist=60s " +
+			"-o ServerAliveInterval=5 -o ServerAliveCountMax=3 " + host + " "
 		if !strings.Contains(got[i], want) {
 			t.Errorf("call %d: want %q in %q", i, want, got[i])
 		}
@@ -80,11 +81,20 @@ func TestMuxSharesAConnectionPerRunAndClosesIt(t *testing.T) {
 	}
 }
 
+// A socket directory that cannot be made is an error, and the run goes on with no mux.
+func TestMuxWithoutItsDirectory(t *testing.T) {
+	t.Setenv("BOKS_SSH_MUX", "")
+	m, err := NewMux(filepath.Join(t.TempDir(), "missing"))
+	if err == nil || m != nil {
+		t.Fatalf("want an error and no mux, got %v %v", m, err)
+	}
+}
+
 // BOKS_SSH_MUX=0 turns sharing off: a call per connection, as before, and nothing to close.
 func TestMuxCanBeTurnedOff(t *testing.T) {
 	log := fakeSSH(t, "")
 	t.Setenv("BOKS_SSH_MUX", "0")
-	m, err := NewMux()
+	m, err := NewMux("/tmp")
 	if err != nil || m != nil {
 		t.Fatalf("want no mux, got %v %v", m, err)
 	}
@@ -103,7 +113,7 @@ func TestMuxCanBeTurnedOff(t *testing.T) {
 // Deadlines in deploy and proxy (health probe, drain, proxy answer) rely on this.
 func TestCancelledCallEndsAtItsContext(t *testing.T) {
 	holder := filepath.Join(t.TempDir(), "holder")
-	fakeSSH(t, "sleep 30 &\necho $! > "+holder+"\nsleep 30\n")
+	fakeSSH(t, "sleep 30 &\necho $! > "+holder+"\nexec sleep 30\n")
 	t.Cleanup(func() {
 		if b, err := os.ReadFile(holder); err == nil {
 			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
@@ -131,7 +141,9 @@ func TestCancelledCallEndsAtItsContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("want the cancelled call to fail")
 	}
-	if took := time.Since(cancelled); took > waitDelay+5*time.Second {
+	// The promise is two seconds past the cut, whatever the constant says; the rest is slack for a
+	// loaded machine.
+	if took := time.Since(cancelled); took > 2*time.Second+3*time.Second {
 		t.Errorf("the call outlived its context by %s", took)
 	}
 }

@@ -82,13 +82,14 @@ type Mux struct {
 	used map[string]bool
 }
 
-// NewMux makes the run's socket directory, under /tmp: a socket path is capped at about 100 bytes,
-// and a macOS $TMPDIR alone takes half of that. BOKS_SSH_MUX=0 turns sharing off.
-func NewMux() (*Mux, error) {
+// NewMux makes the run's socket directory under root — a short one such as /tmp: a socket path is
+// capped at about 100 bytes, and a macOS $TMPDIR alone takes half of that. BOKS_SSH_MUX=0 turns
+// sharing off.
+func NewMux(root string) (*Mux, error) {
 	if os.Getenv("BOKS_SSH_MUX") == "0" {
 		return nil, nil
 	}
-	dir, err := os.MkdirTemp("/tmp", "boks-")
+	dir, err := os.MkdirTemp(root, "boks-")
 	if err != nil {
 		return nil, fmt.Errorf("making the ssh socket directory: %w", err)
 	}
@@ -137,8 +138,12 @@ func (s SSH) exec(ctx context.Context, stdin []byte, label, script string) (stri
 	args := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=15"}
 	if s.ControlDir != "" {
 		// Options on the command line win over ~/.ssh/config, so a ControlMaster of the user's own
-		// does not take these connections into a socket another process may close.
-		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+controlPath(s.ControlDir), "-o", "ControlPersist=60s")
+		// does not take these connections into a socket another process may close. A call on a
+		// shared connection opens no connection of its own, so ConnectTimeout does not bound it:
+		// keepalives end a master whose server stopped answering within about 15 s, and the call
+		// then fails over to a fresh connection that ConnectTimeout does bound.
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+controlPath(s.ControlDir), "-o", "ControlPersist=60s",
+			"-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3")
 	}
 	cmd := exec.CommandContext(ctx, "ssh", append(args, s.Host, script)...)
 	if stdin != nil {

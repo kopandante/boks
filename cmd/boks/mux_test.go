@@ -10,8 +10,8 @@ import (
 )
 
 // runWithFakeSSH runs boks with the production connect and an ssh on PATH that records its
-// arguments and exits with code, and returns the recorded calls.
-func runWithFakeSSH(t *testing.T, config string, code string, args ...string) (int, []string) {
+// arguments and exits with code, and returns the recorded calls and what boks wrote to stderr.
+func runWithFakeSSH(t *testing.T, config string, code string, args ...string) (int, []string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -25,9 +25,10 @@ func runWithFakeSSH(t *testing.T, config string, code string, args ...string) (i
 	if err := os.WriteFile("boks.yml", []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rc := run(args, io.Discard, io.Discard)
+	var errw strings.Builder
+	rc := run(args, io.Discard, &errw)
 	b, _ := os.ReadFile(log)
-	return rc, strings.Split(strings.TrimSpace(string(b)), "\n")
+	return rc, strings.Split(strings.TrimSpace(string(b)), "\n"), errw.String()
 }
 
 var controlDir = regexp.MustCompile(`ControlPath=(/tmp/boks-[^/ ]+)/%C`)
@@ -61,7 +62,7 @@ func checkShared(t *testing.T, calls []string, servers ...string) {
 
 // A command reaches every server through the run's shared connections and closes them at the end.
 func TestRunSharesConnectionsAndClosesThem(t *testing.T) {
-	rc, calls := runWithFakeSSH(t, "app: demo\nimage: x\nservers: [a, b]\n", "0", "ps")
+	rc, calls, _ := runWithFakeSSH(t, "app: demo\nimage: x\nservers: [a, b]\n", "0", "ps")
 	if rc != 0 {
 		t.Fatalf("ps failed: %d", rc)
 	}
@@ -71,9 +72,26 @@ func TestRunSharesConnectionsAndClosesThem(t *testing.T) {
 // cert pull goes through the same connections, and a command that fails still closes them.
 func TestCertPullSharesTheConnectionAndAFailureClosesIt(t *testing.T) {
 	cfg := "app: demo\nimage: x\nservers: [a, b]\ncert: {domains: ['*.x.y'], dns: cloudflare, email: a@b.c}\n"
-	rc, calls := runWithFakeSSH(t, cfg, "1", "cert", "pull")
+	rc, calls, _ := runWithFakeSSH(t, cfg, "1", "cert", "pull")
 	if rc != 1 {
 		t.Fatalf("want cert pull to fail on a server that refuses, got %d", rc)
 	}
 	checkShared(t, calls, "a")
+}
+
+// When the socket directory cannot be made, the run says so and goes on with a connection per call.
+func TestRunWithoutASocketDirectoryWarnsAndConnectsPerCall(t *testing.T) {
+	old := socketRoot
+	socketRoot = filepath.Join(t.TempDir(), "missing")
+	defer func() { socketRoot = old }()
+	rc, calls, errw := runWithFakeSSH(t, "app: demo\nimage: x\nservers: [a, b]\n", "0", "ps")
+	if rc != 0 {
+		t.Fatalf("ps failed: %d: %s", rc, errw)
+	}
+	if !strings.Contains(errw, "every remote call opens its own connection") {
+		t.Errorf("want a warning, got %q", errw)
+	}
+	if len(calls) != 2 || strings.Contains(strings.Join(calls, "\n"), "Control") {
+		t.Errorf("want one plain call per server, got:\n%s", strings.Join(calls, "\n"))
+	}
 }
