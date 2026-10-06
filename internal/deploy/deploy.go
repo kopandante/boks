@@ -113,6 +113,9 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := checkLegacyVolumes(ctx, r, cfg); err != nil {
 		return err
 	}
+	if err := checkCron(ctx, r, cfg); err != nil {
+		return err
+	}
 	routed := len(cfg.Ports) > 0
 	name := ContainerName(cfg.App, l.tag, o.stamp())
 	if _, err := checkNetworks(ctx, r, cfg, name); err != nil {
@@ -244,6 +247,10 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	}
 	if err := l.record(ctx, name, op); err != nil {
 		return unrecorded(err, l.again, name, old)
+	}
+	// Cron follows the release that now serves, the one just recorded.
+	if err := applySchedules(ctx, r, log, cfg); err != nil {
+		fmt.Fprintf(log, "warning: the release serves, but its schedules were not applied: %v\nrun `%s` again to apply them\n", err, l.again)
 	}
 	// Once the release is recorded: leaving waits for the server's admission lock, and a wait before
 	// the record would be one more window in which a cut run leaves the new version unrecorded.
@@ -888,10 +895,15 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	if cfg.Cert != nil {
 		snapshot.CertDomains = cfg.Cert.Domains
 	}
+	snapshot.Schedules = cfg.Schedules
+	// The commands exist before the snapshot names them, as everything a snapshot refers to does.
+	if err := writeJobs(ctx, r, cfg.App, name, cfg.Schedules); err != nil {
+		return err
+	}
 	if err := release.Save(ctx, r, snapshot); err != nil {
 		return err
 	}
-	if err := serving(ctx, r, cfg.App, name, op.id, now); err != nil {
+	if err := serving(ctx, r, cfg.App, name, name, op.id, now); err != nil {
 		return err
 	}
 	pruneReleases(ctx, r, log, cfg, name)
@@ -908,9 +920,13 @@ func pruneReleases(ctx context.Context, r remote.Runner, log io.Writer, cfg *con
 
 // serving points `current` at release id and closes the operation that put it there, in that order,
 // so an interruption between the two leaves the release named and the operation visibly open.
-func serving(ctx context.Context, r remote.Runner, app, id, op string, now time.Time) error {
+func serving(ctx context.Context, r remote.Runner, app, id, container, op string, now time.Time) error {
 	if err := release.SetCurrent(ctx, r, app, id); err != nil {
 		return fmt.Errorf("mark %s as current: %w", id, err)
+	}
+	// What a scheduled job reads to find the copy to run in: the release and its container together.
+	if err := release.SetServing(ctx, r, app, id, container); err != nil {
+		return fmt.Errorf("record the serving copy %s: %w", container, err)
 	}
 	if err := release.Finish(context.WithoutCancel(ctx), r, app, op, "ok", now); err != nil {
 		return fmt.Errorf("close the journal entry: %w", err)

@@ -111,6 +111,18 @@ type Healthcheck struct {
 	Interval string `yaml:"interval" json:"interval"`
 }
 
+// Schedule is a shell command run on a cron schedule inside the copy of the app that serves at that
+// moment — what Dokploy calls an application schedule. The json tags are load-bearing: a release
+// snapshot stores the schedules verbatim, and a rollback brings back the ones that release had.
+type Schedule struct {
+	Name string `yaml:"name" json:"name"`
+	// Cron is five fields — minute, hour, day of month, month, day of week — in the server's cron,
+	// which runs in UTC on our servers.
+	Cron string `yaml:"cron" json:"cron"`
+	// Command is run by `sh` inside the container, as its default user and in its working directory.
+	Command string `yaml:"command" json:"command"`
+}
+
 // Cert describes a certificate obtained by lego over DNS-01 — the case kamal-proxy's built-in
 // autocert cannot serve, because a wildcard has no HTTP-01 challenge. Hosts not covered by it
 // keep using autocert, so an app can mix both.
@@ -155,6 +167,8 @@ type Config struct {
 	// StopSignal is what `docker stop` sends in place of the image's STOPSIGNAL (SIGTERM unless the
 	// image says otherwise): self-hosted Convex shuts down cleanly on SIGINT.
 	StopSignal string `yaml:"stop_signal"`
+	// Schedules are commands cron runs inside the serving copy of the app.
+	Schedules []Schedule `yaml:"schedules"`
 	// Files are files of the app's repository the container reads, each `local:/container/path`,
 	// the local path relative to boks.yml. Every release gets its own copy on the server, mounted
 	// read-only, so a rollback reads the files it ran with.
@@ -579,6 +593,22 @@ func (c *Config) validateLists() error {
 			return err
 		}
 	}
+	// Each server's cron runs the jobs in that server's copy, so an app on several servers would run
+	// every job once per server, at the same moment. Until one of them is chosen to run them, an app
+	// with schedules lives on one server.
+	if len(c.Schedules) > 0 && len(c.Servers) > 1 {
+		return fmt.Errorf("schedules: %s is on %d servers, and each would run every job; an app with schedules must be on one server", c.App, len(c.Servers))
+	}
+	jobs := map[string]bool{}
+	for _, s := range c.Schedules {
+		if err := s.validate(); err != nil {
+			return err
+		}
+		if jobs[s.Name] {
+			return fmt.Errorf("schedules: %s is named twice", s.Name)
+		}
+		jobs[s.Name] = true
+	}
 	targets := map[string]bool{}
 	for _, f := range c.Files {
 		_, target, err := splitFile(f)
@@ -624,6 +654,86 @@ func validateVolume(v string) error {
 	name, path, ok := strings.Cut(v, ":")
 	if !ok || !nameRe.MatchString(name) || !strings.HasPrefix(path, "/") {
 		return fmt.Errorf("volumes: %q must be name:/absolute/path", v)
+	}
+	return nil
+}
+
+func (s Schedule) validate() error {
+	if !nameRe.MatchString(s.Name) {
+		return fmt.Errorf("schedules: name %q must match %s", s.Name, nameRe)
+	}
+	fields := strings.Fields(s.Cron)
+	if len(fields) != 5 {
+		return fmt.Errorf("schedules[%s]: cron %q must have five fields: minute hour day-of-month month day-of-week", s.Name, s.Cron)
+	}
+	for i, f := range fields {
+		if err := cronField(f, cronBounds[i]); err != nil {
+			return fmt.Errorf("schedules[%s]: cron field %q (%s): %w", s.Name, f, cronBounds[i].name, err)
+		}
+	}
+	if strings.TrimSpace(s.Command) == "" {
+		return fmt.Errorf("schedules[%s]: command is required", s.Name)
+	}
+	return nil
+}
+
+// cronBounds are the five cron fields in order, with the values each accepts (7 is Sunday, as 0).
+type cronBound struct {
+	name   string
+	lo, hi int
+}
+
+var cronBounds = [5]cronBound{{"minute", 0, 59}, {"hour", 0, 23}, {"day of month", 1, 31}, {"month", 1, 12}, {"day of week", 0, 7}}
+
+// cronField checks one field in the form every cron reads alike: a list of `*`, a number or a range
+// `a-b`, the star and the range optionally stepped `/n`. Names (MON, JAN) and @-shortcuts vary between
+// cron implementations, so they are left out. The crontab is installed after the release already
+// serves, so a field the server's cron would refuse is refused here, before anything changes.
+func cronField(f string, b cronBound) error {
+	num := func(v string) (int, error) {
+		if v == "" || strings.Trim(v, "0123456789") != "" {
+			return 0, fmt.Errorf("must use numbers, *, ranges, lists and steps only")
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil || n < b.lo || n > b.hi {
+			return 0, fmt.Errorf("%s must be within %d-%d", v, b.lo, b.hi)
+		}
+		return n, nil
+	}
+	for _, item := range strings.Split(f, ",") {
+		base, step, stepped := strings.Cut(item, "/")
+		if stepped {
+			if strings.Trim(step, "0123456789") != "" || step == "" {
+				return fmt.Errorf("must use numbers, *, ranges, lists and steps only")
+			}
+			if n, err := strconv.Atoi(step); err != nil || n < 1 || n > b.hi-b.lo+1 {
+				return fmt.Errorf("step %s must be within 1-%d", step, b.hi-b.lo+1)
+			}
+		}
+		if base == "*" {
+			continue
+		}
+		lo, hi, ranged := strings.Cut(base, "-")
+		if !ranged {
+			if stepped {
+				return fmt.Errorf("a step follows * or a range, not a single number")
+			}
+			if _, err := num(base); err != nil {
+				return err
+			}
+			continue
+		}
+		a, err := num(lo)
+		if err != nil {
+			return err
+		}
+		z, err := num(hi)
+		if err != nil {
+			return err
+		}
+		if a > z {
+			return fmt.Errorf("range %s runs backwards", base)
+		}
 	}
 	return nil
 }
