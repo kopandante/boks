@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -39,6 +40,17 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 		if strings.HasPrefix(cmd, prefix) {
 			return "", err
 		}
+	}
+	if _, swap, ok := strings.Cut(cmd, "sh -c mv "); ok {
+		// The pair's two renames: `mv 'a.new' 'a' && mv 'b.new' 'b'`.
+		for _, mv := range strings.Split(swap, " && mv ") {
+			from, to, _ := strings.Cut(mv, " ")
+			from, to = strings.Trim(from, "'"), strings.Trim(to, "'")
+			f.files[to], f.writes[to] = f.files[from], f.writes[from]
+			delete(f.files, from)
+			delete(f.writes, from)
+		}
+		return "", nil
 	}
 	if strings.HasPrefix(cmd, "docker ps -a --filter name=^boks-proxy$") {
 		return "running\tcaddy", nil // the proxy a renewal reloads is up: the command boots it first
@@ -427,6 +439,36 @@ func TestAFailedReloadLeavesTheCertificatePending(t *testing.T) {
 	}
 	if pending, err := Pending(ctx, f, cfg); err != nil || !pending {
 		t.Errorf("a failed reload loaded nothing, so it is still owed: %v %v", pending, err)
+	}
+}
+
+// A renewal cut before its pair is swapped in leaves the old pair whole on the server: Caddy loads
+// every certificate file on every load, and a mismatched pair would stop every deploy and keep a
+// restarted proxy down. The next run sees the certificate differ and installs again.
+func TestACutInstallLeavesTheOldPairWhole(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	crtRemote, keyRemote := ServerPaths(cfg.Cert)
+	oldCrt, oldKey := f.files[crtRemote], f.files[keyRemote]
+	crtLocal, _ := LocalPaths(cfg)
+	if err := os.WriteFile(crtLocal, replacementPair(t, cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.fail["docker exec -u 0 boks-proxy sh -c mv"] = errors.New("connection lost")
+	if err := Install(ctx, f, io.Discard, cfg); err == nil {
+		t.Fatal("want the cut install's error")
+	}
+	if f.files[crtRemote] != oldCrt || f.files[keyRemote] != oldKey {
+		t.Error("want the old pair untouched")
+	}
+	delete(f.fail, "docker exec -u 0 boks-proxy sh -c mv")
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tls.X509KeyPair([]byte(f.files[crtRemote]), []byte(f.files[keyRemote])); err != nil || f.files[crtRemote] == oldCrt {
+		t.Errorf("want the new pair in place and matching: %v", err)
 	}
 }
 

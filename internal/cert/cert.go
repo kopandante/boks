@@ -142,16 +142,20 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 	if !changed {
 		return nil
 	}
-	// A run that dies partway leaves a mismatched set on the server whichever order these go in.
-	// What makes that recoverable is the comparison above — the next run sees a .crt that differs
-	// from the local one and writes everything again — and the marker, which was never updated,
-	// so the proxy is not reloaded onto a half-written pair. The certificate goes last for the
-	// same reason: it is what that comparison keys on.
-	if err := write(ctx, r, key, keyRemote); err != nil {
+	// The pair goes in beside the old one and replaces it with two renames in one command: Caddy loads
+	// every certificate file a config names on every load, so a pair a cut run left mismatched would
+	// stop every app's deploy, and a proxy restarted onto it would not start — and `boks cert`, which
+	// boots the proxy first, could not repair it. A run that dies before the renames leaves the old
+	// pair in place, and the comparison above — on the certificate, renamed last — writes it again.
+	if err := write(ctx, r, key, keyRemote+".new"); err != nil {
 		return err
 	}
-	if err := write(ctx, r, crt, crtRemote); err != nil {
+	if err := write(ctx, r, crt, crtRemote+".new"); err != nil {
 		return err
+	}
+	swap := "mv " + remote.Quote(keyRemote+".new") + " " + remote.Quote(keyRemote) + " && mv " + remote.Quote(crtRemote+".new") + " " + remote.Quote(crtRemote)
+	if _, err := r.Run(ctx, "docker", "exec", "-u", "0", proxy.Container, "sh", "-c", swap); err != nil {
+		return fmt.Errorf("install %s: %w", crtRemote, err)
 	}
 	fmt.Fprintf(log, "cert installed: %s\n", crtRemote)
 	return nil
