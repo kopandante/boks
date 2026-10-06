@@ -30,12 +30,8 @@ func Image(ctx context.Context, r remote.Runner) (string, error) {
 func Upgrade(ctx context.Context, r remote.Runner, log io.Writer, image string, begin func(from string) error) error {
 	// First: a cut swap leaves the old proxy aside and, under the proxy's name, nothing, or a new one
 	// that may never have started — whose image is the one asked for.
-	if aside, err := exists(ctx, r, asideName); err != nil {
+	if err := checkAside(ctx, r); err != nil {
 		return err
-	} else if aside {
-		return fmt.Errorf("%s is left from an upgrade that was cut short: if %s serves, remove it (`docker rm %s`); "+
-			"otherwise put it back (`docker rm -f %s; docker rename %s %s; docker start %s`)",
-			asideName, Container, asideName, Container, asideName, Container, Container)
 	}
 	state, kind, err := State(ctx, r)
 	if err != nil {
@@ -51,21 +47,25 @@ func Upgrade(ctx context.Context, r remote.Runner, log io.Writer, image string, 
 	if err != nil {
 		return err
 	}
-	if current == image {
+	// The container the server's policy needs: an upgrade also creates again a proxy whose egress
+	// port or hosts file another path left out.
+	want, err := appliedShape(ctx, r)
+	if err != nil {
+		return err
+	}
+	have, err := currentShape(ctx, r)
+	if err != nil {
+		return err
+	}
+	if current == image && have == want {
 		if state != "running" {
 			return fmt.Errorf("the proxy is made from %s already, but is %s; `boks proxy boot` starts it", image, state)
 		}
 		fmt.Fprintf(log, "proxy: already runs %s\n", image)
 		return nil
 	}
-	// A deploy holds its app's lock from start to end, and the admission lock only in part: its
-	// reload, between two admissions, would find no proxy.
-	busy, err := r.Run(ctx, "sh", "-c", "for d in /tmp/boks-*.lock; do [ -d \"$d\" ] && echo \"$d\"; done; true")
-	if err != nil {
+	if err := checkIdle(ctx, r); err != nil {
 		return err
-	}
-	if b := strings.Fields(busy); len(b) > 0 {
-		return fmt.Errorf("a deploy is in progress (%s); upgrade the proxy once it is done", strings.Join(b, ", "))
 	}
 	fmt.Fprintf(log, "pull %s\n", image)
 	if _, err := r.Run(ctx, "docker", "pull", image); err != nil {
@@ -96,26 +96,59 @@ func Upgrade(ctx context.Context, r remote.Runner, log io.Writer, image string, 
 		return fmt.Errorf("%w; the proxy was not touched", err)
 	}
 	fmt.Fprintf(log, "proxy: replacing %s with %s — 80 and 443 are down until it answers\n", current, image)
+	if err := swapProxy(ctx, r, log, current, image, abs, fs, want); err != nil {
+		return err
+	}
+	fmt.Fprintf(log, "proxy: runs %s\n", image)
+	return nil
+}
+
+// checkAside refuses to touch the proxy while a swap an earlier run left cut has the old one aside.
+func checkAside(ctx context.Context, r remote.Runner) error {
+	aside, err := exists(ctx, r, asideName)
+	if err != nil || !aside {
+		return err
+	}
+	return fmt.Errorf("%s is left from an upgrade that was cut short: if %s serves, remove it (`docker rm %s`); "+
+		"otherwise put it back (`docker rm -f %s; docker rename %s %s; docker start %s`)",
+		asideName, Container, asideName, Container, asideName, Container, Container)
+}
+
+// checkIdle refuses while a deploy is in progress: a deploy holds its app's lock from start to end,
+// and the admission lock only in part — its reload, between two admissions, would find no proxy.
+func checkIdle(ctx context.Context, r remote.Runner) error {
+	busy, err := r.Run(ctx, "sh", "-c", "for d in /tmp/boks-*.lock; do [ -d \"$d\" ] && echo \"$d\"; done; true")
+	if err != nil {
+		return err
+	}
+	if b := strings.Fields(busy); len(b) > 0 {
+		return fmt.Errorf("a deploy is in progress (%s); change the proxy once it is done", strings.Join(b, ", "))
+	}
+	return nil
+}
+
+// swapProxy replaces the proxy running current with one created from image in shape s: stop, set aside,
+// create and start the new one; any failure after the stop puts the old one back.
+func swapProxy(ctx context.Context, r remote.Runner, log io.Writer, current, image, abs string, fs []Fragment, s Shape) error {
 	if _, err := r.Run(ctx, "docker", "stop", Container); err != nil {
 		return putBack(ctx, r, current, fmt.Errorf("stopping the proxy: %w", err))
 	}
 	if _, err := r.Run(ctx, "docker", "rename", Container, asideName); err != nil {
 		return putBack(ctx, r, current, fmt.Errorf("setting the proxy aside: %w", err))
 	}
-	if err := startNew(ctx, r, log, image, abs, fs); err != nil {
+	if err := startNew(ctx, r, log, image, abs, fs, s); err != nil {
 		return putBack(ctx, r, current, fmt.Errorf("the new proxy failed: %w", err))
 	}
 	if _, err := r.Run(ctx, "docker", "rm", "-v", asideName); err != nil {
 		fmt.Fprintf(log, "warning: the old proxy %s could not be removed: %v\n", asideName, err)
 	}
-	fmt.Fprintf(log, "proxy: runs %s\n", image)
 	return nil
 }
 
-// startNew creates the proxy from image, on the networks its routes dial, and waits for it to answer
-// with the sysctl a lossless reload needs.
-func startNew(ctx context.Context, r remote.Runner, log io.Writer, image, abs string, fs []Fragment) error {
-	if _, err := r.Run(ctx, CreateArgs(image, abs)...); err != nil {
+// startNew creates the proxy from image in shape s, on the networks its routes dial, and waits for it
+// to answer with the sysctl a lossless reload needs.
+func startNew(ctx context.Context, r remote.Runner, log io.Writer, image, abs string, fs []Fragment, s Shape) error {
+	if _, err := r.Run(ctx, CreateArgs(image, abs, s)...); err != nil {
 		return err
 	}
 	if err := reattach(ctx, r, log, fs); err != nil {

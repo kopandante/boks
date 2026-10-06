@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	// DefaultProxyImage is pinned: a proxy that changes under a moving tag changes every app's routing.
-	// 2.11.7 was the newest Caddy on Docker Hub on 2026-10-06, and the one boks-lab was measured with.
-	DefaultProxyImage    = "caddy:2.11.7-alpine"
+	// DefaultProxyImage is pinned by digest: a proxy that changes under a moving tag changes every app's
+	// routing. It is boks's own build (proxy/Dockerfile): Caddy 2.11.7 — the newest on Docker Hub on
+	// 2026-10-06, and the one boks-lab was measured with — and the forward proxy a server's egress needs.
+	DefaultProxyImage    = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d@sha256:1f362085a5be41202ae1b5ea31770ddccca2717056d3aab9377ec78cd9b8a44f"
 	DefaultKeep          = 3
 	DefaultDeployTimeout = "60s"
 	// DefaultDrainTimeout is kamal-proxy's: how long the previous copy may go on finishing the requests
@@ -557,8 +558,9 @@ func (c *Config) validateRegistry() error {
 	if h := ImageHost(c.Image); h != r.Host {
 		return fmt.Errorf("image: %s is on %s, not on registry.host %s; boks logs in to %s only", c.Image, h, r.Host, r.Host)
 	}
-	// The proxy is booted by `docker run`, which pulls without the login.
-	if r.Logs(c.ProxyImage) {
+	// The proxy is booted by `docker run`, which pulls without the login. boks's own image is public on
+	// ghcr.io, where many apps' private images are too.
+	if r.Logs(c.ProxyImage) && c.ProxyImage != DefaultProxyImage {
 		return fmt.Errorf("proxy_image: %s is on the private registry %s, and the proxy is pulled without a login; use a public proxy image",
 			c.ProxyImage, r.Host)
 	}

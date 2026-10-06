@@ -437,6 +437,15 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("%s: revision: required for apply, a whole number from 1", args[1])
 		}
 		next := policyOf(sc)
+		// The egress login's password comes from the environment, before any server is asked: a missing
+		// one would stop the run halfway down the list.
+		if sc.Egress != nil {
+			pw, err := sc.Egress.Password()
+			if err != nil {
+				return fmt.Errorf("%s: %w", args[1], err)
+			}
+			next.Egress.Password = pw
+		}
 		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next) }); err != nil {
 			return err
 		}
@@ -496,6 +505,13 @@ func policyOf(sc *config.Server) proxy.Policy {
 	}
 	for _, a := range sc.Bots.Allow {
 		p.Allow = append(p.Allow, proxy.BotAllow{Host: a.Host, Paths: a.Paths, UserAgent: a.UserAgent})
+	}
+	if e := sc.Egress; e != nil {
+		var allow []string
+		for _, pr := range e.Prefixes() {
+			allow = append(allow, pr.String())
+		}
+		p.Egress = &proxy.Egress{Port: e.Port, Allow: allow, User: e.User, Ports: e.Ports, HostsFile: e.HostsFile}
 	}
 	return p
 }

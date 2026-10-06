@@ -5,6 +5,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/kopandante/boks/internal/hostname"
@@ -97,7 +99,10 @@ type Fragment struct {
 // drop the bot filter on its next reload. `boks server apply` puts a file holding the format alone
 // among the fragments (policyMarker), so a server with a policy refuses that boks even before any app
 // is deployed again.
-const FragmentFormat = 3
+//
+// Format 4 is the egress proxy: a boks of format 3 would assemble the config without its server, and
+// create the proxy without its port on a boot or an upgrade.
+const FragmentFormat = 4
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -279,6 +284,13 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 	for _, s := range servers {
 		s.Routes = append(s.Routes, caddyRoute{Handle: []handler{{Handler: "static_response", StatusCode: 404}}, Terminal: true})
 	}
+	if p.Egress != nil {
+		s, err := egressServer(*p.Egress)
+		if err != nil {
+			return nil, err
+		}
+		servers["egress"] = s
+	}
 	c := caddyConfig{Admin: admin{Listen: "localhost:2019"}, Apps: apps{HTTP: httpApp{Servers: servers}}}
 	if len(files) > 0 {
 		c.Apps.TLS = &tlsApp{Certificates: certificates{LoadFiles: files}}
@@ -319,6 +331,7 @@ type (
 		Logs      *struct{}    `json:"logs,omitempty"`
 	}
 	autoHTTPS struct {
+		Disable          bool     `json:"disable,omitempty"`
 		SkipCertificates []string `json:"skip_certificates,omitempty"`
 		DisableRedirects bool     `json:"disable_redirects,omitempty"`
 	}
@@ -337,6 +350,11 @@ type (
 		HeaderRegexp map[string]regexpMatch `json:"header_regexp,omitempty"`
 		// Not refuses the request when any one of its matcher sets matches it.
 		Not []match `json:"not,omitempty"`
+		// RemoteIP matches the address of the connection — the client's, past Docker's DNAT.
+		RemoteIP *remoteIP `json:"remote_ip,omitempty"`
+	}
+	remoteIP struct {
+		Ranges []string `json:"ranges"`
 	}
 	regexpMatch struct {
 		Pattern string `json:"pattern"`
@@ -360,6 +378,13 @@ type (
 		Response *responseOps `json:"response,omitempty"`
 		// subroute
 		Routes []caddyRoute `json:"routes,omitempty"`
+		// forward_proxy (github.com/caddyserver/forwardproxy)
+		HideIP       bool  `json:"hide_ip,omitempty"`
+		HideVia      bool  `json:"hide_via,omitempty"`
+		AllowedPorts []int `json:"allowed_ports,omitempty"`
+		// AuthCredentials hold base64 of user:password each, as the plugin compares them with the
+		// header; JSON writes the bytes in base64 once more.
+		AuthCredentials [][]byte `json:"auth_credentials,omitempty"`
 	}
 	proxyHeaders struct {
 		Request *headerOps `json:"request,omitempty"`
@@ -396,6 +421,30 @@ type (
 		Key         string `json:"key"`
 	}
 )
+
+// egressServer is the forward proxy: only the clients e allows reach it, and any other connection gets
+// 403, as tinyproxy's Allow refused it. The plugin's own ACL is about where a client may go, not who
+// the client is: it keeps its default, which refuses private and loopback targets — the proxy must not
+// be a way into the server's own networks. hide_ip and hide_via keep the client's address and the
+// proxy's name out of what it sends on. No logs: a log line per tunnel would carry every target the
+// services reach, and the login, when given, travels in a header a log could keep.
+func egressServer(e Egress) (*server, error) {
+	fp := handler{Handler: "forward_proxy", HideIP: true, HideVia: true, AllowedPorts: e.Ports}
+	if e.User != "" {
+		if e.Password == "" {
+			return nil, fmt.Errorf("egress: the login %s has no password on this server; apply the server's policy again", e.User)
+		}
+		fp.AuthCredentials = [][]byte{[]byte(base64.StdEncoding.EncodeToString([]byte(e.User + ":" + e.Password)))}
+	}
+	return &server{
+		Listen:    []string{":" + strconv.Itoa(e.Port)},
+		AutoHTTPS: &autoHTTPS{Disable: true},
+		Routes: []caddyRoute{
+			{Match: []match{{RemoteIP: &remoteIP{Ranges: e.Allow}}}, Handle: []handler{fp}, Terminal: true},
+			{Handle: []handler{{Handler: "static_response", StatusCode: 403}}, Terminal: true},
+		},
+	}, nil
+}
 
 // hasHost tells whether hosts names h in any case: Caddy matches hosts without regard to case, and
 // refuses a host matcher that names one twice.
@@ -655,7 +704,7 @@ func Validate(ctx context.Context, r remote.Runner, app string, routes []Route) 
 	if err != nil {
 		return err
 	}
-	pol, err := ReadPolicy(ctx, r)
+	pol, err := appliedPolicy(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -680,7 +729,7 @@ func checkPath() string { return path.Join(Dir, "caddy.check.json") }
 // Lags says whether an applied config is there and differs from the one the fragments fs assemble:
 // a run was cut after writing its fragment, and the proxy has not caught up.
 func Lags(ctx context.Context, r remote.Runner, fs []Fragment) (bool, error) {
-	pol, err := ReadPolicy(ctx, r)
+	pol, err := appliedPolicy(ctx, r)
 	if err != nil {
 		return false, err
 	}
@@ -707,7 +756,7 @@ func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment
 // asking Caddy which config it runs — right when the question is which routes run, wrong when it is
 // whether Caddy read certificate files again under unchanged paths (Reload), which no config shows.
 func reconverge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment, force, confirm bool, what string) (bool, error) {
-	pol, err := ReadPolicy(ctx, r)
+	pol, err := appliedPolicy(ctx, r)
 	if err != nil {
 		return false, err
 	}
@@ -837,11 +886,13 @@ func caddyRunning(ctx context.Context, r remote.Runner) (bool, error) {
 // when it starts; the certificate volume is the one kamal-proxy used, so files installed for it are
 // where Caddy looks. The sysctl is per network namespace, so it is the container's own. Caddy logs
 // every request, and Docker rotates no log by default: the proxy's log is capped at 5 × 10 MB, with
-// the driver named so the caps apply whatever the daemon's default driver is.
-func CreateArgs(image, abs string) []string {
-	return []string{"docker", "create", "--name", Container, "--restart", "unless-stopped", "--label", "boks.proxy=" + Kind,
+// the driver named so the caps apply whatever the daemon's default driver is. s adds what the server's
+// policy needs: the egress port and the hosts file.
+func CreateArgs(image, abs string, s Shape) []string {
+	args := []string{"docker", "create", "--name", Container, "--restart", "unless-stopped", "--label", "boks.proxy=" + Kind,
 		"--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=5",
-		"--sysctl", migrateReq + "=1", "--network", Network, "-p", "80:80", "-p", "443:443",
-		"-v", DataVolume + ":/data", "-v", CertsVolume + ":/certs", "-v", abs + ":" + mountDir + ":ro",
-		image, "caddy", "run", "--config", inProxy(appliedPath())}
+		"--sysctl", migrateReq + "=1", "--network", Network, "-p", "80:80", "-p", "443:443"}
+	args = append(args, s.args()...)
+	return append(args, "-v", DataVolume+":/data", "-v", CertsVolume+":/certs", "-v", abs+":"+mountDir+":ro",
+		image, "caddy", "run", "--config", inProxy(appliedPath()))
 }

@@ -33,6 +33,20 @@ type Policy struct {
 	Floor    int        `json:"floor"`
 	Allow    []BotAllow `json:"allow,omitempty"`
 	Block    []BotBlock `json:"block,omitempty"`
+	Egress   *Egress    `json:"egress,omitempty"`
+}
+
+// Egress is the forward proxy Caddy runs beside the apps' servers, on a port of its own, for the
+// outgoing requests of services that leave from this server's address. Password is never recorded
+// in the policy or its history: it sits in a file of its own (egressSecretPath), read when the config
+// is assembled.
+type Egress struct {
+	Port      int      `json:"port"`
+	Allow     []string `json:"allow"`
+	User      string   `json:"user,omitempty"`
+	Ports     []int    `json:"ports"`
+	HostsFile string   `json:"hosts_file,omitempty"`
+	Password  string   `json:"-"`
 }
 
 // BotBlock answers 403 to a User-Agent matching UserAgent on Domains — each and every host under it —
@@ -56,6 +70,7 @@ type BotAllow struct {
 func policyMarker() string { return path.Join(Dir, "routes", "_server.json") }
 
 func policyPath() string         { return path.Join(ServerDir, "policy.json") }
+func egressSecretPath() string   { return path.Join(ServerDir, "egress.secret") }
 func historyPath(rev int) string { return path.Join(ServerDir, "history", strconv.Itoa(rev)+".json") }
 
 // SamePolicy says whether two policies filter alike, whatever their revisions.
@@ -73,6 +88,39 @@ func marshal(p Policy) []byte {
 // answer; a failed read is an error, not an empty policy — that would drop the filter on the next reload.
 func ReadPolicy(ctx context.Context, r remote.Runner) (Policy, error) {
 	return readPolicy(ctx, r, policyPath())
+}
+
+// appliedPolicy is the server's policy as the config is assembled from it: with the egress login's
+// password, which the policy never records.
+func appliedPolicy(ctx context.Context, r remote.Runner) (Policy, error) {
+	p, err := ReadPolicy(ctx, r)
+	if err != nil {
+		return p, err
+	}
+	return p, loadSecret(ctx, r, &p)
+}
+
+// loadSecret gives p's egress login the password the server keeps for it. A server whose secret is
+// missing or belongs to another user is an error: the config assembled without it would refuse every
+// client of the proxy.
+func loadSecret(ctx context.Context, r remote.Runner, p *Policy) error {
+	e := p.Egress
+	if e == nil || e.User == "" || e.Password != "" {
+		return nil
+	}
+	body, present, err := readFile(ctx, r, egressSecretPath())
+	if err != nil {
+		return err
+	}
+	user, pass, ok := strings.Cut(strings.TrimSuffix(body, "\n"), ":")
+	if !present || !ok || user != e.User || pass == "" {
+		return fmt.Errorf("the server keeps no password for the egress login %s; apply the policy again with its password_env set", e.User)
+	}
+	// A copy: the caller's policy shares the pointer, and must not come back holding the password.
+	withPass := *e
+	withPass.Password = pass
+	p.Egress = &withPass
+	return nil
 }
 
 // History is the policy a revision applied, and whether the server has it.
@@ -172,8 +220,23 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if err != nil {
 		return err
 	}
+	// The login's password: the one p brings, or — a rollback, a policy applied again without it — the
+	// one the server keeps, if it is that user's.
+	if err := loadSecret(ctx, r, &p); err != nil {
+		return err
+	}
 	if _, err := Config(p, fs); err != nil {
 		return err
+	}
+	// The secret goes in before the policy that needs it, and comes back with the previous policy.
+	prevSecret, secretPresent, err := readFile(ctx, r, egressSecretPath())
+	if err != nil {
+		return err
+	}
+	if e := p.Egress; e != nil && e.User != "" && prevSecret != e.User+":"+e.Password+"\n" {
+		if err := remote.UploadAtomic(ctx, r, []byte(e.User+":"+e.Password+"\n"), egressSecretPath()); err != nil {
+			return fmt.Errorf("recording the egress login: %w", err)
+		}
 	}
 	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", FragmentFormat), policyMarker()); err != nil {
 		return fmt.Errorf("marking the server's routes for this boks: %w", err)
@@ -196,6 +259,9 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 			err = errors.Join(err, remote.UploadAtomic(back, r, []byte(prevBody), policyPath()))
 		} else if _, rmErr := r.Run(back, "rm", "-f", policyPath()); rmErr != nil {
 			err = errors.Join(err, rmErr)
+		}
+		if secretPresent {
+			err = errors.Join(err, remote.UploadAtomic(back, r, []byte(prevSecret), egressSecretPath()))
 		}
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
 		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
 )
 
@@ -281,5 +282,26 @@ func TestUpgradeProxyJournalsTheSwapAlone(t *testing.T) {
 	if err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed); err != nil || !strings.Contains(f.appends[serverLog], `{"op":"1","finished_at":`) ||
 		!strings.Contains(f.appends[serverLog], `"result":"abandoned"`) {
 		t.Errorf("want the open entry closed as abandoned: %v %s", err, f.appends[serverLog])
+	}
+}
+
+// An egress policy publishes its port before it is applied: the proxy is made again, with the image it
+// runs, and only then does the policy that listens on the port go in.
+func TestApplyServerMakesTheProxyForEgressFirst(t *testing.T) {
+	f := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
+	f.out["docker inspect -f {{range"] = "443/tcp 80/tcp |"
+	f.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.forward_proxy"
+	f.out[proxyImage] = config.DefaultProxyImage
+	next := proxy.Policy{Revision: 2, Egress: &proxy.Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}}}
+	var log strings.Builder
+	if err := ApplyServer(context.Background(), f, &log, next, fixed); err != nil {
+		t.Fatal(err)
+	}
+	create, policy := f.callAt("docker create --name boks-proxy"), f.writeAt(policyFile, `"egress"`)
+	if create < 0 || policy < 0 || policy < create || !strings.Contains(f.calls[create], "-p 3128:3128") {
+		t.Errorf("want the proxy made with the port (call %d) before the policy (%d): %v", create, policy, f.calls)
+	}
+	if !strings.Contains(log.String(), "egress proxy on port 3128 for 203.0.113.10/32") {
+		t.Errorf("log: %s", log.String())
 	}
 }

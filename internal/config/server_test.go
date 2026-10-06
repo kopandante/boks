@@ -74,3 +74,62 @@ func TestParseServerRejects(t *testing.T) {
 		}
 	}
 }
+
+// encarPool is the egress the tinyproxy of the encar pool ran, as server.yml says it.
+const encarPool = `
+servers: [egress1]
+revision: 1
+egress:
+  allow: [203.0.113.10, 198.51.100.0/24]
+  user: encar
+  password_env: ENCAR_EGRESS_PROXY_PASSWORD
+  ports: [443, 80]
+  hosts_file: /etc/hosts
+`
+
+func TestParseServerEgress(t *testing.T) {
+	s, err := ParseServer([]byte(encarPool))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := s.Egress
+	if e == nil || e.Port != DefaultEgressPort || e.User != "encar" || len(e.Ports) != 2 || e.HostsFile != "/etc/hosts" {
+		t.Fatalf("parsed wrong: %+v", e)
+	}
+	if p := e.Prefixes(); len(p) != 2 || p[0].String() != "203.0.113.10/32" || p[1].String() != "198.51.100.0/24" {
+		t.Errorf("prefixes: %v", p)
+	}
+	s, err = ParseServer([]byte("servers: [a]\nrevision: 1\negress: {allow: [10.0.0.0/8]}\n"))
+	if err != nil || len(s.Egress.Ports) != 1 || s.Egress.Ports[0] != 443 || s.Egress.User != "" {
+		t.Errorf("defaults: %+v, %v", s.Egress, err)
+	}
+	t.Setenv("ENCAR_EGRESS_PROXY_PASSWORD", "")
+	if _, err := e.Password(); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Errorf("an empty password: %v", err)
+	}
+	t.Setenv("ENCAR_EGRESS_PROXY_PASSWORD", "s3cret")
+	if p, err := e.Password(); err != nil || p != "s3cret" {
+		t.Errorf("password: %q, %v", p, err)
+	}
+}
+
+func TestParseServerEgressRejects(t *testing.T) {
+	egress := func(body string) string { return "servers: [a]\nrevision: 1\negress: " + body + "\n" }
+	for want, doc := range map[string]string{
+		"revision":                "servers: [a]\negress: {allow: [10.0.0.1]}\n",
+		"clients that may use it": egress(`{port: 3128}`),
+		"lets every address in":   egress(`{allow: [0.0.0.0/0]}`),
+		"neither an address":      egress(`{allow: [habsida]}`),
+		"proxy's own":             egress(`{port: 443, allow: [10.0.0.1]}`),
+		"not a TCP port":          egress(`{port: 70000, allow: [10.0.0.1]}`),
+		"go together":             egress(`{allow: [10.0.0.1], user: encar}`),
+		"never goes in":           egress(`{allow: [10.0.0.1], user: encar, password_env: "pass word"}`),
+		"letters, digits":         egress(`{allow: [10.0.0.1], user: "en:car", password_env: P}`),
+		"ports: 0":                egress(`{allow: [10.0.0.1], ports: [0]}`),
+		"absolute path":           egress(`{allow: [10.0.0.1], hosts_file: etc/hosts}`),
+	} {
+		if _, err := ParseServer([]byte(doc)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(doc), want, err)
+		}
+	}
+}

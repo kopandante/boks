@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kopandante/boks/internal/proxy"
@@ -133,12 +134,21 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	if err != nil {
 		return err
 	}
+	// The container first — a port is published only when it is created — then the policy that
+	// listens on it. A failed swap leaves the old proxy serving the old policy.
+	if err := proxy.Reshape(ctx, r, log, next); err != nil {
+		finish(ctx, r, log, serverJournal, op, "failed", o.Now())
+		return err
+	}
 	if err := proxy.SetPolicy(ctx, r, log, next); err != nil {
 		finish(ctx, r, log, serverJournal, op, "failed", o.Now())
 		return err
 	}
 	finish(ctx, r, log, serverJournal, op, "ok", o.Now())
 	fmt.Fprintf(log, "server policy: revision %d (%d blocks, %d allows)\n", next.Revision, len(next.Block), len(next.Allow))
+	if e := next.Egress; e != nil {
+		fmt.Fprintf(log, "  egress proxy on port %d for %s\n", e.Port, strings.Join(e.Allow, ", "))
+	}
 	if !running {
 		fmt.Fprintf(log, "  %s is not running on this server: nothing is filtered until it starts and loads this policy\n", proxy.Container)
 	}
