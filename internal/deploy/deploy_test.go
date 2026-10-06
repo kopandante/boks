@@ -1142,6 +1142,33 @@ func TestTheHealthCheckOfEveryPortComesFirst(t *testing.T) {
 	}
 }
 
+// Each port has its own deploy_timeout from when the one before it answered, as kamal-proxy gave each
+// route it deployed: two ports that answer 250ms apart pass under a 300ms timeout though together they
+// take longer.
+func TestEveryPortHasItsOwnDeployTimeout(t *testing.T) {
+	f := routedFake(t)
+	start := time.Now()
+	web, admin := probe+"http://"+newCopy+":3000/up", probe+"http://"+newCopy+":3002/ready"
+	f.onRun = func(cmd string) {
+		for url, at := range map[string]time.Duration{web: 250 * time.Millisecond, admin: 500 * time.Millisecond} {
+			if strings.HasPrefix(cmd, url) {
+				if time.Since(start) < at {
+					f.fail[url] = errors.New("refused")
+				} else {
+					delete(f.fail, url)
+				}
+			}
+		}
+	}
+	cfg := parse(t, onePort+"deploy_timeout: 300ms\n")
+	cfg.Ports = append(cfg.Ports, config.Port{Name: "admin", Port: 3002, Host: "admin.example.com", HealthPath: "/ready"})
+	opts := quick()
+	opts.Poll = 10 * time.Millisecond
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", opts); err != nil {
+		t.Fatalf("want both ports through, each within its own budget: %v", err)
+	}
+}
+
 // The previous copy finishes the requests the proxy still holds for it before it is stopped, within
 // drain_timeout; one that never finishes is stopped at the bound, with a warning.
 func TestTheOldCopyDrainsBeforeItGoes(t *testing.T) {

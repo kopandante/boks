@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -100,6 +101,13 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 		}
 		locked = append(locked, app)
 	}
+	// A deploy holding a lock this run did not take is an app without a current release yet — its first
+	// deploy — which can still add a route to kamal-proxy after it is read.
+	if busy, err := otherLocks(ctx, r, locked); err != nil {
+		return err
+	} else if len(busy) > 0 {
+		return fmt.Errorf("a deploy of %v seems to be in progress (run `boks unlock` in that app if it is not); nothing was changed", busy)
+	}
 	// Read once no deploy can move them: a deploy by an earlier boks gives the admission lock back
 	// before it switches kamal-proxy, and read before its app lock was taken, a target could be the copy
 	// it retired since.
@@ -139,7 +147,8 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 	}
 	fmt.Fprintf(log, "proxy: replacing kamal-proxy with Caddy\n")
 	if _, err := r.Run(ctx, "docker", "stop", proxy.Container); err != nil {
-		return fmt.Errorf("stopping kamal-proxy: %w; run `docker start %s` if it is down", err, proxy.Container)
+		// The stop may have gone through with its answer lost: kamal-proxy is started again either way.
+		return errors.Join(fmt.Errorf("stopping kamal-proxy: %w", err), restoreKamal(context.WithoutCancel(ctx), r, log))
 	}
 	if _, err := r.Run(ctx, "docker", "rename", proxy.Container, asideName); err != nil {
 		// The rename may have gone through with its answer lost: kamal-proxy is looked for under both names.
@@ -174,6 +183,23 @@ func restoreKamal(ctx context.Context, r remote.Runner, log io.Writer) error {
 	}
 	fmt.Fprintln(log, "kamal-proxy is back with its routes")
 	return nil
+}
+
+// otherLocks are the apps whose deploy lock is held by someone other than this run, which holds those
+// of locked.
+func otherLocks(ctx context.Context, r remote.Runner, locked []string) ([]string, error) {
+	out, err := r.Run(ctx, "sh", "-c", "for d in /tmp/boks-*.lock; do [ -d \"$d\" ] && echo \"$d\"; done; true")
+	if err != nil {
+		return nil, fmt.Errorf("looking for deploys in progress: %w", err)
+	}
+	var busy []string
+	for _, d := range strings.Fields(out) {
+		app := strings.TrimSuffix(strings.TrimPrefix(d, "/tmp/boks-"), ".lock")
+		if !slices.Contains(locked, app) {
+			busy = append(busy, app)
+		}
+	}
+	return busy, nil
 }
 
 // asideThere says whether kamal-proxy waits under asideName.

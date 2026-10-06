@@ -1128,9 +1128,11 @@ func routesTo(cfg *config.Config, target string) []proxy.Route {
 // defaultHealthPath is kamal-proxy's, so an app that relied on its default is checked the same way.
 const defaultHealthPath = "/up"
 
-// awaitReady waits, within deploy_timeout, until the new copy answers the health check of every port
-// from inside the proxy — the network and the name its routes will dial. A port that answered once is
-// not asked again. Nothing has moved while this runs, so a copy that never answers simply goes.
+// awaitReady waits until the new copy answers the health check of every port from inside the proxy —
+// the network and the name its routes will dial. The ports are waited for in turn, each within its own
+// deploy_timeout from when the one before it answered, as kamal-proxy waited for each route it
+// deployed; a port that answered is not asked again. Nothing has moved while this runs, so a copy that
+// never answers simply goes.
 func awaitReady(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, name string, poll time.Duration) error {
 	if poll <= 0 {
 		poll = time.Second
@@ -1140,39 +1142,43 @@ func awaitReady(ctx context.Context, r remote.Runner, log io.Writer, cfg *config
 		return err
 	}
 	fmt.Fprintf(log, "waiting for %s to pass its health checks\n", name)
+	for _, p := range cfg.Ports {
+		if err := awaitPort(ctx, r, cfg, name, p, timeout, poll); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// awaitPort probes one port of the new copy until it answers, within timeout. The bound covers the
+// probes themselves: one that hangs, or answers after it, does not count.
+func awaitPort(ctx context.Context, r remote.Runner, cfg *config.Config, name string, p config.Port, timeout, poll time.Duration) error {
+	port, path := p.Port, p.HealthPath
+	if p.HealthPort > 0 {
+		port = p.HealthPort
+	}
+	if path == "" {
+		path = defaultHealthPath
+	} else if !strings.HasPrefix(path, "/") {
+		// kamal-proxy joined the path onto the target's URL, so `up` meant /up.
+		path = "/" + path
+	}
 	deadline := time.Now().Add(timeout)
-	// The bound covers the probes themselves: one that hangs, or answers after it, does not count.
 	pctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	pending := cfg.Ports
 	for {
-		var left []config.Port
-		var last error
-		for _, p := range pending {
-			port, path := p.Port, p.HealthPath
-			if p.HealthPort > 0 {
-				port = p.HealthPort
-			}
-			if path == "" {
-				path = defaultHealthPath
-			} else if !strings.HasPrefix(path, "/") {
-				// kamal-proxy joined the path onto the target's URL, so `up` meant /up.
-				path = "/" + path
-			}
-			if err := proxy.Probe(pctx, r, name, port, path); err != nil {
-				left, last = append(left, p), fmt.Errorf("port %s (%s:%d%s): %w", p.Name, name, port, path, err)
-			}
-		}
-		if len(left) == 0 {
+		err := proxy.Probe(pctx, r, name, port, path)
+		if err == nil {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%s did not pass its health check within %s, so no route moved: %w", name, cfg.DeployTimeout, last)
+			return fmt.Errorf("%s did not pass its health check within %s, so no route moved: port %s (%s:%d%s): %w",
+				name, cfg.DeployTimeout, p.Name, name, port, path, err)
 		}
-		pending = left
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-pctx.Done():
 		case <-time.After(poll):
 		}
 	}

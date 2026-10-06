@@ -324,3 +324,24 @@ func TestMigrateRetriesAfterAHostMovedBetweenApps(t *testing.T) {
 		t.Errorf("want aaa's fragment written: %v", f.calls)
 	}
 }
+
+// A deploy lock this run did not take is an app's first deploy, with no current release to lock it by:
+// it could still add a route to kamal-proxy after the read, so the migration refuses, changing nothing.
+func TestMigrateRefusesWhileAFirstDeployRuns(t *testing.T) {
+	f := kamalServer()
+	f.out["sh -c for d in /tmp/boks-*.lock"] = "/tmp/boks-convex-lab.lock\n/tmp/boks-newapp.lock"
+	err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed)
+	if err == nil || !strings.Contains(err.Error(), "newapp") || f.has("docker stop") || f.has(kamalList) || proxyWrites(f) {
+		t.Errorf("want a refusal naming newapp, nothing changed: %v %v", err, f.calls)
+	}
+}
+
+// A stop whose answer was lost after it went through: kamal-proxy is started again, not left down.
+func TestMigrateStartsKamalAgainAfterAFailedStop(t *testing.T) {
+	f := kamalServer()
+	f.fail["docker stop boks-proxy"] = errors.New("connection lost")
+	err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed)
+	if err == nil || !strings.Contains(err.Error(), "stopping kamal-proxy") || !f.has("docker start boks-proxy") || f.has("docker rename") {
+		t.Errorf("want kamal-proxy started where it is: %v %v", err, f.calls)
+	}
+}
