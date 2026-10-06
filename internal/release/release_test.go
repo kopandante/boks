@@ -3,9 +3,12 @@ package release
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kopandante/boks/internal/config"
 )
 
 type fake struct {
@@ -50,7 +53,11 @@ func (f *fake) Pipe(_ context.Context, content []byte, args ...string) (string, 
 
 func TestSaveAndLoadRoundTrip(t *testing.T) {
 	f := newFake()
-	s := Snapshot{ID: "demo-v2-2", App: "demo", Image: "ghcr.io/x/y", Tag: "v2", Digest: "sha256:abc"}
+	s := Snapshot{ID: "demo-v2-2", App: "demo", Image: "ghcr.io/x/y", Tag: "v2", Digest: "sha256:abc", Ports: []config.Port{
+		{Name: "img", Port: 8080, Host: "cars.example.com", Path: "/api/images", PathRewrite: "/img",
+			Headers: &config.Headers{Request: map[string]string{"Cookie": ""}, Response: map[string]string{"X-Content-Type-Options": "nosniff"}}},
+		{Name: "old", Port: 8081, Host: "cars.example.com", Path: "/old", StripPath: true},
+	}}
 	if err := Save(context.Background(), f, s); err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +72,10 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 	if got.Digest != "sha256:abc" || got.Tag != "v2" {
 		t.Errorf("round trip lost data: %+v", got)
+	}
+	// A rollback routes the release as it ran: its paths, rewrites and header rules come back.
+	if !reflect.DeepEqual(got.Ports, s.Ports) {
+		t.Errorf("round trip lost the ports' routing:\n got %+v\nwant %+v", got.Ports, s.Ports)
 	}
 }
 

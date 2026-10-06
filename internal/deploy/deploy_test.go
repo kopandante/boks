@@ -1869,4 +1869,9 @@ func TestRouteOfCarriesThePortsRouting(t *testing.T) {
 	if plain := routeOf(config.Port{Host: "a.example.org", StripPath: true, Path: "/x"}, "a:1", false, nil); plain.Cert != nil || !plain.StripPath || plain.Headers != nil {
 		t.Errorf("a host outside the certificate keeps automatic HTTPS and only its own rules: %+v", plain)
 	}
+	// A deploy routes its ports through routeOf: nothing of the port's routing is lost on the way.
+	cfg := &config.Config{TLS: true, Cert: c, Ports: []config.Port{p}}
+	if got := routesTo(cfg, "gw-v1"); len(got) != 1 || !reflect.DeepEqual(got[0], rt) {
+		t.Errorf("want the deploy's route to be the port's: %+v", got)
+	}
 }
