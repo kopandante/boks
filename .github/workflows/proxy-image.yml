@@ -1,0 +1,37 @@
+# Builds the proxy image (proxy/Dockerfile) for amd64 and arm64 and pushes it to GHCR under the tag in
+# proxy/TAG, on any push that changes proxy/ — the branch's own copy of this file runs, so the image is
+# there before the change that pins it is merged. The digest it prints goes into
+# config.DefaultProxyImage: a server only ever runs an image pinned in a reviewed commit.
+name: proxy image
+
+on:
+  push:
+    paths: [proxy/**, .github/workflows/proxy-image.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        run: echo "tag=$(cat proxy/TAG)" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: proxy
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/boks-caddy:${{ steps.tag.outputs.tag }}
+      - run: echo "ghcr.io/${{ github.repository_owner }}/boks-caddy:${{ steps.tag.outputs.tag }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
