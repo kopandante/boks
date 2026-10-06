@@ -183,15 +183,26 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 }
 
 // Nothing trusted stands in front of boks (#48): Caddy is told of no trusted proxy, so it sets
-// X-Forwarded-For from the connection and drops the visitor's own — measured on boks-lab.
+// X-Forwarded-For from the connection and drops the visitor's own — measured on boks-lab. The one
+// header every route touches is Forwarded, which it deletes: kamal-proxy did, and Caddy passes it on.
 func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"trusted_proxies", "client_ip_headers", "headers"} {
+	for _, key := range []string{"trusted_proxies", "client_ip_headers", "set", "add", "replace"} {
 		if strings.Contains(string(b), `"`+key+`"`) {
 			t.Errorf("the config sets %s, which would let a visitor's forwarded headers through:\n%s", key, b)
+		}
+	}
+	for _, srv := range []string{"http", "https"} {
+		routes, _ := dig(decoded(t, b), "apps", "http", "servers", srv, "routes").([]any)
+		h := dig(routes[0], "handle").([]any)[0]
+		if del, _ := dig(h, "headers", "request", "delete").([]any); len(del) != 1 || del[0] != "Forwarded" {
+			t.Errorf("%s: want Forwarded deleted from the request, got %v", srv, dig(h, "headers"))
+		}
+		if dig(decoded(t, b), "apps", "http", "servers", srv, "logs") == nil {
+			t.Errorf("%s: want access logs on, as kamal-proxy wrote them", srv)
 		}
 	}
 }
@@ -388,6 +399,33 @@ func TestRestoreRoutesReloadsEvenWhenNothingChanged(t *testing.T) {
 	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
 	if d.files[Dir+"/caddy.json"] != string(want) || d.files[Dir+"/caddy.next.json"] != "" {
 		t.Errorf("want the restored config applied: %v", d.files)
+	}
+}
+
+// A put-back whose reload fails leaves the fragment naming the copy that is kept — the one the routes
+// were moved to — not the copies they were to go back to, which may be stopped until revived: the next
+// run of any app reloads with the fragment.
+func TestRestoreRoutesThatFailsLeavesTheFragmentOnTheKeptCopy(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	d.fail[reloadNext] = errors.New("connection lost")
+	old := []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}
+	if err := RestoreRoutes(context.Background(), d, io.Discard, "demo", old); err == nil {
+		t.Fatal("want the failure")
+	}
+	if !strings.Contains(d.files[Dir+"/routes/demo.json"], "demo:3000") {
+		t.Errorf("want the fragment still on the kept copy: %s", d.files[Dir+"/routes/demo.json"])
+	}
+	// A put-back that succeeds records the routes it put back, after the reload.
+	delete(d.fail, reloadNext)
+	d.calls = nil
+	if err := RestoreRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	if reload, frag := index(d.calls, reloadNext), index(d.calls, "upload "+Dir+"/routes/demo.json"); reload < 0 || frag < reload {
+		t.Errorf("want the reload, then the fragment: %v", d.calls)
 	}
 }
 

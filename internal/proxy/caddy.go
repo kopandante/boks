@@ -121,7 +121,9 @@ func Config(fragments []Fragment) ([]byte, error) {
 		}
 		s := servers[name]
 		if s == nil {
-			s = &server{Listen: []string{listen}}
+			// Logs on: every request in `docker logs boks-proxy`, as kamal-proxy wrote them. Caddy logs none
+			// by default.
+			s = &server{Listen: []string{listen}, Logs: &struct{}{}}
 			if e.r.TLS {
 				// No HTTP/3: 443/udp is not published, and a client sent there by Alt-Svc would wait out
 				// a timeout before falling back. kamal-proxy spoke HTTP/1.1 and HTTP/2 too.
@@ -132,7 +134,9 @@ func Config(fragments []Fragment) ([]byte, error) {
 		s.Routes = append(s.Routes, caddyRoute{
 			Match: []match{{Host: []string{e.r.Host}}},
 			Handle: []handler{{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: e.r.Dial}}, StreamCloseDelay: streamCloseDelay,
-				Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout}}},
+				Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
+				// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on.
+				Headers: &proxyHeaders{Request: &headerOps{Delete: []string{"Forwarded"}}}}},
 			Terminal: true,
 		})
 		if e.r.TLS && e.r.Cert != nil {
@@ -186,6 +190,7 @@ type (
 		Routes    []caddyRoute `json:"routes"`
 		Protocols []string     `json:"protocols,omitempty"`
 		AutoHTTPS *autoHTTPS   `json:"automatic_https,omitempty"`
+		Logs      *struct{}    `json:"logs,omitempty"`
 	}
 	autoHTTPS struct {
 		SkipCertificates []string `json:"skip_certificates,omitempty"`
@@ -199,10 +204,17 @@ type (
 		Host []string `json:"host"`
 	}
 	handler struct {
-		Handler          string     `json:"handler"`
-		Upstreams        []upstream `json:"upstreams"`
-		StreamCloseDelay string     `json:"stream_close_delay,omitempty"`
-		Transport        *transport `json:"transport,omitempty"`
+		Handler          string        `json:"handler"`
+		Upstreams        []upstream    `json:"upstreams"`
+		StreamCloseDelay string        `json:"stream_close_delay,omitempty"`
+		Transport        *transport    `json:"transport,omitempty"`
+		Headers          *proxyHeaders `json:"headers,omitempty"`
+	}
+	proxyHeaders struct {
+		Request *headerOps `json:"request,omitempty"`
+	}
+	headerOps struct {
+		Delete []string `json:"delete,omitempty"`
 	}
 	transport struct {
 		Protocol              string `json:"protocol"`
@@ -316,7 +328,11 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 	if _, err := Config(next); err != nil {
 		return false, err
 	}
-	if force || !sameRoutes(Of(fs, app), routes) {
+	record := func() error {
+		if !force && sameRoutes(Of(fs, app), routes) {
+			return nil
+		}
+		var err error
 		if len(routes) == 0 {
 			_, err = r.Run(ctx, "rm", "-f", fragmentPath(app))
 		} else {
@@ -326,13 +342,29 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 			}
 		}
 		if err != nil {
+			return fmt.Errorf("recording the routes of %s: %w", app, err)
+		}
+		return nil
+	}
+	// The fragment always names copies that are alive if the run is cut there. Moving the routes to a
+	// new copy, the new copy is up and has passed its health check: the fragment goes first. Putting
+	// them back, the copies they go back to may be stopped until the caller revives them, while the
+	// copy they leave stays until the caller removes it once this returns: the fragment goes last, so a
+	// put-back that fails leaves it naming the copy that is kept.
+	if !force {
+		if err := record(); err != nil {
 			// The write may have gone through with its answer lost: the routes are put back either way.
-			return true, fmt.Errorf("recording the routes of %s: %w", app, err)
+			return true, err
 		}
 	}
 	reloaded, err := converge(ctx, r, log, next, force, "the routes of "+app)
 	if err != nil {
 		return true, err
+	}
+	if force {
+		if err := record(); err != nil {
+			return true, err
+		}
 	}
 	return reloaded, nil
 }

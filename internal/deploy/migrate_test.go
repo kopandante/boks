@@ -262,16 +262,61 @@ func TestMigratePutsKamalBackAfterALostRename(t *testing.T) {
 	}
 }
 
-// Fragments are exactly what kamal-proxy serves: one an earlier, cut migration left for an app with
-// no routes now is removed before Caddy starts, or Caddy would route its hosts to retired copies.
-func TestMigrateDropsAFragmentACutMigrationLeft(t *testing.T) {
+// Fragments are exactly what kamal-proxy serves: what an earlier, cut migration left is removed before
+// the new ones are written — an app with no routes now would have Caddy route its hosts to retired
+// copies, and a host since moved to another app would refuse the new fragments.
+func TestMigrateDropsTheFragmentsACutMigrationLeft(t *testing.T) {
 	f := kamalServer()
-	f.out[frags] = fragment(t, "gone", "gone-v1-1", config.Port{Name: "web", Port: 80, Host: "gone.example.com"})
+	gone := fragment(t, "gone", "gone-v1-1", config.Port{Name: "web", Port: 80, Host: "gone.example.com"})
+	// A host kamal-proxy now sends to convex-lab, left in another app's fragment.
+	moved := fragment(t, "other", "other-v1-1", config.Port{Name: "web", Port: 80, Host: "api.lab.example.com"})
+	f.out[frags] = gone + "\n" + moved
+	inner := f.onRun
+	f.onRun = func(cmd string) {
+		inner(cmd)
+		switch cmd {
+		case "rm -f .boks/_proxy/routes/gone.json":
+			f.out[frags] = strings.Replace(f.out[frags], gone, "", 1)
+		case "rm -f .boks/_proxy/routes/other.json":
+			f.out[frags] = strings.Replace(f.out[frags], moved, "", 1)
+		}
+	}
 	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
 		t.Fatal(err)
 	}
-	removed, stopped := f.at("rm -f .boks/_proxy/routes/gone.json"), f.at("docker stop boks-proxy")
-	if removed < 0 || stopped < removed {
-		t.Errorf("want the leftover fragment removed before kamal-proxy stops: %v", f.calls)
+	stopped := f.at("docker stop boks-proxy")
+	for _, rm := range []string{"rm -f .boks/_proxy/routes/gone.json", "rm -f .boks/_proxy/routes/other.json"} {
+		if at := f.at(rm); at < 0 || stopped < at {
+			t.Errorf("want %q before kamal-proxy stops: %v", rm, f.calls)
+		}
+	}
+	if !strings.Contains(f.fragmentWrite("convex-lab"), "api.lab.example.com") {
+		t.Errorf("want convex-lab's fragment written: %q", f.fragmentWrite("convex-lab"))
+	}
+}
+
+// The host moved between two apps that both still have routes: the stale fragment of one is removed
+// before the other's new fragment is checked against it.
+func TestMigrateRetriesAfterAHostMovedBetweenApps(t *testing.T) {
+	f := kamalServer()
+	f.out[appsListed] = "aaa\nconvex-lab"
+	f.out["sh -c cat '.boks/aaa/current'"] = "aaa-1\n"
+	f.out["cat .boks/aaa/releases/aaa-1.json"] = `{"version":6,"id":"aaa-1","app":"aaa","image":"x","tag":"1","tls":false,` +
+		`"ports":[{"name":"web","port":80,"host":"moved.example.com"}]}`
+	f.out[kamalList] = strings.TrimSuffix(f.out[kamalList], "}") + `,"aaa.web":{"hosts":["moved.example.com"],"tls":false,"targets":["aaa-1:80"]}}`
+	stale := fragment(t, "convex-lab", "convex-lab-old", config.Port{Name: "web", Port: 80, Host: "moved.example.com"})
+	f.out[frags] = stale
+	inner := f.onRun
+	f.onRun = func(cmd string) {
+		inner(cmd)
+		if cmd == "rm -f .boks/_proxy/routes/convex-lab.json" {
+			f.out[frags] = ""
+		}
+	}
+	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.fragmentWrite("aaa"), "moved.example.com") {
+		t.Errorf("want aaa's fragment written: %v", f.calls)
 	}
 }
