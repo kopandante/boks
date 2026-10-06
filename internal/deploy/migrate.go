@@ -61,7 +61,10 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 					"kamal-proxy waits stopped as %s with routes that may be stale by now — put it back (`docker rm -f %s; docker rename %s %s; docker start %s`) "+
 					"only if Caddy cannot serve", err, asideName, proxy.Container, asideName, proxy.Container, proxy.Container)
 			}
-			best(ctx, r, log, "docker", "rm", asideName)
+			if _, err := r.Run(ctx, "docker", "rm", asideName); err != nil {
+				fmt.Fprintf(log, "Caddy serves the routes; the kamal-proxy an earlier migration left aside could not be removed (%v): `docker rm %s`\n", err, asideName)
+				return nil
+			}
 			fmt.Fprintln(log, "Caddy serves the routes; the kamal-proxy an earlier migration left aside is removed")
 			return nil
 		case state == "":

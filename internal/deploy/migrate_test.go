@@ -249,6 +249,16 @@ func TestMigrateFinishesWhenCaddyServesAndKamalWaitsAside(t *testing.T) {
 	if !f.has("docker rm boks-proxy.kamal") || f.has(kamalList) || f.has("docker rename") {
 		t.Errorf("want kamal-proxy removed and nothing else: %v", f.calls)
 	}
+	// A removal that fails is reported as such, not as done; Caddy serves either way.
+	h := newFake()
+	h.out[proxyState] = caddyUp
+	h.out[asideState] = "boks-proxy.kamal"
+	h.fail["docker rm boks-proxy.kamal"] = errors.New("connection lost")
+	var log strings.Builder
+	if err := MigrateProxy(context.Background(), h, &log, "img", fixed); err != nil || strings.Contains(log.String(), "is removed") ||
+		!strings.Contains(log.String(), "could not be removed") {
+		t.Errorf("want the failed removal reported: %v %q", err, log.String())
+	}
 	// A Caddy that does not come up then is reported, and kamal-proxy, stale, is not put back on its own.
 	g := newFake()
 	g.out[proxyState] = caddyUp
