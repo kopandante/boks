@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kopandante/boks/internal/hostname"
 	"gopkg.in/yaml.v3"
 )
 
@@ -588,10 +589,10 @@ func (c *Cert) Covers(host string) bool {
 	if c == nil {
 		return false
 	}
-	// Names are matched without regard to case, as the proxy matches hosts and certificates do.
-	host = strings.ToLower(host)
+	// Names are matched as the proxy matches hosts: punycode or Unicode, any case (hostname).
+	host = hostname.Canonical(host)
 	for _, d := range c.Domains {
-		d = strings.ToLower(d)
+		d = hostname.Canonical(d)
 		if d == host {
 			return true
 		}
@@ -637,7 +638,7 @@ func (c *Config) validateLists() error {
 		}
 		// Two ports on one host and path would be two routes for one: the proxy would send it to the
 		// first and never to the second. The proxy matches hosts and paths without regard to case.
-		route := strings.ToLower(p.Host + " " + p.Path)
+		route := hostname.Canonical(p.Host) + " " + strings.ToLower(p.Path)
 		if seenHost[route] {
 			return fmt.Errorf("ports: duplicate host %q", p.Host+p.Path)
 		}
@@ -717,6 +718,11 @@ func (p Port) validate() error {
 	}
 	if rest, wild := strings.CutPrefix(p.Host, "*."); strings.Contains(rest, "*") || (!wild && strings.Contains(p.Host, "*")) || rest == "" {
 		return fmt.Errorf("ports[%s]: host %q — a wildcard is `*.` before a domain, once, such as *.example.com", p.Name, p.Host)
+	}
+	// Caddy converts a host to punycode before it folds case, and a browser folds first: a route for
+	// ПРИМЕР.РФ would never match a request for it.
+	if hostname.Canonical(p.Host) != hostname.Canonical(strings.ToLower(p.Host)) {
+		return fmt.Errorf("ports[%s]: host %q has capitals outside ASCII, which the proxy would never match; write it in lower case", p.Name, p.Host)
 	}
 	if p.Path != "" && !pathRe.MatchString(p.Path) {
 		return fmt.Errorf("ports[%s]: path %q must be an absolute prefix without a trailing slash, such as /api", p.Name, p.Path)

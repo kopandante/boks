@@ -949,3 +949,14 @@ func TestFragmentsCarryTheirFormat(t *testing.T) {
 		t.Errorf("want a newer format refused, got %v", err)
 	}
 }
+
+// Apps routing one host in Unicode and in punycode are refused like apps routing one host twice:
+// Caddy would give it to whichever route came first. Fragments written before boks compared this way
+// are caught too — the check runs on every assembly.
+func TestConfigRefusesOneHostInTwoSpellings(t *testing.T) {
+	_, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "пример.рф", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "xn--e1afmkfd.XN--P1AI", Dial: "b:1"}}}})
+	if err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
+		t.Errorf("want the host refused, got %v", err)
+	}
+}

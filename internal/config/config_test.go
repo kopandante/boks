@@ -599,6 +599,7 @@ func TestParsePortRouting(t *testing.T) {
 		port("headers: {request: {forwarded: ''}}"):                                                     "set by the proxy",
 		port("headers: {response: {X-Forwarded-For: x}}"):                                               "set by the proxy",
 		port("headers: {request: {X-Gw: \"images\\n\"}}"):                                               "control character",
+		app + "ports: [{name: p, port: 1, host: ПРИМЕР.РФ}]\n":                                          "capitals outside ASCII",
 		port("headers: {response: {X-A: \"a\\rb\"}}"):                                                   "control character",
 		app + "ports: [{name: a, port: 1, host: h, path: /x}, {name: b, port: 2, host: H, path: /X}]\n": "duplicate host",
 		app + "ports: [{name: a, port: 1, host: 'a.*.example.com'}]\n":                                  "wildcard",
@@ -626,5 +627,22 @@ func TestParsePortRouting(t *testing.T) {
 	// One host on different paths is fine within an app.
 	if _, err := Parse([]byte(app + "ports: [{name: a, port: 1, host: h, path: /x}, {name: b, port: 2, host: h}]\n")); err != nil {
 		t.Errorf("one host on two paths must parse: %v", err)
+	}
+}
+
+// A host in Unicode and in punycode is one host, as it is to the proxy: two ports of one app cannot
+// both route it, and a certificate for one covers the other.
+func TestHostsCompareAsTheProxyDoes(t *testing.T) {
+	const app = "app: gw\nimage: x\nservers: [a]\n"
+	two := app + "ports: [{name: a, port: 1, host: пример.рф}, {name: b, port: 2, host: XN--E1AFMKFD.xn--p1ai}]\n"
+	if _, err := Parse([]byte(two)); err == nil {
+		t.Error("want one host in two spellings refused")
+	}
+	c := &Cert{Domains: []string{"*.пример.рф"}}
+	if !c.Covers("api.xn--e1afmkfd.xn--p1ai") || !c.Covers("API.пример.рф") || c.Covers("api.example.com") {
+		t.Error("want the certificate to cover the punycode spelling and nothing else")
+	}
+	if _, err := Parse([]byte(app + "ports: [{name: a, port: 1, host: пример.рф}]\n")); err != nil {
+		t.Errorf("a lower-case Unicode host is fine: %v", err)
 	}
 }

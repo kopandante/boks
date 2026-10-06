@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kopandante/boks/internal/hostname"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -139,7 +140,7 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 	modes := map[string]mode{}
 	for _, f := range fragments {
 		for _, r := range f.Routes {
-			host := strings.ToLower(r.Host)
+			host := hostname.Canonical(r.Host)
 			key := host + " " + strings.ToLower(r.Path)
 			if o, ok := owner[key]; ok {
 				return nil, fmt.Errorf("host %s%s is routed by both %s and %s", r.Host, r.Path, o, f.App)
@@ -166,7 +167,7 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 			return wb
 		}
 		// In one case, or a bare host in capitals would sort before, and take, a path of the same host.
-		if ha, hb := strings.ToLower(a.Host), strings.ToLower(b.Host); ha != hb {
+		if ha, hb := hostname.Canonical(a.Host), hostname.Canonical(b.Host); ha != hb {
 			return ha < hb
 		}
 		if len(a.Path) != len(b.Path) {
@@ -208,11 +209,11 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 			servers[name] = s
 		}
 		m := routeMatch(e.r)
-		if suffix, ok := strings.CutPrefix(strings.ToLower(e.r.Host), "*"); ok {
+		if suffix, ok := strings.CutPrefix(hostname.Canonical(e.r.Host), "*"); ok {
 			var covered []string
 			for _, h := range exact[!e.r.TLS] {
 				// Caddy's wildcard stands for one label.
-				if label, ok := strings.CutSuffix(strings.ToLower(h), suffix); ok && label != "" && !strings.Contains(label, ".") {
+				if label, ok := strings.CutSuffix(hostname.Canonical(h), suffix); ok && label != "" && !strings.Contains(label, ".") {
 					covered = append(covered, h)
 				}
 			}
@@ -399,7 +400,7 @@ type (
 // hasHost tells whether hosts names h in any case: Caddy matches hosts without regard to case, and
 // refuses a host matcher that names one twice.
 func hasHost(hosts []string, h string) bool {
-	return slices.ContainsFunc(hosts, func(x string) bool { return strings.EqualFold(x, h) })
+	return slices.ContainsFunc(hosts, func(x string) bool { return hostname.Same(x, h) })
 }
 
 // addHost adds h to hosts unless they name it already: a host routed on several paths is one host.
