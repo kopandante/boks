@@ -260,6 +260,25 @@ func TestUnlockClearsTheAdmissionLockOfThisApp(t *testing.T) {
 	}
 }
 
+// Stop-first asks the proxy whether it would take the new routes before it stops anything: a
+// certificate file another run left broken makes every reload fail, and after the stop the app would
+// be left with no copy running.
+func TestStopFirstAsksTheProxyBeforeTheStop(t *testing.T) {
+	f := stopFirstFake(t)
+	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if asked, stop := f.callAt("docker exec boks-proxy caddy validate"), f.callAt("docker stop demo-v1-1"); asked < 0 || stop < asked {
+		t.Errorf("want the proxy asked before the stop: %v", f.calls)
+	}
+	g := stopFirstFake(t)
+	g.fail["docker exec boks-proxy caddy validate"] = errors.New("loading config: tls: private key does not match public key")
+	err := Run(context.Background(), g, io.Discard, parse(t, stopFirst), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "would refuse") || g.has("docker stop") || g.has("docker run") || journalOpen(g, journal) {
+		t.Errorf("want a refusal with nothing stopped or started: %v %v", err, g.calls)
+	}
+}
+
 // Stop-first with routes: the old copy is stopped and confirmed down before the new one starts, the
 // journal is open before the stop, and the routes move only once the proxy's health check of the new
 // copy passed. Admission lasts until the routes have moved.

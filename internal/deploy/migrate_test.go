@@ -68,6 +68,10 @@ func TestMigrateMovesEveryRouteToCaddy(t *testing.T) {
 		t.Errorf("both hosts TLS, only the one under the wildcard from its file:\n%s", frag)
 	}
 	locked, pulled, written := f.at("mkdir /tmp/boks-convex-lab.lock"), f.at("docker pull caddy:2.11.7-alpine"), f.writeAt(".boks/_proxy/caddy.json", "convex-lab")
+	// kamal-proxy's targets are read once no deploy can move them: after every app's lock.
+	if read := f.at(kamalList); read < locked {
+		t.Errorf("want kamal-proxy's routes read after the app locks: %d %d", read, locked)
+	}
 	stopped, aside, created, started := f.at("docker stop boks-proxy"), f.at("docker rename boks-proxy boks-proxy.kamal"),
 		f.at("docker create --name boks-proxy"), f.at("docker start boks-proxy")
 	if locked < 0 || pulled < locked || written < pulled || stopped < written || aside < stopped || created < aside || started < created {

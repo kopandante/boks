@@ -84,10 +84,6 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 		return fmt.Errorf("%s is %s, and its routes are read from it: `docker start %s`, then migrate again; nothing was changed",
 			proxy.Container, state, proxy.Container)
 	}
-	targets, err := kamalTargets(ctx, r)
-	if err != nil {
-		return err
-	}
 	apps, err := recordedApps(ctx, r)
 	if err != nil {
 		return err
@@ -103,6 +99,13 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 			return fmt.Errorf("%w; nothing was changed", err)
 		}
 		locked = append(locked, app)
+	}
+	// Read once no deploy can move them: a deploy by an earlier boks gives the admission lock back
+	// before it switches kamal-proxy, and read before its app lock was taken, a target could be the copy
+	// it retired since.
+	targets, err := kamalTargets(ctx, r)
+	if err != nil {
+		return err
 	}
 	frags, err := migratedRoutes(ctx, r, log, apps, targets)
 	if err != nil {

@@ -108,8 +108,16 @@ func Config(fragments []Fragment) ([]byte, error) {
 			all = append(all, entry{f.App, r})
 		}
 	}
-	// Hosts are unique, so ordering by host alone is total, whatever order the fragments came in.
-	sort.Slice(all, func(i, j int) bool { return all[i].r.Host < all[j].r.Host })
+	// Hosts are unique, so ordering by host alone is total, whatever order the fragments came in. A
+	// wildcard goes after every exact host: Caddy takes the first route that matches, and kamal-proxy
+	// served an exact host before a wildcard that also covers it.
+	sort.Slice(all, func(i, j int) bool {
+		wi, wj := strings.HasPrefix(all[i].r.Host, "*"), strings.HasPrefix(all[j].r.Host, "*")
+		if wi != wj {
+			return wj
+		}
+		return all[i].r.Host < all[j].r.Host
+	})
 
 	servers := map[string]*server{}
 	var files []loadFile
@@ -368,6 +376,34 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 	}
 	return reloaded, nil
 }
+
+// Validate asks the proxy whether it would take the config with app's routes set to routes, changing
+// nothing: Caddy loads every certificate file a config names, so a file another run left broken fails
+// here rather than in the reload. A stop-first deploy asks before it stops anything — after the stop,
+// a refused reload would leave its app with no copy running. The caller holds the server's admission
+// lock, so the fragments do not change between this and the reload.
+func Validate(ctx context.Context, r remote.Runner, app string, routes []Route) error {
+	fs, err := Fragments(ctx, r)
+	if err != nil {
+		return err
+	}
+	body, err := Config(withRoutes(fs, app, routes))
+	if err != nil {
+		return err
+	}
+	if err := remote.UploadAtomic(ctx, r, body, checkPath()); err != nil {
+		return err
+	}
+	out, err := r.Run(ctx, "docker", "exec", Container, "caddy", "validate", "--config", inProxy(checkPath()))
+	_, _ = r.Run(context.WithoutCancel(ctx), "rm", "-f", checkPath())
+	if err != nil {
+		return fmt.Errorf("the proxy would refuse the routes of %s: %w %s", app, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// checkPath is a config Validate asks about; nothing loads it.
+func checkPath() string { return path.Join(Dir, "caddy.check.json") }
 
 // Lags says whether an applied config is there and differs from the one the fragments fs assemble:
 // a run was cut after writing its fragment, and the proxy has not caught up.

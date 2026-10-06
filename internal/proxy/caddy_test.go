@@ -429,6 +429,40 @@ func TestRestoreRoutesThatFailsLeavesTheFragmentOnTheKeptCopy(t *testing.T) {
 	}
 }
 
+// A wildcard goes after every exact host, whatever their spelling sorts to: Caddy takes the first route
+// that matches, and kamal-proxy served an exact host before a wildcard that covers it.
+func TestConfigPutsAWildcardAfterTheExactHosts(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}},
+		{App: "b", Routes: []Route{{Host: "api.example.com", Dial: "b:80"}, {Host: "zz.example.com", Dial: "b:81"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
+	var hosts []any
+	for _, rt := range routes {
+		hosts = append(hosts, dig(rt, "match").([]any)[0].(map[string]any)["host"].([]any)[0])
+	}
+	if len(hosts) != 3 || hosts[0] != "api.example.com" || hosts[1] != "zz.example.com" || hosts[2] != "*.example.com" {
+		t.Errorf("want the exact hosts first, then the wildcard: %v", hosts)
+	}
+}
+
+// Validate asks Caddy about the config with the app's routes, and changes nothing: no fragment, no
+// applied config, and the file it asked about is gone.
+func TestValidateChangesNothing(t *testing.T) {
+	d := newDisk()
+	if err := Validate(context.Background(), d, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	if !d.ran("docker exec boks-proxy caddy validate --config /etc/boks/caddy.check.json") || len(d.files) != 0 {
+		t.Errorf("want a validate and no file left: %v %v", d.calls, d.files)
+	}
+	d.fail["docker exec boks-proxy caddy validate"] = errors.New("loading config: tls: failed to find any PEM data in key input")
+	if err := Validate(context.Background(), d, "demo", web); err == nil || !strings.Contains(err.Error(), "would refuse") || len(d.files) != 0 {
+		t.Errorf("want the refusal named and no file left: %v %v", err, d.files)
+	}
+}
+
 // A host another app holds is refused before anything changes.
 func TestCheckHostsRefusesAnotherAppsHost(t *testing.T) {
 	d := newDisk()

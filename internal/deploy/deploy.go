@@ -219,6 +219,13 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 			return err
 		}
 	}
+	// Stop-first stops the old copies before the reload that moves the routes: a reload the proxy would
+	// refuse is found now, while they still run.
+	if stopFirst && routed {
+		if err := proxy.Validate(ctx, r, cfg.App, routesTo(cfg, name)); err != nil {
+			return fmt.Errorf("%w\nnothing of the app was changed", err)
+		}
+	}
 	op, err := beginOperation(ctx, r, log, cfg, l.action, name, o.Now())
 	if err != nil {
 		return err
