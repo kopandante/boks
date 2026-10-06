@@ -65,7 +65,20 @@ R4 (`20261002-small-box-reality.md`) и G3 (`20261006-shchr-gaps.md`).
       `traefik/whoami` с `host: тест.lab2.test` отвечает 200 на `Host: xn--e1aybc.lab2.test` и на
       `XN--E1AYBC.lab2.test`, 404 на чужой хост; второе приложение с `host: XN--E1AYBC.lab2.test` —
       «routed by both idn1 and idn2» до запуска контейнера
-- [ ] **G3** — `boks proxy upgrade`
+- [x] **G3. Обновление прокси** (PR feat/proxy-upgrade, #74): `boks proxy upgrade` под замком допуска
+      и в журнале сервера; до остановки — ни одного идущего деплоя, pull, догон отставшего конфига,
+      `caddy validate` текущего конфига новым образом; затем старый контейнер отходит в
+      `boks-proxy.old`, новый создаётся, подключается к сетям маршрутов, стартует и проверяется
+      (admin API, `tcp_migrate_req`), при неудаче возвращается старый; остаток оборванной подмены —
+      отказ с точной командой. `proxy boot` работающий прокси не трогает, но называет расхождение
+      образов. `go test ./internal/proxy -run 'TestUpgrade|TestBootNames'`. На boks-lab2 из
+      каталога с `boks.yml` приложения `idn1` и нужным `proxy_image`, зонд
+      `GET http://<адрес>/` с `Host: xn--e1aybc.lab2.test` каждые 20 мс: `proxy boot` при
+      `caddy:2.11.7` — предупреждение, прокси не тронут; `proxy upgrade` на `caddy:2.6-alpine` —
+      отказ `unknown field "stream_close_delay"`, прокси не тронут; `2.11.7-alpine` → `2.11.7` и
+      обратно, пять подмен — окно 2,0–2,9 с с общими SSH-соединениями (B7), 2,9–4,0 с с
+      `BOKS_SSH_MUX=0`; у нового прокси json-file 5 × 10 MB, в `.boks/_server/journal.jsonl` —
+      `ok`, `boks-proxy.old` не остаётся
 - [ ] **B9** — подтверждение reload через admin API
 - [ ] **A** — `boks server install`
 
