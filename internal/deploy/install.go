@@ -35,6 +35,7 @@ const minDockerAPI = 1.44
 // factsScript reads, without changing anything, what the install decides on: one call, key=value
 // lines, a key repeated for a list. As the SSH user, with sudo -n where root is needed.
 const factsScript = `S=""; [ "$(id -u)" = 0 ] || S="sudo -n"
+PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin"
 echo "user=$(id -un)"
 echo "uid=$(id -u)"
 if [ -n "$S" ]; then $S true 2>/dev/null && echo sudo=yes || echo sudo=no; fi
@@ -43,12 +44,16 @@ if [ -r /etc/os-release ]; then . /etc/os-release; echo "os=$ID"; echo "version=
 [ -f /proc/sys/net/ipv4/tcp_migrate_req ] && echo migratereq=yes
 echo "kernel=$(uname -r)"
 command -v dockerd >/dev/null && echo dockerd=yes
+command -v docker >/dev/null && echo dockercli=yes
 command -v crontab >/dev/null && echo crontab=yes
 command -v flock >/dev/null && echo flock=yes
 id -nG "$(id -un)" | tr ' ' '\n' | grep -qx docker && echo indocker=yes
 echo "dockerenabled=$(systemctl is-enabled docker 2>/dev/null)"
 echo "cronactive=$(systemctl is-active cron 2>/dev/null)"
-if ! command -v dockerd >/dev/null; then echo "candidate=$(apt-cache policy docker.io 2>/dev/null | awk '/Candidate:/{print $2}')"; fi
+if ! command -v dockerd >/dev/null; then
+  echo "candidate=$(apt-cache policy docker.io 2>/dev/null | awk '/Candidate:/{print $2}')"
+  echo "clicandidate=$(apt-cache policy docker-cli 2>/dev/null | awk '/Candidate:/{print $2}')"
+fi
 if $S docker info >/dev/null 2>&1; then
   echo dockerup=yes
   echo "api=$($S docker version --format '{{.Server.APIVersion}}' 2>/dev/null)"
@@ -87,6 +92,9 @@ var errDockerPackage = errors.New("install Docker Engine from Docker's own repos
 // hostFacts is what factsScript found.
 type hostFacts struct {
 	user, os, version, kernel, candidate, api, swarm string
+	// cliCandidate is the version apt offers of docker-cli: Debian 13 splits the client off docker.io.
+	cliCandidate string
+	dockerCLI    bool
 	// dockerdCmd is the command line dockerd runs with — of the running daemon, so flags from a drop-in
 	// or an environment file count — or, with none running, the ExecStart systemd would run.
 	dockerdCmd                                              string
@@ -98,7 +106,6 @@ type hostFacts struct {
 	networks, publish, listen, nftFlush []string
 	routes                              []netip.Prefix
 	daemon                              map[string]any
-	daemonPresent                       bool
 }
 
 func parseFacts(out string) (hostFacts, error) {
@@ -128,6 +135,10 @@ func parseFacts(out string) (hostFacts, error) {
 			f.migrateReq = yes
 		case "dockerd":
 			f.dockerd = yes
+		case "dockercli":
+			f.dockerCLI = yes
+		case "clicandidate":
+			f.cliCandidate = v
 		case "crontab":
 			f.crontab = yes
 		case "flock":
@@ -174,7 +185,6 @@ func parseFacts(out string) (hostFacts, error) {
 			if err != nil {
 				return f, fmt.Errorf("reading /etc/docker/daemon.json: %w", err)
 			}
-			f.daemonPresent = true
 			if strings.TrimSpace(string(raw)) != "" {
 				if err := json.Unmarshal(raw, &f.daemon); err != nil {
 					return f, fmt.Errorf("/etc/docker/daemon.json is not JSON (%v); fix it before installing", err)
@@ -258,6 +268,13 @@ func planInstall(f hostFacts) (installPlan, error) {
 			return p, fmt.Errorf("this system's docker.io package is %q, older than Docker 25 that boks needs; %w", f.candidate, errDockerPackage)
 		}
 		p.packages = append(p.packages, "docker.io")
+		// Debian 13 ships the docker client as docker-cli, which docker.io only recommends; where apt has
+		// no such package (Ubuntu), docker.io carries the client itself.
+		if !f.dockerCLI && f.cliCandidate != "" && f.cliCandidate != "(none)" {
+			p.packages = append(p.packages, "docker-cli")
+		}
+	} else if !f.dockerCLI {
+		return p, fmt.Errorf("dockerd is installed without the docker client (docker-cli on Debian); install the client, then install again")
 	} else {
 		return p, fmt.Errorf("dockerd is installed but does not answer; start it (`systemctl start docker`) and install again")
 	}

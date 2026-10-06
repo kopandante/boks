@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -208,7 +209,8 @@ func TestPlanInstallRefuses(t *testing.T) {
 		`"iptables": false (`:                 strings.Replace(readyNoble, "--log-level warn", "--log-level warn --iptables=false", 1),
 		`"bridge": "none"`:                    emptyNoble + daemonLine(`{"bridge": "none"}`),
 		`"bridge": "none" (`:                  strings.Replace(readyNoble, "--log-level warn", "--log-level warn -b none", 1),
-		"does not answer":                     strings.Replace(emptyNoble, "flock=yes", "flock=yes\ndockerd=yes", 1),
+		"without the docker client":           strings.Replace(emptyNoble, "flock=yes", "flock=yes\ndockerd=yes", 1),
+		"does not answer":                     strings.Replace(emptyNoble, "flock=yes", "flock=yes\ndockerd=yes\ndockercli=yes", 1),
 	} {
 		if _, err := plan(t, facts); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("want a refusal containing %q, got %v", want, err)
@@ -563,5 +565,22 @@ func TestInstallValidatesDaemonJSONWhereDockerRuns(t *testing.T) {
 	}
 	if !validated {
 		t.Errorf("daemon.json not validated: %v", f.stdin)
+	}
+}
+
+// Debian 13 splits the docker client off docker.io into docker-cli, which docker.io only recommends:
+// it is installed with it. Ubuntu has no docker-cli, and docker.io there carries the client.
+func TestPlanInstallAddsDebiansDockerCLI(t *testing.T) {
+	trixie := strings.NewReplacer("os=ubuntu", "os=debian", "version=24.04", "version=13",
+		"candidate=27.5.1-0ubuntu3~24.04.2", "candidate=26.1.5+dfsg1-9+b9\nclicandidate=26.1.5+dfsg1-9+b9").Replace(emptyNoble)
+	p, err := plan(t, trixie)
+	if err != nil || strings.Join(p.packages, " ") != "docker.io docker-cli cron" {
+		t.Errorf("trixie: %v, %v", p.packages, err)
+	}
+	if p, err := plan(t, strings.Replace(trixie, "flock=yes", "flock=yes\ndockercli=yes", 1)); err != nil || slices.Contains(p.packages, "docker-cli") {
+		t.Errorf("a client already there: %v, %v", p.packages, err)
+	}
+	if p, err := plan(t, emptyNoble); err != nil || slices.Contains(p.packages, "docker-cli") {
+		t.Errorf("noble: %v, %v", p.packages, err)
 	}
 }
