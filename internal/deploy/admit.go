@@ -11,6 +11,7 @@ import (
 
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -57,6 +58,38 @@ func BootProxy(ctx context.Context, r remote.Runner, log io.Writer, image string
 		return err
 	}
 	return then()
+}
+
+// UpgradeProxy replaces the running proxy with one from image (proxy.Upgrade), under the server's
+// admission lock and in the server's journal: a run cut in the middle of the swap is the one the next
+// `boks server status` names.
+func UpgradeProxy(ctx context.Context, r remote.Runner, log io.Writer, image string, o Options) error {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	adm, err := admit(ctx, r, log, proxyHolder, o)
+	if err != nil {
+		return err
+	}
+	defer adm.release(ctx)
+	current, err := proxy.Image(ctx, r)
+	if err != nil {
+		return err
+	}
+	if current == image {
+		fmt.Fprintf(log, "proxy: already runs %s\n", image)
+		return nil
+	}
+	op, err := release.Begin(ctx, r, serverJournal, "proxy upgrade", current, image, o.Now())
+	if err != nil {
+		return err
+	}
+	if err := proxy.Upgrade(ctx, r, log, image); err != nil {
+		finish(ctx, r, log, serverJournal, op, "failed", o.Now())
+		return err
+	}
+	finish(ctx, r, log, serverJournal, op, "ok", o.Now())
+	return nil
 }
 
 func bootProxy(ctx context.Context, r remote.Runner, log io.Writer, holder, image string, o Options) error {

@@ -122,6 +122,7 @@ const (
 	frags      = "sh -c for f in '.boks/_proxy/routes'/*.json"
 	applied    = "sh -c if [ -f '.boks/_proxy/caddy.json' ]"
 	migrateReq = "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req"
+	proxyImage = "sh -c docker inspect -f '{{.Config.Image}}' boks-proxy 2>/dev/null || true"
 	upstreams  = "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams"
 	probe      = "docker exec boks-proxy sh -c wget -S -q -O /dev/null -T 5 '"
 	probeEnd   = "' 2>&1; true"
@@ -305,6 +306,8 @@ func TestRunHappyPath(t *testing.T) {
 		fragsRead,
 		// A running proxy is checked for the sysctl every reload relies on.
 		migrateReq,
+		// And for the image it runs: a boot leaves a running proxy alone, but says when the config names another.
+		proxyImage,
 		// The proxy is on the networks of the copies its routes dial.
 		proxyNets,
 		inspectOf("demo-v1-1"),
