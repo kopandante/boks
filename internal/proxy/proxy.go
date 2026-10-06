@@ -81,11 +81,15 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 		}
 		// A run cut after writing its fragment left the applied config behind the fragments: the proxy
 		// catches up here, so `boks proxy boot` repairs it and a later restart loads the right config.
+		// Not a condition of the boot: the proxy runs, and what Caddy refuses here — a certificate file a
+		// cut `boks cert` left broken — `boks cert`, which boots first, is what repairs.
 		if lagging, err := Lags(ctx, r, fs); err != nil || !lagging {
 			return err
 		}
-		_, err := converge(ctx, r, log, fs, false, "the routes on the server")
-		return err
+		if _, err := converge(ctx, r, log, fs, false, "the routes on the server"); err != nil {
+			fmt.Fprintf(log, "warning: the proxy runs an older config than the routes on the server say: %v\n", err)
+		}
+		return nil
 	}
 	// Caddy loads the applied config when it starts: the one the fragments make — on a server that
 	// never had a proxy, one with no routes — and not one a cut run left behind.
@@ -235,12 +239,26 @@ func awaitAnswer(ctx context.Context, r remote.Runner) error {
 var answerWait, answerPoll = 10 * time.Second, 250 * time.Millisecond
 
 // Probe asks, from inside the proxy, whether a container answers on port at path: over the network
-// and by the name the route will dial. busybox wget fails on an answer outside 2xx and 3xx (measured:
-// a 404 exits 1), as kamal-proxy's health check refused one; its 5s timeout is kamal-proxy's too.
+// and by the name the route will dial. It passes on a final status in 2xx, after redirects, as
+// kamal-proxy's health check did; its 5s timeout is kamal-proxy's too. busybox wget's exit status is
+// not that rule (measured, 2.11.7-alpine: a 207 exits 1, a 302 without Location exits 0), so the
+// status is read from the response it prints.
 func Probe(ctx context.Context, r remote.Runner, target string, port int, healthPath string) error {
 	url := "http://" + target + ":" + strconv.Itoa(port) + healthPath
-	_, err := r.Run(ctx, "docker", "exec", Container, "wget", "-q", "-O", "/dev/null", "-T", "5", url)
-	return err
+	out, err := r.Run(ctx, "docker", "exec", Container, "sh", "-c", "wget -S -q -O /dev/null -T 5 "+remote.Quote(url)+" 2>&1; true")
+	if err != nil {
+		return err
+	}
+	status := 0
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) >= 2 && strings.HasPrefix(f[0], "HTTP/") {
+			status, _ = strconv.Atoi(f[1])
+		}
+	}
+	if status < 200 || status > 299 {
+		return fmt.Errorf("%s answered %s", url, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 // Busy says how many requests the proxy has in flight to these containers, on any port. After a

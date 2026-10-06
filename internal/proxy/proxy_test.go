@@ -139,6 +139,13 @@ func TestBootCatchesARunningProxyUp(t *testing.T) {
 	if err := Boot(context.Background(), g, io.Discard, "img"); err != nil || at(g.calls, "docker exec boks-proxy caddy reload") >= 0 {
 		t.Errorf("want no reload of a proxy that runs what the fragments make: %v %v", err, g.calls)
 	}
+	// A catch-up Caddy refuses is a warning, not a failed boot: `boks cert`, which boots first, is what
+	// repairs a certificate file a cut run left broken.
+	h := &fake{state: "running\tcaddy", fail: map[string]error{"docker exec boks-proxy caddy reload": errors.New("loading new config: tls: failed to find any PEM data in key input")}}
+	var log strings.Builder
+	if err := Boot(context.Background(), h, &log, "img"); err != nil || !strings.Contains(log.String(), "warning: the proxy runs an older config") {
+		t.Errorf("want a warning and a boot: %v %q", err, log.String())
+	}
 }
 
 // A boks-proxy that is not labelled as Caddy is the kamal-proxy an earlier boks ran: no boot touches
@@ -352,12 +359,27 @@ func TestBootCancelsACallThatHangs(t *testing.T) {
 // A health check is asked from inside the proxy, by the name and port the route will dial, with a
 // bound of its own.
 func TestProbe(t *testing.T) {
-	f := &fake{}
+	const cmd = "docker exec boks-proxy sh -c wget -S -q -O /dev/null -T 5 'http://demo-v2-1:3000/up' 2>&1; true"
+	f := &fake{out: map[string]string{cmd: "  HTTP/1.1 200 OK\n  Content-Length: 2"}}
 	if err := Probe(context.Background(), f, "demo-v2-1", 3000, "/up"); err != nil {
 		t.Fatal(err)
 	}
-	if at(f.calls, "docker exec boks-proxy wget -q -O /dev/null -T 5 http://demo-v2-1:3000/up") < 0 {
+	if at(f.calls, cmd) < 0 {
 		t.Errorf("want the probe from the proxy: %v", f.calls)
+	}
+	// The final status decides, as kamal-proxy's check did: any 2xx after redirects passes, anything
+	// else fails — whatever busybox wget's exit status says (what it prints was measured).
+	for out, ok := range map[string]bool{
+		"  HTTP/1.1 207 Multi-Status\nwget: server returned error: HTTP/1.1 207 Multi-Status": true,
+		"  HTTP/1.1 302 Found\n  Content-Length: 0":                                           false,
+		"  HTTP/1.1 301 Moved\n  Location: /health\n  HTTP/1.1 204 No Content":                true,
+		"  HTTP/1.1 503 Service Unavailable\nwget: server returned error: HTTP/1.1 503":       false,
+		"wget: can't connect to remote host: Connection refused":                              false,
+	} {
+		g := &fake{out: map[string]string{cmd: out}}
+		if err := Probe(context.Background(), g, "demo-v2-1", 3000, "/up"); (err == nil) != ok {
+			t.Errorf("%q: want pass=%v, got %v", out, ok, err)
+		}
 	}
 }
 

@@ -103,11 +103,12 @@ func (f *fake) wrote(path, content string, appended bool) error {
 func newFake() *fake {
 	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{},
 		stopped: map[string]bool{}}
-	f.out[digests] = "[]"      // an image that came from no registry; tests that need a digest override it
-	f.out[netOwner] = "absent" // the app's network is not made yet
-	f.out[applied] = "absent"  // the proxy has no applied config yet
-	f.out[migrateReq] = "1"    // the proxy runs with the sysctl a lossless reload needs
-	f.out[upstreams] = "[]"    // and holds no request in flight
+	f.out[digests] = "[]"              // an image that came from no registry; tests that need a digest override it
+	f.out[netOwner] = "absent"         // the app's network is not made yet
+	f.out[applied] = "absent"          // the proxy has no applied config yet
+	f.out[migrateReq] = "1"            // the proxy runs with the sysctl a lossless reload needs
+	f.out[upstreams] = "[]"            // and holds no request in flight
+	f.out[probe] = "  HTTP/1.1 200 OK" // and every copy it probes answers
 	f.out["sh -c cd '.boks/_proxy' && pwd -P"] = "/home/u/.boks/_proxy"
 	return f
 }
@@ -122,7 +123,8 @@ const (
 	applied    = "sh -c if [ -f '.boks/_proxy/caddy.json' ]"
 	migrateReq = "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req"
 	upstreams  = "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams"
-	probe      = "docker exec boks-proxy wget -q -O /dev/null -T 5 "
+	probe      = "docker exec boks-proxy sh -c wget -S -q -O /dev/null -T 5 '"
+	probeEnd   = "' 2>&1; true"
 	reloadVia  = "docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json"
 	caddyUp    = "running\tcaddy"
 )
@@ -331,7 +333,7 @@ func TestRunHappyPath(t *testing.T) {
 		// every other app up.
 		admitGive("demo"),
 		// The health check, from the proxy, by the name the route will dial.
-		probe + "http://demo-v2-1700000000:3000/up",
+		probe + "http://demo-v2-1700000000:3000/up" + probeEnd,
 		// One reload moves every route, under the lock again: the config is every app's.
 		admitTake("demo"),
 		fragsRead,
@@ -1117,7 +1119,7 @@ func TestTheHealthCheckOfEveryPortComesFirst(t *testing.T) {
 	const ready = probe + "http://" + newCopy + ":3002/ready"
 	tries := 0
 	f.onRun = func(cmd string) {
-		if cmd == probe+"http://"+newCopy+":3000/up" {
+		if cmd == probe+"http://"+newCopy+":3000/up"+probeEnd {
 			if tries++; tries < 3 {
 				f.fail[probe+"http://"+newCopy+":3000/up"] = errors.New("refused")
 			} else {
