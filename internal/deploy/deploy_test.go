@@ -1828,7 +1828,7 @@ func TestDeployWithSchedules(t *testing.T) {
 	if f.uploads[".boks/bot/serving"] != "bot-v2-1700000000 bot-v2-1700000000\n" {
 		t.Errorf("the serving release and container must be recorded together: %q", f.uploads[".boks/bot/serving"])
 	}
-	if !strings.Contains(f.uploads[".boks/bot/boks-job"], "docker exec -i \"$c\" sh -s < \"$f\"") {
+	if f.uploads[".boks/bot/boks-job"] != runner {
 		t.Errorf("the runner must be written")
 	}
 	block := f.uploads[".boks/bot/crontab"]

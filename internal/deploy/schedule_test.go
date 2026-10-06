@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kopandante/boks/internal/config"
 )
@@ -39,7 +40,12 @@ esac
 	if setup != nil {
 		setup(home, bin)
 	}
-	cmd := exec.Command("sh", filepath.Join(home, runnerPath(app)), app, "tick")
+	// A runner that hangs fails the test instead of the whole run: its background reader would hold
+	// the output pipe open, so the wait on it is bounded too.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", filepath.Join(home, runnerPath(app)), app, "tick")
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+":/usr/bin:/bin")
 	for _, kv := range []string{"RUNNING", "FLOCK_RC"} {
 		if v, ok := os.LookupEnv("T_" + kv); ok {
@@ -326,5 +332,81 @@ cp "$1" "$HOME/installed"
 	b, _ := os.ReadFile(filepath.Join(home, "installed"))
 	if !strings.Contains(string(b), "# boks:one begin") || strings.Contains(string(b), "# boks:two") {
 		t.Errorf("want one's block installed and two's removed:\n%s", b)
+	}
+}
+
+// One run keeps at most 1 MiB of its output — the rest read to the end, so the job is not stopped
+// by a closed pipe — and the exit status logged is still the job's; stderr lands in the log too.
+func TestRunnerCapsOneRunsOutputAndKeepsItsExit(t *testing.T) {
+	var home string
+	out := runRunner(t, "rjob6", func(h, _ string) {
+		home = h
+		// 1.5 MiB with no newline, then a line on stderr, then exit 42.
+		serve(h, "rjob6", "r-1", "c-1", "head -c 1572864 /dev/zero | tr '\\0' z; echo oops >&2; exit 42")
+	})
+	if !strings.Contains(out, "output past 1 MiB dropped: about") || !strings.Contains(out, "end exit=42") {
+		t.Errorf("want the cut named and exit 42:\n%.300s", out[len(out)-300:])
+	}
+	log, _ := os.ReadFile(filepath.Join(home, ".boks", "rjob6", "jobs", "tick.log"))
+	if n := bytes.Count(log, []byte("z")); n != 1048576 {
+		t.Errorf("want exactly 1 MiB of the job's output kept, got %d bytes", n)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".boks", "rjob6", "jobs", "tick.out")); !os.IsNotExist(err) {
+		t.Errorf("want the pipe removed: %v", err)
+	}
+	small := runRunner(t, "rjob7", func(h, _ string) { serve(h, "rjob7", "r-1", "c-1", "echo oops >&2; exit 0") })
+	if !strings.Contains(small, "oops") || strings.Contains(small, "dropped") || !strings.Contains(small, "end exit=0") {
+		t.Errorf("want stderr kept and nothing dropped:\n%s", small)
+	}
+}
+
+// A run that fires while the previous one is going logs its skip and leaves the log alone: moving
+// it to .log.1 would move the file the running job writes.
+func TestRunnerLeavesTheLogOfARunningJobAlone(t *testing.T) {
+	t.Setenv("T_FLOCK_RC", "1")
+	var home string
+	runRunner(t, "rjob8", func(h, _ string) {
+		home = h
+		serve(h, "rjob8", "r-1", "c-1", "echo hi")
+		os.WriteFile(filepath.Join(h, ".boks", "rjob8", "jobs", "tick.log"), bytes.Repeat([]byte("y"), 1048577), 0o600)
+	})
+	log, _ := os.ReadFile(filepath.Join(home, ".boks", "rjob8", "jobs", "tick.log"))
+	if _, err := os.Stat(filepath.Join(home, ".boks", "rjob8", "jobs", "tick.log.1")); !os.IsNotExist(err) || !bytes.Contains(log, []byte("skip: the previous run")) {
+		t.Errorf("want the skip appended and no rotation: %v %d", err, len(log))
+	}
+}
+
+// The command file can go between the check that it is there and the run — a deploy prunes the
+// release that served a moment ago — and the run then fails like any job and lets the next one in.
+// Opened before the pipe's writer, a missing file would leave the reader waiting for a writer that
+// never comes, holding the job's lock, and every later run would skip as still going.
+func TestRunnerFinishesWhenTheCommandCannotBeOpened(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file with no permissions, so the open does not fail")
+	}
+	var home string
+	out := runRunner(t, "rjob9", func(h, _ string) {
+		home = h
+		serve(h, "rjob9", "r-1", "c-1", "echo hi")
+		os.Chmod(filepath.Join(h, ".boks", "rjob9", "jobs", "r-1", "tick.sh"), 0)
+	})
+	if !strings.Contains(out, "end exit=") || strings.Contains(out, "end exit=0") {
+		t.Errorf("want the run finished with a failure logged:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".boks", "rjob9", "jobs", "tick.out")); !os.IsNotExist(err) {
+		t.Errorf("want the pipe removed: %v", err)
+	}
+}
+
+// What the job writes reaches the log while it runs, as it did before the cap: a job that hangs
+// after a line of progress must leave that line where it can be read.
+func TestRunnerLogsOutputAsTheJobWritesIt(t *testing.T) {
+	out := runRunner(t, "rjob10", func(h, _ string) {
+		serve(h, "rjob10", "r-1", "c-1", `echo step1; l="$HOME/.boks/rjob10/jobs/tick.log"; i=0
+until grep -q step1 "$l" || [ $i -ge 50 ]; do sleep 0.1; i=$((i+1)); done
+grep -q step1 "$l" && echo seen-live`)
+	})
+	if !strings.Contains(out, "seen-live") {
+		t.Errorf("want the job's first line in the log before it ended:\n%s", out)
 	}
 }
