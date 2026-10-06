@@ -8,10 +8,9 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
+	"time"
 )
 
 // Runner executes commands on one server.
@@ -80,7 +79,6 @@ type SSH struct {
 // run opened. A nil Mux shares nothing.
 type Mux struct {
 	dir  string
-	mu   sync.Mutex
 	used map[string]bool
 }
 
@@ -102,9 +100,7 @@ func (m *Mux) SSH(host string) SSH {
 	if m == nil {
 		return SSH{Host: host}
 	}
-	m.mu.Lock()
 	m.used[host] = true
-	m.mu.Unlock()
 	return SSH{Host: host, ControlDir: m.dir}
 }
 
@@ -114,18 +110,14 @@ func (m *Mux) Close() {
 	if m == nil {
 		return
 	}
-	m.mu.Lock()
-	hosts := make([]string, 0, len(m.used))
 	for h := range m.used {
-		hosts = append(hosts, h)
-	}
-	m.mu.Unlock()
-	sort.Strings(hosts)
-	for _, h := range hosts {
 		_ = exec.Command("ssh", "-o", "ControlPath="+controlPath(m.dir), "-O", "exit", h).Run()
 	}
 	_ = os.RemoveAll(m.dir)
 }
+
+// waitDelay is how long a call waits for its output to close once its ssh is gone (see exec).
+const waitDelay = 2 * time.Second
 
 // controlPath is the socket of one connection in dir: %C is ssh's hash of the user, host, port and
 // jump host, so two servers never share one.
@@ -154,6 +146,10 @@ func (s SSH) exec(ctx context.Context, stdin []byte, label, script string) (stri
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
+	// A cancelled call ends at its context even when something else holds its output open: a
+	// ControlMaster keeps the descriptors of a session whose remote command still runs, and without
+	// this bound a call cut off by its deadline would wait for that command to finish.
+	cmd.WaitDelay = waitDelay
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("%s: %w: %s", label, err, strings.TrimSpace(errb.String()))
 	}
