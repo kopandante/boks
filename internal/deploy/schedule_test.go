@@ -35,11 +35,11 @@ esac
 `, 0o755)
 	// flock: only the non-blocking lock of the descriptor the runner opened is a skip, not a queue.
 	write(filepath.Join(bin, "flock"), "#!/bin/sh\n[ \"$*\" = \"-n 9\" ] || { echo \"flock called as: $*\"; exit 2; }\nexit ${FLOCK_RC:-0}\n", 0o755)
-	write(filepath.Join(home, runnerPath), runner, 0o755)
+	write(filepath.Join(home, runnerPath(app)), runner, 0o600)
 	if setup != nil {
 		setup(home, bin)
 	}
-	cmd := exec.Command("sh", filepath.Join(home, runnerPath), app, "tick")
+	cmd := exec.Command("sh", filepath.Join(home, runnerPath(app)), app, "tick")
 	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+":/usr/bin:/bin")
 	for _, kv := range []string{"RUNNING", "FLOCK_RC"} {
 		if v, ok := os.LookupEnv("T_" + kv); ok {
@@ -134,6 +134,18 @@ func (l local) Pipe(ctx context.Context, content []byte, args ...string) (string
 	return strings.TrimSpace(string(out)), err
 }
 
+// realFlock is a flock(1) for machines without one (macOS): perl takes the lock on the descriptor the
+// shell opened, and the lock lasts while the shell keeps it open — as with the real tool.
+func realFlock(t *testing.T, bin string) {
+	t.Helper()
+	if _, err := exec.LookPath("perl"); err != nil {
+		t.Skip("perl is needed to stand in for flock")
+	}
+	stub(t, bin, "flock", `n=; [ "$1" = -n ] && { n=1; shift; }
+exec perl -MFcntl=:flock -e 'open(my $f, ">&=", $ARGV[0]) or die "fd: $!"; flock($f, LOCK_EX | ($ARGV[1] ? LOCK_NB : 0)) or exit 1' "$1" "$n"
+`)
+}
+
 func stub(t *testing.T, dir, name, body string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
@@ -166,10 +178,11 @@ func TestApplySchedulesEditsOnlyTheAppsBlock(t *testing.T) {
 if [ "$1" = -l ]; then cat "$HOME/installed" 2>/dev/null; exit $?; fi
 cp "$1" "$HOME/installed"
 `)
+	realFlock(t, bin)
 	r := local{home, bin + ":/usr/bin:/bin"}
 	installed := func() string { b, _ := os.ReadFile(filepath.Join(home, "installed")); return string(b) }
-	before := "MAILTO=\"\"\n0 1 * * * /usr/local/bin/backup\n# boks:other begin\n* * * * * sh $HOME/.boks/bin/boks-job other x\n# boks:other end\n" +
-		"# boks:app begin\n0 0 * * * sh $HOME/.boks/bin/boks-job app gone\n# boks:app end\n"
+	before := "MAILTO=\"\"\n0 1 * * * /usr/local/bin/backup\n# boks:other begin\n* * * * * sh $HOME/.boks/other/boks-job other x\n# boks:other end\n" +
+		"# boks:app begin\n0 0 * * * sh $HOME/.boks/app/boks-job app gone\n# boks:app end\n"
 	if err := os.WriteFile(filepath.Join(home, "installed"), []byte(before), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -182,12 +195,12 @@ cp "$1" "$HOME/installed"
 	if err := applySchedules(context.Background(), r, io.Discard, cfg); err != nil {
 		t.Fatal(err)
 	}
-	want := "MAILTO=\"\"\n0 1 * * * /usr/local/bin/backup\n# boks:other begin\n* * * * * sh $HOME/.boks/bin/boks-job other x\n# boks:other end\n" +
-		"# boks:app begin\n*/4 * * * * sh $HOME/.boks/bin/boks-job app warm\n# boks:app end\n"
+	want := "MAILTO=\"\"\n0 1 * * * /usr/local/bin/backup\n# boks:other begin\n* * * * * sh $HOME/.boks/other/boks-job other x\n# boks:other end\n" +
+		"# boks:app begin\n*/4 * * * * sh $HOME/.boks/app/boks-job app warm\n# boks:app end\n"
 	if got := installed(); got != want {
 		t.Errorf("installed crontab:\n%s\nwant:\n%s", got, want)
 	}
-	if b, err := os.ReadFile(filepath.Join(home, runnerPath)); err != nil || string(b) != runner {
+	if b, err := os.ReadFile(filepath.Join(home, runnerPath("app"))); err != nil || string(b) != runner {
 		t.Errorf("the runner must be on the server: %v", err)
 	}
 
@@ -195,7 +208,7 @@ cp "$1" "$HOME/installed"
 	if err := applySchedules(context.Background(), r, io.Discard, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := installed(), "MAILTO=\"\"\n0 1 * * * /usr/local/bin/backup\n# boks:other begin\n* * * * * sh $HOME/.boks/bin/boks-job other x\n# boks:other end\n"; got != want {
+	if got, want := installed(), "MAILTO=\"\"\n0 1 * * * /usr/local/bin/backup\n# boks:other begin\n* * * * * sh $HOME/.boks/other/boks-job other x\n# boks:other end\n"; got != want {
 		t.Errorf("after a release without schedules:\n%s\nwant:\n%s", got, want)
 	}
 	calls, _ := os.ReadFile(filepath.Join(home, "crontab.calls"))
@@ -213,12 +226,13 @@ func TestApplySchedulesOnAnEmptyCrontab(t *testing.T) {
 	stub(t, bin, "crontab", `if [ "$1" = -l ]; then echo "no crontab for $USER" >&2; exit 1; fi
 cp "$1" "$HOME/installed"
 `)
+	realFlock(t, bin)
 	cfg := &config.Config{App: "app", Schedules: []config.Schedule{{Name: "warm", Cron: "0 3 * * *", Command: "true"}}}
 	if err := applySchedules(context.Background(), local{home, bin + ":/usr/bin:/bin"}, io.Discard, cfg); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(filepath.Join(home, "installed"))
-	if want := "# boks:app begin\n0 3 * * * sh $HOME/.boks/bin/boks-job app warm\n# boks:app end\n"; string(b) != want {
+	if want := "# boks:app begin\n0 3 * * * sh $HOME/.boks/app/boks-job app warm\n# boks:app end\n"; string(b) != want {
 		t.Errorf("installed crontab %q, want %q", b, want)
 	}
 }
@@ -255,5 +269,62 @@ func TestJobsPresentChecksEveryCommand(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "b.sh"), []byte("true\n"), 0o600)
 	if err := jobsPresent(context.Background(), r, "app", "r-1", jobs); err != nil {
 		t.Errorf("all commands are there: %v", err)
+	}
+}
+
+// Deploys of two apps edit the one crontab at the same time — they hold different app locks — and
+// neither block is lost.
+func TestApplySchedulesOfTwoAppsAtOnceKeepsBoth(t *testing.T) {
+	home, bin := t.TempDir(), t.TempDir()
+	// A read that returns before the edit is done makes the window in which two unserialized edits would overwrite each other.
+	stub(t, bin, "crontab", `if [ "$1" = -l ]; then cat "$HOME/installed" 2>/dev/null; rc=$?; sleep 0.3; exit $rc; fi
+cp "$1" "$HOME/installed"
+`)
+	realFlock(t, bin)
+	r := local{home, bin + ":/usr/bin:/bin"}
+	errs := make(chan error, 2)
+	for _, app := range []string{"one", "two"} {
+		go func(app string) {
+			errs <- applySchedules(context.Background(), r, io.Discard,
+				&config.Config{App: app, Schedules: []config.Schedule{{Name: "j", Cron: "* * * * *", Command: "true"}}})
+		}(app)
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(home, "installed"))
+	if !strings.Contains(string(b), "# boks:one begin") || !strings.Contains(string(b), "# boks:two begin") {
+		t.Errorf("both apps' blocks must be installed:\n%s", b)
+	}
+}
+
+// Removing one app's block while another app adds its own: the removal is serialized too.
+func TestApplySchedulesRemovalAlongsideAnotherAppsEdit(t *testing.T) {
+	home, bin := t.TempDir(), t.TempDir()
+	stub(t, bin, "crontab", `if [ "$1" = -l ]; then cat "$HOME/installed" 2>/dev/null; rc=$?; sleep 0.3; exit $rc; fi
+cp "$1" "$HOME/installed"
+`)
+	realFlock(t, bin)
+	old := "# boks:two begin\n* * * * * sh $HOME/.boks/two/boks-job two j\n# boks:two end\n"
+	os.WriteFile(filepath.Join(home, "installed"), []byte(old), 0o600)
+	os.MkdirAll(filepath.Join(home, ".boks", "two"), 0o700)
+	os.WriteFile(filepath.Join(home, ".boks", "two", "crontab"), []byte(old), 0o600)
+	r := local{home, bin + ":/usr/bin:/bin"}
+	errs := make(chan error, 2)
+	go func() {
+		errs <- applySchedules(context.Background(), r, io.Discard,
+			&config.Config{App: "one", Schedules: []config.Schedule{{Name: "j", Cron: "* * * * *", Command: "true"}}})
+	}()
+	go func() { errs <- applySchedules(context.Background(), r, io.Discard, &config.Config{App: "two"}) }()
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(home, "installed"))
+	if !strings.Contains(string(b), "# boks:one begin") || strings.Contains(string(b), "# boks:two") {
+		t.Errorf("want one's block installed and two's removed:\n%s", b)
 	}
 }

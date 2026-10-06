@@ -484,7 +484,7 @@ func TestRollbackRestoresTheSchedulesOfTheRelease(t *testing.T) {
 	if got := f.uploads[".boks/bot/serving"]; got != "bot-v1-1 bot-v1-1700000000\n" {
 		t.Errorf("the serving line must pair the release's id with the restored container: %q", got)
 	}
-	if !strings.Contains(f.uploads[".boks/bot/crontab"], "0 3 * * * sh $HOME/.boks/bin/boks-job bot nightly") || strings.Contains(f.uploads[".boks/bot/crontab"], "warm") {
+	if !strings.Contains(f.uploads[".boks/bot/crontab"], "0 3 * * * sh $HOME/.boks/bot/boks-job bot nightly") || strings.Contains(f.uploads[".boks/bot/crontab"], "warm") {
 		t.Errorf("cron must carry the release's schedules, not today's: %q", f.uploads[".boks/bot/crontab"])
 	}
 

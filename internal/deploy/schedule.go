@@ -12,15 +12,19 @@ import (
 	"github.com/kopandante/boks/internal/remote"
 )
 
-// Scheduled jobs run from the server's own cron, through one small script boks keeps on the server.
+// Scheduled jobs run from the server's own cron, through one small script boks keeps beside each app.
 // Not a scheduler container: that would be one more process on a small box, holding the Docker
 // socket, and a container's labels do not say which copy of an app is the one that serves. Cron
 // fires the script; the script finds the serving copy and the release's command, and runs it there.
 
-// runnerPath is the script cron calls, `sh boks-job <app> <job>`. Cron runs it through `sh`, so it
-// needs no execute bit: the script is shared by every app on the server, and a rewrite that lands
-// before a separate chmod — or a run cut between the two — would stop the jobs of all of them.
-const runnerPath = ".boks/bin/boks-job"
+// runnerPath is the script cron calls, `sh boks-job <app> <job>`. Each app has its own copy, written
+// under the app's deploy lock, and cron runs it through `sh`: a deploy of one app never rewrites what
+// the jobs of another are running, and a rewrite needs no separate chmod to become runnable.
+func runnerPath(app string) string { return path.Join(release.Dir(app), "boks-job") }
+
+// cronLock serializes edits of the crontab, which every app on the server shares: deploys of two apps
+// hold different app locks, and the server's admission lock is let go before the release is recorded.
+const cronLock = ".boks/crontab.lock"
 
 // runner finds the copy that serves from release.ServingPath — the release and its container,
 // written together after the release is recorded — and runs that release's command for the job in
@@ -89,7 +93,7 @@ func cronBlock(app string, schedules []config.Schedule) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# boks:%s begin\n", app)
 	for _, s := range schedules {
-		fmt.Fprintf(&b, "%s sh $HOME/%s %s %s\n", strings.Join(strings.Fields(s.Cron), " "), runnerPath, app, s.Name)
+		fmt.Fprintf(&b, "%s sh $HOME/%s %s %s\n", strings.Join(strings.Fields(s.Cron), " "), runnerPath(app), app, s.Name)
 	}
 	fmt.Fprintf(&b, "# boks:%s end\n", app)
 	return b.String()
@@ -106,23 +110,26 @@ func applySchedules(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 	b := remote.Quote(blockPath)
 	strip := "{ crontab -l 2>/dev/null || true; } | sed -e " + remote.Quote("/^# boks:"+cfg.App+" begin$/") + "," +
 		remote.Quote("/^# boks:"+cfg.App+" end$/") + "d > " + b + ".new"
+	lock := "mkdir -p .boks && exec 9>> " + cronLock + " && flock 9"
 	block := cronBlock(cfg.App, cfg.Schedules)
 	if block == "" {
-		// Nothing to schedule: remove the app's block only if an earlier release left one.
+		// Nothing to schedule: remove the app's block only if an earlier release left one. A server
+		// without flock never had an app with schedules (checkCron) that could edit the crontab alongside.
 		script := "[ -s " + b + " ] || exit 0; command -v crontab >/dev/null || { : > " + b + "; exit 0; }; " +
+			"{ ! command -v flock >/dev/null || { " + lock + "; }; } && " +
 			strip + " && crontab " + b + ".new && rm -f " + b + ".new && : > " + b
 		if _, err := r.Run(ctx, "sh", "-c", script); err != nil {
 			return fmt.Errorf("removing the schedules of the previous release from the crontab: %w", err)
 		}
 		return nil
 	}
-	if err := remote.UploadAtomic(ctx, r, []byte(runner), runnerPath); err != nil {
+	if err := remote.UploadAtomic(ctx, r, []byte(runner), runnerPath(cfg.App)); err != nil {
 		return err
 	}
 	if err := remote.UploadAtomic(ctx, r, []byte(block), blockPath); err != nil {
 		return err
 	}
-	if _, err := r.Run(ctx, "sh", "-c", strip+" && cat "+b+" >> "+b+".new && crontab "+b+".new && rm -f "+b+".new"); err != nil {
+	if _, err := r.Run(ctx, "sh", "-c", lock+" && "+strip+" && cat "+b+" >> "+b+".new && crontab "+b+".new && rm -f "+b+".new"); err != nil {
 		return fmt.Errorf("updating the crontab: %w", err)
 	}
 	fmt.Fprintf(log, "cron: %d job(s) of %s scheduled\n", len(cfg.Schedules), cfg.App)

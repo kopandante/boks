@@ -326,6 +326,7 @@ func touchesProxy(f *fake) bool {
 func cronClear(app string) string {
 	b := "'.boks/" + app + "/crontab'"
 	return "sh -c [ -s " + b + " ] || exit 0; command -v crontab >/dev/null || { : > " + b + "; exit 0; }; " +
+		"{ ! command -v flock >/dev/null || { mkdir -p .boks && exec 9>> .boks/crontab.lock && flock 9; }; } && " +
 		"{ crontab -l 2>/dev/null || true; } | sed -e '/^# boks:" + app + " begin$/','/^# boks:" + app + " end$/'d > " + b + ".new && " +
 		"crontab " + b + ".new && rm -f " + b + ".new && : > " + b
 }
@@ -1808,14 +1809,14 @@ func TestDeployWithSchedules(t *testing.T) {
 	if f.uploads[".boks/bot/serving"] != "bot-v2-1700000000 bot-v2-1700000000\n" {
 		t.Errorf("the serving release and container must be recorded together: %q", f.uploads[".boks/bot/serving"])
 	}
-	if !strings.Contains(f.uploads[".boks/bin/boks-job"], "docker exec -i \"$c\" sh -s < \"$f\"") {
+	if !strings.Contains(f.uploads[".boks/bot/boks-job"], "docker exec -i \"$c\" sh -s < \"$f\"") {
 		t.Errorf("the runner must be written")
 	}
 	block := f.uploads[".boks/bot/crontab"]
-	if block != "# boks:bot begin\n*/4 * * * * sh $HOME/.boks/bin/boks-job bot warm\n# boks:bot end\n" {
+	if block != "# boks:bot begin\n*/4 * * * * sh $HOME/.boks/bot/boks-job bot warm\n# boks:bot end\n" {
 		t.Errorf("unexpected crontab block: %q", block)
 	}
-	if !f.has("sh -c { crontab -l 2>/dev/null || true; } | sed -e '/^# boks:bot begin$/','/^# boks:bot end$/'d") {
+	if !f.has("sh -c mkdir -p .boks && exec 9>> .boks/crontab.lock && flock 9 && { crontab -l 2>/dev/null || true; } | sed -e '/^# boks:bot begin$/','/^# boks:bot end$/'d") {
 		t.Errorf("the app's block must replace its earlier one in the crontab: %v", f.calls)
 	}
 	if !strings.Contains(f.uploads[".boks/bot/releases/bot-v2-1700000000.json"], `"name": "warm"`) {
