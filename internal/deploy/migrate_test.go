@@ -208,6 +208,21 @@ func TestMigrateKeepsTheTLSKamalServes(t *testing.T) {
 	}
 }
 
+// The dial is where kamal-proxy sends the host now, not the copy the release record names: a rollback
+// by an earlier boks starts a newly named container and points current at the original release.
+func TestMigrateDialsWhereKamalSendsTheHostNow(t *testing.T) {
+	f := kamalServer()
+	f.out[kamalList] = strings.ReplaceAll(f.out[kamalList], "convex-lab-latest-1:", "convex-lab-latest-1700000000:")
+	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	frag := f.fragmentWrite("convex-lab")
+	if !strings.Contains(frag, `"dial": "convex-lab-latest-1700000000:3210"`) || !strings.Contains(frag, `"dial": "convex-lab-latest-1700000000:3211"`) ||
+		strings.Contains(frag, `"dial": "convex-lab-latest-1:`) {
+		t.Errorf("want the containers kamal-proxy dials now:\n%s", frag)
+	}
+}
+
 // A migration cut after kamal-proxy moved aside, before Caddy came up, leaves no boks-proxy at all.
 // The next one puts kamal-proxy back and migrates, rather than reporting a server without a proxy.
 func TestMigrateResumesASwapCutShort(t *testing.T) {
