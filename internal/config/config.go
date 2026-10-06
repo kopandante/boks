@@ -593,6 +593,12 @@ func (c *Config) validateLists() error {
 			return err
 		}
 	}
+	// Each server's cron runs the jobs in that server's copy, so an app on several servers would run
+	// every job once per server, at the same moment. Until one of them is chosen to run them, an app
+	// with schedules lives on one server.
+	if len(c.Schedules) > 0 && len(c.Servers) > 1 {
+		return fmt.Errorf("schedules: %s is on %d servers, and each would run every job; an app with schedules must be on one server", c.App, len(c.Servers))
+	}
 	jobs := map[string]bool{}
 	for _, s := range c.Schedules {
 		if err := s.validate(); err != nil {
