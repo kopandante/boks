@@ -514,9 +514,12 @@ func caddyRunning(ctx context.Context, r remote.Runner) (bool, error) {
 // CreateArgs create the Caddy proxy container, not started, with the state directory at abs — an
 // absolute path, since docker takes nothing else as a bind source. Caddy loads the applied config
 // when it starts; the certificate volume is the one kamal-proxy used, so files installed for it are
-// where Caddy looks. The sysctl is per network namespace, so it is the container's own.
+// where Caddy looks. The sysctl is per network namespace, so it is the container's own. Caddy logs
+// every request, and Docker rotates no log by default: the proxy's log is capped at 5 × 10 MB, with
+// the driver named so the caps apply whatever the daemon's default driver is.
 func CreateArgs(image, abs string) []string {
 	return []string{"docker", "create", "--name", Container, "--restart", "unless-stopped", "--label", "boks.proxy=" + Kind,
+		"--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=5",
 		"--sysctl", migrateReq + "=1", "--network", Network, "-p", "80:80", "-p", "443:443",
 		"-v", DataVolume + ":/data", "-v", CertsVolume + ":/certs", "-v", abs + ":" + mountDir + ":ro",
 		image, "caddy", "run", "--config", inProxy(appliedPath())}

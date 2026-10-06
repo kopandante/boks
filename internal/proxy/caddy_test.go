@@ -516,10 +516,12 @@ func TestReloadLoadsWhatTheFragmentsSay(t *testing.T) {
 }
 
 // The container is labelled as Caddy, has the sysctl a lossless reload needs, keeps its ACME state and
-// the certificate volume kamal-proxy used, and reads the state directory, not one file, read-only.
+// the certificate volume kamal-proxy used, reads the state directory, not one file, read-only, and
+// keeps its request log rotated.
 func TestCreateArgs(t *testing.T) {
 	got := strings.Join(CreateArgs("caddy:2.11.7-alpine", "/home/u/.boks/_proxy"), " ")
 	want := "docker create --name boks-proxy --restart unless-stopped --label boks.proxy=caddy " +
+		"--log-driver json-file --log-opt max-size=10m --log-opt max-file=5 " +
 		"--sysctl net.ipv4.tcp_migrate_req=1 --network boks -p 80:80 -p 443:443 " +
 		"-v boks-proxy-data:/data -v boks-certs:/certs -v /home/u/.boks/_proxy:/etc/boks:ro " +
 		"caddy:2.11.7-alpine caddy run --config /etc/boks/caddy.json"
