@@ -171,7 +171,7 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 	// every TLS host under `cert:` it would not, so boks's redirect is what keeps plain HTTP for
 	// them from answering 404.
 	redir, _ := json.Marshal(dig(http, "routes").([]any)[1])
-	if want := `{"handle":[{"handler":"static_response","headers":{"Location":["https://{http.request.host}{http.request.uri}"]},"status_code":308}],"match":[{"host":["auto.example.com","w1.example.com","w2.example.com"]}],"terminal":true}`; string(redir) != want {
+	if want := `{"handle":[{"handler":"static_response","headers":{"Location":["https://{http.request.host}{http.request.uri}"]},"status_code":308}],"match":[{"host":["auto.example.com","w1.example.com","w2.example.com"],"not":[{"host":["plain.example.com"]}]}],"terminal":true}`; string(redir) != want {
 		t.Errorf("want plain HTTP for the TLS hosts redirected:\n got %s\nwant %s", redir, want)
 	}
 	if s, _ := json.Marshal(dig(https, "automatic_https", "skip_certificates")); string(s) != `["w1.example.com","w2.example.com"]` {
@@ -792,17 +792,21 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 		h, _ := json.Marshal(routes[i].(map[string]any)["handle"])
 		return string(h)
 	}
+	// A dot segment, which only an escape gets past the matcher's cleaning, is refused before any
+	// rewrite: stripping would miss the prefix and the app would resolve the path outside the new one.
+	dotSegments := `{"group":"path","handle":[{"handler":"static_response","status_code":400}],` +
+		`"match":[{"vars_regexp":{"{http.request.uri.path}":{"pattern":"(^|/)\\.\\.?(/|$)"}}}],"terminal":false},`
 	// The path itself is replaced whole; below it the prefix is stripped the way the matcher compares
 	// (no case, no escapes) and the new one put in front.
-	if h := handle(0); h != `[{"handler":"subroute","routes":[`+
-		`{"group":"path_rewrite","handle":[{"handler":"rewrite","uri":"/img"}],"match":[{"path":["/api/cn/images"]}],"terminal":false},`+
-		`{"group":"path_rewrite","handle":[{"handler":"rewrite","path_regexp":[{"find":"^/","replace":"/img/"}],"strip_path_prefix":"/api/cn/images"}],"terminal":false}]},`+
+	if h := handle(0); h != `[{"handler":"subroute","routes":[`+dotSegments+
+		`{"group":"path","handle":[{"handler":"rewrite","uri":"/img"}],"match":[{"path":["/api/cn/images"]}],"terminal":false},`+
+		`{"group":"path","handle":[{"handler":"rewrite","path_regexp":[{"find":"^/","replace":"/img/"}],"strip_path_prefix":"/api/cn/images"}],"terminal":false}]},`+
 		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Gateway":["images"]}},"response":{"delete":["Set-Cookie"],`+
 		`"set":{"X-Content-Type-Options":["nosniff"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
 		`"upstreams":[{"dial":"gw:8080"}]}]` {
 		t.Errorf("unexpected rewrite and headers: %s", h)
 	}
-	if h := handle(1); h != `[{"handler":"rewrite","strip_path_prefix":"/old"},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"]}},`+
+	if h := handle(1); h != `[{"handler":"subroute","routes":[`+dotSegments+`{"group":"path","handle":[{"handler":"rewrite","strip_path_prefix":"/old"}],"terminal":false}]},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"]}},`+
 		`"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},"upstreams":[{"dial":"gw:8081"}]}]` {
 		t.Errorf("unexpected strip: %s", h)
 	}
@@ -810,5 +814,37 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 	q, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "h", Path: "/v1.0", PathRewrite: "/v$1", Dial: "a:1"}}}})
 	if !strings.Contains(string(q), `"replace": "/v$$1/"`) || !strings.Contains(string(q), `"uri": "/v$1"`) {
 		t.Errorf("want $ literal in the rewrite: %s", q)
+	}
+}
+
+// A host routed on several paths, or spelled in two cases, is one host to Caddy, which refuses a host
+// matcher that names one twice: the wildcard's exclusions, the redirect on 80 and the ACME skip list
+// name it once.
+func TestConfigNamesAHostOnceInAMatcher(t *testing.T) {
+	cert := &CertFiles{Certificate: "/certs/boks/x.crt", Key: "/certs/boks/x.key"}
+	b, err := Config([]Fragment{
+		{App: "plain", Routes: []Route{{Host: "*.example.com", Dial: "p:1"}}},
+		{App: "tls", Routes: []Route{
+			{Host: "api.example.com", Path: "/one", Dial: "t:1", TLS: true, Cert: cert},
+			{Host: "API.example.com", Path: "/two", Dial: "t:2", TLS: true, Cert: cert},
+			{Host: "api.example.com", Dial: "t:3", TLS: true, Cert: cert},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decoded(t, b)
+	all, _ := json.Marshal(m)
+	for _, want := range []string{
+		`"not":[{"host":["api.example.com"]}]`, // the plain wildcard leaves the TLS host out, once
+		`"skip_certificates":["api.example.com"]`,
+	} {
+		if !strings.Contains(string(all), want) {
+			t.Errorf("want %s in %s", want, all)
+		}
+	}
+	redir, _ := json.Marshal(dig(m, "apps", "http", "servers", "http", "routes").([]any)[1].(map[string]any)["match"])
+	if string(redir) != `[{"host":["api.example.com"]}]` {
+		t.Errorf("want the TLS host redirected, named once: %s", redir)
 	}
 }

@@ -171,7 +171,7 @@ func Config(fragments []Fragment) ([]byte, error) {
 	exact := map[bool][]string{}
 	for _, e := range all {
 		if !strings.HasPrefix(e.r.Host, "*") {
-			exact[e.r.TLS] = append(exact[e.r.TLS], e.r.Host)
+			exact[e.r.TLS] = addHost(exact[e.r.TLS], e.r.Host)
 		}
 	}
 
@@ -209,7 +209,7 @@ func Config(fragments []Fragment) ([]byte, error) {
 			}
 		}
 		s.Routes = append(s.Routes, caddyRoute{Match: []match{m}, Handle: routeHandle(e.r), Terminal: true})
-		if e.r.TLS && e.r.Cert != nil && !slices.Contains(skip, e.r.Host) {
+		if e.r.TLS && e.r.Cert != nil && !hasHost(skip, e.r.Host) {
 			// Left out of ACME by name rather than by Caddy noticing the loaded certificate covers it:
 			// what Caddy counts as covered is its rule, and an attempt at HTTP-01 for a host behind a
 			// wildcard is a failure in the log every few minutes, or a rate limit spent.
@@ -228,8 +228,8 @@ func Config(fragments []Fragment) ([]byte, error) {
 	// challenges are answered before any route (server.go, HandleHTTPChallenge).
 	var tlsHosts []string
 	for _, e := range all {
-		if e.r.TLS && !slices.Contains(tlsHosts, e.r.Host) {
-			tlsHosts = append(tlsHosts, e.r.Host)
+		if e.r.TLS {
+			tlsHosts = addHost(tlsHosts, e.r.Host)
 		}
 	}
 	if len(tlsHosts) > 0 {
@@ -238,7 +238,13 @@ func Config(fragments []Fragment) ([]byte, error) {
 			s = &server{Listen: []string{":80"}, Logs: &struct{}{}}
 			servers["http"] = s
 		}
-		s.Routes = append(s.Routes, caddyRoute{Match: []match{{Host: tlsHosts}}, Handle: []handler{{Handler: "static_response",
+		// A host without TLS under a TLS wildcard keeps its own 404 for paths it does not route: it is
+		// not served over HTTPS, where the wildcard leaves it out.
+		redirect := match{Host: tlsHosts}
+		if len(exact[false]) > 0 {
+			redirect.Not = []match{{Host: exact[false]}}
+		}
+		s.Routes = append(s.Routes, caddyRoute{Match: []match{redirect}, Handle: []handler{{Handler: "static_response",
 			StatusCode: 308, Headers: map[string][]string{"Location": {"https://{http.request.host}{http.request.uri}"}}}}, Terminal: true})
 		https := servers["https"]
 		if https.AutoHTTPS == nil {
@@ -305,9 +311,13 @@ type (
 		Terminal bool      `json:"terminal"`
 	}
 	match struct {
-		Host []string `json:"host,omitempty"`
-		Path []string `json:"path,omitempty"`
-		Not  []match  `json:"not,omitempty"`
+		Host       []string             `json:"host,omitempty"`
+		Path       []string             `json:"path,omitempty"`
+		VarsRegexp map[string]varRegexp `json:"vars_regexp,omitempty"`
+		Not        []match              `json:"not,omitempty"`
+	}
+	varRegexp struct {
+		Pattern string `json:"pattern"`
 	}
 	handler struct {
 		Handler string `json:"handler"`
@@ -358,6 +368,20 @@ type (
 	}
 )
 
+// hasHost tells whether hosts names h in any case: Caddy matches hosts without regard to case, and
+// refuses a host matcher that names one twice.
+func hasHost(hosts []string, h string) bool {
+	return slices.ContainsFunc(hosts, func(x string) bool { return strings.EqualFold(x, h) })
+}
+
+// addHost adds h to hosts unless they name it already: a host routed on several paths is one host.
+func addHost(hosts []string, h string) []string {
+	if hasHost(hosts, h) {
+		return hosts
+	}
+	return append(hosts, h)
+}
+
 // routeMatch is the host and, for a route under a path, the path itself and everything below it —
 // not every path that merely starts with the same letters (`/img` must not take `/images`).
 func routeMatch(r Route) match {
@@ -371,20 +395,26 @@ func routeMatch(r Route) match {
 // routeHandle rewrites the path if the route asks, then proxies with its header changes.
 func routeHandle(r Route) []handler {
 	var hs []handler
-	switch {
-	case r.StripPath:
-		hs = append(hs, handler{Handler: "rewrite", StripPathPrefix: r.Path})
-	case r.PathRewrite != "":
-		// The rewrite must take every request the path matcher let in, and Caddy matches paths without
-		// regard to case or escapes (`/API/x`, `/%61pi/x`): a regexp on the escaped path would let those
-		// through unrewritten. strip_path_prefix compares the way the matcher does, so the prefix is
-		// stripped and the new one put in front; the path itself alone is replaced whole, so `/api`
-		// becomes `/img`, not `/img/`. In the replacement `$` is literal, not a regexp group.
-		hs = append(hs, handler{Handler: "subroute", Routes: []caddyRoute{
-			{Group: "path_rewrite", Match: []match{{Path: []string{r.Path}}}, Handle: []handler{{Handler: "rewrite", URI: r.PathRewrite}}},
-			{Group: "path_rewrite", Handle: []handler{{Handler: "rewrite", StripPathPrefix: r.Path,
-				PathRegexp: []regexpReplace{{Find: "^/", Replace: strings.ReplaceAll(r.PathRewrite, "$", "$$") + "/"}}}}},
-		}})
+	if r.StripPath || r.PathRewrite != "" {
+		// The rewrite must take every request the path matcher let in. Caddy matches the decoded path
+		// without regard to case, cleaned of dot segments; strip_path_prefix compares the same way but
+		// cleans the escaped path, where `%2e%2e` is no dot segment: `/x/%2e%2e/api/y` matches `/api`,
+		// is not stripped, and the app resolves it outside the new prefix. No browser sends a dot
+		// segment, so such a request is refused (400) rather than passed on unrewritten.
+		routes := []caddyRoute{{Group: "path", Match: []match{{VarsRegexp: map[string]varRegexp{"{http.request.uri.path}": {Pattern: `(^|/)\.\.?(/|$)`}}}},
+			Handle: []handler{{Handler: "static_response", StatusCode: 400}}}}
+		if r.StripPath {
+			routes = append(routes, caddyRoute{Group: "path", Handle: []handler{{Handler: "rewrite", StripPathPrefix: r.Path}}})
+		} else {
+			// The path itself is replaced whole, so `/api` becomes `/img`, not `/img/`; below it the
+			// prefix is stripped (`/API/x` and `/%61pi/x` too, as the matcher takes them) and the new
+			// one put in front. In the replacement `$` is literal, not a regexp group.
+			routes = append(routes,
+				caddyRoute{Group: "path", Match: []match{{Path: []string{r.Path}}}, Handle: []handler{{Handler: "rewrite", URI: r.PathRewrite}}},
+				caddyRoute{Group: "path", Handle: []handler{{Handler: "rewrite", StripPathPrefix: r.Path,
+					PathRegexp: []regexpReplace{{Find: "^/", Replace: strings.ReplaceAll(r.PathRewrite, "$", "$$") + "/"}}}}})
+		}
+		hs = append(hs, handler{Handler: "subroute", Routes: routes})
 	}
 	// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on; the
 	// port's own header changes come after.

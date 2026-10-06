@@ -702,6 +702,11 @@ func (p Port) validate() error {
 	if p.Path != "" && !pathRe.MatchString(p.Path) {
 		return fmt.Errorf("ports[%s]: path %q must be an absolute prefix without a trailing slash, such as /api", p.Name, p.Path)
 	}
+	// With `%` in it Caddy compares the path escaped, segment by segment, and `/a%20b/*` no longer
+	// takes everything below the prefix — only one segment.
+	if strings.Contains(p.Path, "%") {
+		return fmt.Errorf("ports[%s]: path %q cannot hold a %%-escape: the proxy would route only one segment below it", p.Name, p.Path)
+	}
 	switch {
 	case (p.StripPath || p.PathRewrite != "") && p.Path == "":
 		return fmt.Errorf("ports[%s]: strip_path and path_rewrite change the path, and need path", p.Name)

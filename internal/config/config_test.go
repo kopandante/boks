@@ -582,6 +582,7 @@ func TestParsePortRouting(t *testing.T) {
 		port("path: api"):        "absolute prefix",
 		port("path: /api/"):      "absolute prefix",
 		port("path: '/a b'"):     "absolute prefix",
+		port("path: /a%20b"):     "escape",
 		port("strip_path: true"): "need path",
 		port("path_rewrite: /x"): "need path",
 		port("path: /a, strip_path: true, path_rewrite: /b"):                                            "give one",
