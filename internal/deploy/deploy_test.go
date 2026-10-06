@@ -35,6 +35,9 @@ type fake struct {
 	onRun func(cmd string)
 	// stdin is what each command that is not a file write was given on its standard input.
 	stdin map[string]string
+	// hang is the commands that never answer: they return only when their context ends, as an SSH
+	// call over a connection that stalled does once it is cut off.
+	hang []string
 }
 
 type write struct {
@@ -100,9 +103,13 @@ func (f *fake) wrote(path, content string, appended bool) error {
 func newFake() *fake {
 	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{},
 		stopped: map[string]bool{}}
-	f.out[proxyList] = "{}"    // what kamal-proxy prints when it holds no services
-	f.out[digests] = "[]"      // an image that came from no registry; tests that need a digest override it
-	f.out[netOwner] = "absent" // the app's network is not made yet
+	f.out[digests] = "[]"              // an image that came from no registry; tests that need a digest override it
+	f.out[netOwner] = "absent"         // the app's network is not made yet
+	f.out[applied] = "absent"          // the proxy has no applied config yet
+	f.out[migrateReq] = "1"            // the proxy runs with the sysctl a lossless reload needs
+	f.out[upstreams] = "[]"            // and holds no request in flight
+	f.out[probe] = "  HTTP/1.1 200 OK" // and every copy it probes answers
+	f.out["sh -c cd '.boks/_proxy' && pwd -P"] = "/home/u/.boks/_proxy"
 	return f
 }
 
@@ -110,15 +117,65 @@ const (
 	netOwner  = "sh -c out=$(docker network inspect"
 	boxes     = "sh -c ids=$(docker ps -aq --no-trunc)"
 	proxyNets = "docker container ls -a --filter name=^boks-proxy$ --format {{.Networks}}"
-	proxyList = "docker exec boks-proxy kamal-proxy list --json"
 	digests   = "docker inspect --type image"
+	// frags is the read of every app's routes fragment; applied, of the config the proxy runs.
+	frags      = "sh -c for f in '.boks/_proxy/routes'/*.json"
+	applied    = "sh -c if [ -f '.boks/_proxy/caddy.json' ]"
+	migrateReq = "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req"
+	upstreams  = "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams"
+	probe      = "docker exec boks-proxy sh -c wget -S -q -O /dev/null -T 5 '"
+	probeEnd   = "' 2>&1; true"
+	reloadVia  = "docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json"
+	caddyUp    = "running\tcaddy"
 )
 
-func (f *fake) Run(_ context.Context, args ...string) (string, error) {
+// fragment is one app's routes as the server keeps them, dialling target on each port.
+func fragment(t *testing.T, app, target string, ports ...config.Port) string {
+	t.Helper()
+	var routes []proxy.Route
+	for _, p := range ports {
+		routes = append(routes, proxy.Route{Host: p.Host, Dial: target + ":" + itoa(p.Port)})
+	}
+	b, err := json.Marshal(proxy.Fragment{App: app, Routes: routes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// proxyWrites reports any write to the proxy's state.
+func proxyWrites(f *fake) bool {
+	for p := range f.uploads {
+		if strings.HasPrefix(p, ".boks/_proxy/") {
+			return true
+		}
+	}
+	return false
+}
+
+// fragsRead is the whole command that reads every fragment.
+const fragsRead = frags + `; do [ -f "$f" ] && cat "$f"; done; true`
+
+// inspectOf is the read of container c's app and networks, as the proxy boot asks it.
+func inspectOf(c string) string {
+	return `sh -c out=$(docker container inspect --format '{{index .Config.Labels "boks.app"}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' '` +
+		c + `' 2>&1) && echo "$out" || case "$out" in *'No such container'*|*'No such object'*) echo '<gone>';; *) echo "$out" >&2; exit 1;; esac`
+}
+
+// fragmentWrite is the content written to app's fragment, or "".
+func (f *fake) fragmentWrite(app string) string { return f.uploads[".boks/_proxy/routes/"+app+".json"] }
+
+func (f *fake) Run(ctx context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	f.calls = append(f.calls, cmd)
 	if f.onRun != nil {
 		f.onRun(cmd)
+	}
+	for _, h := range f.hang {
+		if strings.HasPrefix(cmd, h) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
 	}
 	// The longest prefix answers, so a test can answer one network or container apart from the rest.
 	if err, ok := longest(f.fail, cmd); ok {
@@ -225,9 +282,10 @@ var fixed = Options{Env: []byte("SECRET=1\n"), Now: func() time.Time { return ti
 
 func TestRunHappyPath(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}]\n"
 	f.out["docker images ghcr.io/x/y"] = "v2 sha-a\nv1 sha-b\nv0 sha-c\n"
+	f.out[frags] = fragment(t, "demo", "demo-v1-1", webPort)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -243,13 +301,19 @@ func TestRunHappyPath(t *testing.T) {
 		// The proxy and its networks are every app's, so booting it takes the server's admission lock.
 		admitTake("demo"),
 		"docker network inspect boks",
-		"docker ps -a --filter name=^boks-proxy$ --format {{.State}}",
-		// The proxy is on the networks its routes need: none here.
+		proxyProbe,
+		fragsRead,
+		// A running proxy is checked for the sysctl every reload relies on.
+		migrateReq,
+		// The proxy is on the networks of the copies its routes dial.
 		proxyNets,
-		proxyList,
+		inspectOf("demo-v1-1"),
+		// And runs what the fragments make: a cut run may have left the applied config behind them.
+		"sh -c if [ -f '.boks/_proxy/caddy.json' ]; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		admitGive("demo"),
+		// What the proxy serves for the app now: where a failed switch would send the routes back.
+		fragsRead,
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
-		proxyList,
 		admitTake("demo"),
 		// Asked again under the admission lock, then the network is made.
 		netOwnerQuery("boks-demo"),
@@ -261,15 +325,25 @@ func TestRunHappyPath(t *testing.T) {
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
 			"--label boks.replace=overlap --env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
-		// The proxy joins the app's network before the first route moves, still under the lock.
+		// The proxy joins the app's network to reach the new copy, still under the lock.
 		proxyNets,
 		"docker network connect boks-demo boks-proxy",
 		// In overlap the server's admission ends once the container exists and the proxy can reach
 		// it: the next deploy's memory check sees it from then on, and the health wait does not hold
 		// every other app up.
 		admitGive("demo"),
-		"docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v2-1700000000:3000 " +
-			"--host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s",
+		// The health check, from the proxy, by the name the route will dial.
+		probe + "http://demo-v2-1700000000:3000/up" + probeEnd,
+		// One reload moves every route, under the lock again: the config is every app's.
+		admitTake("demo"),
+		fragsRead,
+		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
+		proxyProbe,
+		reloadVia,
+		"mv .boks/_proxy/caddy.next.json .boks/_proxy/caddy.json",
+		admitGive("demo"),
+		// The old copy finishes what the proxy still holds for it before it goes.
+		upstreams,
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
 		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
 		cronClear("demo"),
@@ -284,6 +358,12 @@ func TestRunHappyPath(t *testing.T) {
 	}
 	if f.uploads[".boks/demo/demo-v2-1700000000.env"] != "SECRET=1\n" {
 		t.Errorf("env not uploaded: %v", f.uploads)
+	}
+	// The fragment is written before the reload, so a run cut after it leaves the next run a config to
+	// catch up with, and the applied config is moved in once Caddy took it.
+	if !strings.Contains(f.fragmentWrite("demo"), `"dial": "demo-v2-1700000000:3000"`) || !strings.Contains(f.fragmentWrite("demo"), `"tls": true`) ||
+		f.writeAt(".boks/_proxy/routes/demo.json", "demo-v2") >= f.at(reloadVia) || f.at("mv .boks/_proxy/caddy.next.json .boks/_proxy/caddy.json") < f.at(reloadVia) {
+		t.Errorf("want the fragment recorded before the reload, the applied config after: %q", f.fragmentWrite("demo"))
 	}
 }
 
@@ -331,7 +411,7 @@ func cronClear(app string) string {
 		"crontab " + b + ".new && rm -f " + b + ".new && : > " + b
 }
 
-const proxyProbe = "docker ps -a --filter name=^boks-proxy$ --format {{.State}}"
+const proxyProbe = "docker ps -a --filter name=^boks-proxy$ --format {{.State}}\t{{.Label \"boks.proxy\"}}"
 
 const boxesQuery = boxes + ` || exit 1; [ -z "$ids" ] || exec docker inspect --format '{"id":{{json .Id}},"name":{{json .Name}},` +
 	`"hostname":{{json .Config.Hostname}},"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}},` +
@@ -355,9 +435,15 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		boxesQuery,
 		"docker pull ghcr.io/x/bot:v2",
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
+		// Whether the app has routes to drop is its fragment's to say, not the proxy's.
+		frags + `; do [ -f "$f" ] && cat "$f"; done; true`,
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
+		// A copy an older boks started, without the ports label, may have had routes: the proxy must not
+		// be the kamal-proxy whose routes to it this boks cannot drop.
+		proxyState + " --format {{.State}}\t{{.Label \"boks.proxy\"}}",
+		// A removal a cut run wrote to the fragments but never got into the proxy's config.
+		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
-		proxyProbe,
 		admitTake("bot"),
 		netOwnerQuery("boks-bot"),
 		boxesQuery,
@@ -577,8 +663,6 @@ func (f *fake) at(prefix string) int {
 }
 
 const (
-	deployVia  = "docker exec boks-proxy kamal-proxy deploy "
-	removeVia  = "docker exec boks-proxy kamal-proxy remove "
 	legacyLeft = "docker volume ls --quiet --filter name=^demo-data$"
 	legacyUse  = "docker ps -a --filter volume=demo-data"
 )
@@ -719,259 +803,63 @@ func TestRunRefusesWhenTheVolumeCheckFails(t *testing.T) {
 	}
 }
 
-// listed is one service as `kamal-proxy list --json` reports it.
-func listed(t *testing.T, services map[string]proxy.Listed) string {
-	t.Helper()
-	b, err := json.Marshal(services)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
-// routedFake is a server where demo-v1-1 is the running copy of the app and the proxy holds the
-// given services.
-func routedFake(t *testing.T, services map[string]proxy.Listed) *fake {
+// routedFake is a server where demo-v1-1 is the running copy of the app, and the proxy serves it on
+// web's host.
+func routedFake(t *testing.T) *fake {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t\n"
-	f.out[proxyList] = listed(t, services)
+	f.out[frags] = fragment(t, "demo", "demo-v1-1", webPort)
 	return f
 }
 
-// A port moved to another host leaves its old service behind; it has to go before the old
-// container does, or it keeps pointing at a container this deploy removed. Services of other
-// apps — by name or by target — stay.
-func TestRunRemovesRoutesTheConfigNoLongerDescribes(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.web":    {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-		"other.web":   {Hosts: []string{"other.example.com"}, Targets: []string{"other-v1-1:80"}},
-		"demo-web":    {Hosts: []string{"x.example.com"}, Targets: []string{"demo-web-v1-1:80"}},
-		"idle":        {Hosts: []string{"idle.example.com"}},
-	})
+// The switch makes the app's routes exactly what the config describes, dialling the new copy: a host
+// the config dropped goes with the same reload, before the old container does, so no route is left
+// pointing at a container this deploy removed. Other apps' routes ride along untouched.
+func TestTheSwitchReplacesTheAppsWholeFragment(t *testing.T) {
+	f := routedFake(t)
+	f.out[frags] = fragment(t, "demo", "demo-v1-1", webPort, config.Port{Name: "legacy", Port: 3000, Host: "old.example.com"}) + "\n" +
+		fragment(t, "other", "other-v1-1", config.Port{Name: "web", Port: 80, Host: "other.example.com"})
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
-	switched, removed, retired := f.at(deployVia+"demo.web"), f.at(removeVia+"demo.legacy"), f.at("docker rm demo-v1-1")
-	if switched < 0 || removed < switched || retired < removed {
-		t.Errorf("the stale route must go after the switch and before the old container: %v", f.calls)
+	next := f.uploads[".boks/_proxy/caddy.next.json"]
+	if !strings.Contains(next, `"dial": "`+newCopy+`:3000"`) || strings.Contains(next, "old.example.com") ||
+		strings.Contains(next, "demo-v1-1") || !strings.Contains(next, `"dial": "other-v1-1:80"`) {
+		t.Errorf("want demo's routes on the new copy alone, and other's kept:\n%s", next)
 	}
-	for _, keep := range []string{"demo.web", "other.web", "demo-web", "idle"} {
-		if f.has(removeVia + keep) {
-			t.Errorf("%s is not a stale route of this app: %v", keep, f.calls)
-		}
+	if strings.Contains(f.fragmentWrite("demo"), "old.example.com") || f.fragmentWrite("other") != "" {
+		t.Errorf("want demo's fragment rewritten and other's left alone: %q %q", f.fragmentWrite("demo"), f.fragmentWrite("other"))
+	}
+	if reloaded, retired := f.at(reloadVia), f.at("docker rm demo-v1-1"); reloaded < 0 || retired < reloaded {
+		t.Errorf("the reload comes before the old container goes: %v", f.calls)
 	}
 }
 
-// A switch that fails leaves the stale route in place: until the new routes are live it may still
-// be what serves the app.
-func TestRunKeepsStaleRoutesWhenTheSwitchFails(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-	})
-	f.fail[deployVia+"demo.web"] = errors.New("unhealthy")
+// What the proxy serves for the app is where a failed switch sends the routes back, so a deploy that
+// cannot read it does not start.
+func TestRunDoesNotStartWithoutTheRoutes(t *testing.T) {
+	f := routedFake(t)
+	f.fail[frags] = errors.New("boom")
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	if f.has(removeVia) {
-		t.Errorf("no route may be removed after a failed switch: %v", f.calls)
+	if f.has("docker run -d --name demo-") {
+		t.Errorf("nothing may start: %v", f.calls)
 	}
 }
 
-// A service named by an earlier boks (`demo-web`) holds the host, and kamal-proxy gives a host to
-// one service at a time: deploying `demo.web` next to it would be refused. The new container goes
-// onto the old service, which is then renamed, and only then is the old container retired.
-func TestRunTakesOverTheRouteOfAnEarlierNamingScheme(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo-web": {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-	})
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	// The switch waits for the new container's health; the rename does not wait again, for a
-	// target that has just passed that very check.
-	order := []int{
-		f.at(deployVia + "demo-web --target demo-v2-1700000000:3000 --host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s"),
-		f.at(removeVia + "demo-web"),
-		f.at(deployVia + "demo.web --target demo-v2-1700000000:3000 --host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s --force"),
-		f.at("docker stop demo-v1-1"),
-	}
-	if f.has(deployVia + "demo-web --target demo-v2-1700000000:3000 --host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s --force") {
-		t.Errorf("the switch itself must wait for the health check: %v", f.calls)
-	}
-	for i, at := range order {
-		if at < 0 || (i > 0 && at < order[i-1]) {
-			t.Fatalf("want switch onto demo-web, rename to demo.web, then retire; calls:\n%s", strings.Join(f.calls, "\n"))
-		}
-	}
-}
-
-// The same holds for a port renamed in the config while its host stays.
-func TestRunRenamesAPortThatKeepsItsHost(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.site": {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-	})
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	if f.at(deployVia+"demo.web") < 0 || f.at(deployVia+"demo.site") > f.at(removeVia+"demo.site") ||
-		f.at(removeVia+"demo.site") > f.at(deployVia+"demo.web") {
-		t.Errorf("want switch onto demo.site, then rename to demo.web: %v", f.calls)
-	}
-}
-
-// A rename that fails half way puts the old name back on the new container, and the old
-// container is kept: the command says so instead of reporting success.
-func TestRunRestoresARouteWhoseRenameFailed(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.site": {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-	})
-	f.fail[deployVia+"demo.web"] = errors.New("boom")
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
-		t.Fatal("want an error")
-	}
-	restored := f.at(deployVia + "demo.site --target demo-v2-1700000000:3000 --host demo.example.com --forward-headers=false --tls --health-check-path /up --deploy-timeout 60s --force")
-	if restored < 0 || restored < f.at(deployVia+"demo.web") {
-		t.Errorf("the old name must be put back after the failed rename, without waiting for a health check: %v", f.calls)
-	}
-	if f.has("docker stop demo-v1-1") || f.has("docker rm demo-v1-1") {
-		t.Errorf("the old container must be kept: %v", f.calls)
-	}
-}
-
-// A stale route that cannot be removed leaves the deploy unfinished: retiring the old container
-// would leave that route pointing at nothing, which is the failure this exists to prevent.
-func TestRunKeepsTheOldContainerWhenAStaleRouteStays(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-	})
-	f.fail[removeVia] = errors.New("boom")
+// A host another app routes is refused before anything of the app changes: found at the switch, it
+// would stop a deploy whose new copy already runs.
+func TestAHostAnotherAppRoutesIsRefusedBeforeAnyChange(t *testing.T) {
+	f := routedFake(t)
+	f.out[frags] = fragment(t, "other", "other-v1-1", webPort)
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
-	if err == nil || !strings.Contains(err.Error(), "demo-v1-1") {
-		t.Fatalf("want an error naming the kept container, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "is routed by both") {
+		t.Fatalf("want the host refused, got %v", err)
 	}
-	if f.has("docker stop demo-v1-1") || f.has("docker rm demo-v1-1") {
-		t.Errorf("the old container must be kept: %v", f.calls)
-	}
-}
-
-// What the proxy holds decides which service carries each port, so a deploy that cannot read it
-// does not start.
-func TestRunDoesNotStartWithoutTheProxyList(t *testing.T) {
-	f := routedFake(t, nil)
-	f.fail[proxyList] = errors.New("boom")
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
-		t.Fatal("want an error")
-	}
-	if f.has("docker run -d --name demo-") {
-		t.Errorf("nothing may start: %v", f.calls)
-	}
-}
-
-// Port `web` was renamed to `site` and a new port took the name `web`: the new port's own service
-// carries the other port's host, and deploying it would take that host away. Refused before
-// anything starts.
-func TestRunRefusesTwoPortsThroughOneService(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.web": {Hosts: []string{"actions.example.com"}, Targets: []string{"demo-v1-1:3001"}},
-	})
-	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", fixed); err == nil {
-		t.Fatal("want an error")
-	}
-	if f.has("docker run -d --name demo-") {
-		t.Errorf("nothing may start: %v", f.calls)
-	}
-}
-
-// A port carried by its predecessor's service was recorded under the predecessor's name, and
-// that record is what a revert aims at.
-func TestRunRevertsARenamedPortToItsRecordedPort(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.site": {Hosts: []string{"demo.example.com"}, Targets: []string{"demo-v1-1:4000"}},
-	})
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
-		ports(t, config.Port{Name: "site", Port: 4000, Host: "demo.example.com"}) + "\n"
-	f.fail[deployVia+"demo.actions"] = errors.New("boom")
-	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
-		t.Fatal("want an error")
-	}
-	if !f.has(deployVia + "demo.site --target demo-v1-1:4000") {
-		t.Errorf("the route must go back through demo.site to the port the old container listens on: %v", f.calls)
-	}
-}
-
-const chainPorts = `
-app: demo
-image: ghcr.io/x/y
-servers: [lab]
-ports:
-  - {name: y, port: 3000, host: one.example.com}
-  - {name: z, port: 3001, host: two.example.com}
-`
-
-// Ports renamed in a chain (x→y, y→z): y may take its own name only after z has moved off it, or
-// deploying demo.y would take two.example.com away from z.
-func TestRunRenamesAChainInOrder(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.x": {Hosts: []string{"one.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-		"demo.y": {Hosts: []string{"two.example.com"}, Targets: []string{"demo-v1-1:3001"}},
-	})
-	if err := Run(context.Background(), f, io.Discard, parse(t, chainPorts), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	zMoved, yRemoved := f.at(deployVia+"demo.z --target demo-v2-1700000000:3001"), f.at(removeVia+"demo.y")
-	yRenamed := f.at(deployVia + "demo.y --target demo-v2-1700000000:3000 --host one.example.com --forward-headers=false")
-	if zMoved < 0 || yRemoved < 0 || yRenamed < 0 || yRemoved > zMoved || zMoved > yRenamed {
-		t.Errorf("want demo.y → demo.z first, then demo.x → demo.y: %v", f.calls)
-	}
-	removes := 0
-	for _, c := range f.calls {
-		if strings.HasPrefix(c, removeVia) {
-			removes++
-		}
-	}
-	if removes != 2 {
-		t.Errorf("only the two renamed services may be removed, once each: %v", f.calls)
-	}
-}
-
-// Names that swap places cannot be renamed without one host losing its route; they stay as they
-// are and nothing that carries traffic is removed.
-func TestRunKeepsSwappedNamesRatherThanLoseAHost(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.z": {Hosts: []string{"one.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-		"demo.y": {Hosts: []string{"two.example.com"}, Targets: []string{"demo-v1-1:3001"}},
-	})
-	var log strings.Builder
-	if err := Run(context.Background(), f, &log, parse(t, chainPorts), "v2", fixed); err != nil {
-		t.Fatal(err)
-	}
-	if f.has(removeVia) {
-		t.Errorf("a service that carries a port must not be removed: %v", f.calls)
-	}
-	// The operator is told why the routes keep names the config no longer gives them.
-	if !strings.Contains(log.String(), "warning: port y keeps its route under demo.z") ||
-		!strings.Contains(log.String(), "warning: port z keeps its route under demo.y") {
-		t.Errorf("each swapped port must be reported: %q", log.String())
-	}
-	if !f.has(deployVia+"demo.z --target demo-v2-1700000000:3000 --host one.example.com --forward-headers=false") ||
-		!f.has(deployVia+"demo.y --target demo-v2-1700000000:3001 --host two.example.com --forward-headers=false") {
-		t.Errorf("both hosts must reach the new container through the services that hold them: %v", f.calls)
-	}
-}
-
-// An app without routes reads the proxy before it stops anything: a proxy that cannot answer
-// fails the deploy while the old copy is still running.
-func TestRoutelessReadsTheProxyBeforeStoppingTheOldCopy(t *testing.T) {
-	f := routelessFake("healthy")
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.fail[proxyList] = errors.New("boom")
-	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
-		t.Fatal("want an error")
-	}
-	if f.has("docker stop") || f.has("docker run -d") {
-		t.Errorf("nothing may be stopped or started: %v", f.calls)
+	if f.has("docker run") || f.has("docker network create") || len(f.appends) != 0 {
+		t.Errorf("nothing of the app may change: %v", f.calls)
 	}
 }
 
@@ -990,34 +878,16 @@ func TestRoutelessRefusesWhenDataStillSitsUnderTheOldVolumeName(t *testing.T) {
 	}
 }
 
-// In a rename chain (x→y, y→z) the name y meant another port on the old container, so a revert
-// that went by name would send one.example.com to the old y's port. The route is its host.
-func TestRunRevertsARenameChainByHost(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.x": {Hosts: []string{"one.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-		"demo.y": {Hosts: []string{"two.example.com"}, Targets: []string{"demo-v1-1:3001"}},
-	})
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + ports(t,
-		config.Port{Name: "x", Port: 3000, Host: "one.example.com"},
-		config.Port{Name: "y", Port: 3001, Host: "two.example.com"}) + "\n"
-	f.fail[deployVia+"demo.y --target demo-v2-1700000000:3001"] = errors.New("unhealthy")
-	if err := Run(context.Background(), f, io.Discard, parse(t, chainPorts), "v2", fixed); err == nil {
-		t.Fatal("want an error")
-	}
-	if !f.has(deployVia+"demo.x --target demo-v1-1:3000 --host one.example.com --forward-headers=false") || f.has(deployVia+"demo.x --target demo-v1-1:3001") {
-		t.Errorf("one.example.com must go back to the old x port: %v", f.calls)
-	}
-}
+// botPort is the port bot published before this deploy dropped it.
+var botPort = config.Port{Name: "web", Port: 3000, Host: "bot.example.com"}
 
 // A route of a removed port that cannot be dropped keeps the old copy: retiring it would leave
 // the route pointing at a removed container. The new copy stays up, the old one is not revived.
 func TestRoutelessKeepsTheOldCopyWhenARouteStays(t *testing.T) {
 	f := routelessFake("healthy")
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out[proxyList] = listed(t, map[string]proxy.Listed{
-		"bot.web": {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:3000"}},
-	})
-	f.fail[removeVia] = errors.New("boom")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
+	f.out[frags] = fragment(t, "bot", "bot-v1-1", botPort)
+	f.fail[reloadVia] = errors.New("boom")
 	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
 	if err == nil || !strings.Contains(err.Error(), "bot-v1-1") {
 		t.Fatalf("want an error naming the kept container, got %v", err)
@@ -1025,69 +895,115 @@ func TestRoutelessKeepsTheOldCopyWhenARouteStays(t *testing.T) {
 	if f.has("docker rm bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f bot-v2") {
 		t.Errorf("the old copy is kept stopped and the new one stays: %v", f.calls)
 	}
-}
-
-// A proxy that is there but stopped cannot be asked, and an app without routes does not need it:
-// the deploy goes on rather than wait for a proxy it does not use.
-func TestRoutelessDeploysWhileTheProxyIsStopped(t *testing.T) {
-	f := routelessFake("healthy")
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "exited"
-	f.fail[proxyList] = errors.New("container is not running")
-	var log strings.Builder
-	if err := Run(context.Background(), f, &log, parse(t, noPorts), "v2", quick()); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(log.String(), "warning: the proxy is not running") || !strings.Contains(log.String(), "[bot-v1-1] are kept stopped") {
-		t.Errorf("the operator must be told the routes went unchecked and which copies stay: %q", log.String())
-	}
-	if f.has(proxyList) || f.has("docker start boks-proxy") {
-		t.Errorf("a stopped proxy is neither asked nor started: %v", f.calls)
-	}
-	// The old copy is the only proof that a route named by an earlier boks is this app's.
-	if f.has("docker rm bot-v1-1") {
-		t.Errorf("the old copy must be kept until its routes can be checked: %v", f.calls)
+	if journalOpen(f, ".boks/bot/journal.jsonl") == false {
+		t.Errorf("the routes are not where the config says, so the operation stays open: %q", f.appends[".boks/bot/journal.jsonl"])
 	}
 }
 
-// A copy started without routes was never a route's target, so a stopped proxy is no reason to
-// keep it: a bot on such a server must not pile up one stopped copy per deploy.
-func TestRoutelessRetiresCopiesThatNeverHadRoutesWhileTheProxyIsStopped(t *testing.T) {
+// A proxy that is stopped is not reloaded, and not started for an app that does not use it: the
+// routes leave the files it loads when it starts, and the deploy goes on.
+func TestRoutelessDropsItsRoutesWhileTheProxyIsStopped(t *testing.T) {
 	f := routelessFake("healthy")
-	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t[]\nbot-v0-1\t\n"
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "exited"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "exited\tcaddy"
+	f.out[frags] = fragment(t, "bot", "bot-v1-1", botPort)
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
 	}
-	if !f.has("docker rm bot-v1-1") {
-		t.Errorf("a copy started without routes goes as usual: %v", f.calls)
+	if f.has("docker exec boks-proxy") || f.has("docker start boks-proxy") {
+		t.Errorf("a stopped proxy is neither reloaded nor started: %v", f.calls)
 	}
-	if f.has("docker rm bot-v0-1") {
-		t.Errorf("a copy without the label may be a route's target and stays: %v", f.calls)
+	if !f.has("rm -f .boks/_proxy/routes/bot.json") || strings.Contains(f.uploads[".boks/_proxy/caddy.json"], "bot.example.com") ||
+		f.uploads[".boks/_proxy/caddy.json"] == "" {
+		t.Errorf("want bot's routes gone from the files the proxy loads: %v %v", f.calls, f.uploads)
+	}
+	if !f.has("docker rm bot-v1-1") {
+		t.Errorf("no route reaches the old copy any more, so it goes: %v", f.calls)
 	}
 }
 
 // An app whose ports were all removed still has the routes it had; left alone they answer with a
 // 502 from a container this deploy removes. They go after the new copy is healthy and before the
-// old one is retired — without booting or routing through the proxy.
+// old one is retired, with one reload that keeps other apps' routes — without booting the proxy.
 func TestRoutelessDropsTheRoutesOfRemovedPorts(t *testing.T) {
 	f := routelessFake("healthy")
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out[proxyList] = listed(t, map[string]proxy.Listed{
-		"bot.web":   {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:3000"}},
-		"bot-api":   {Hosts: []string{"api.example.com"}, Targets: []string{"bot-v1-1:3001"}},
-		"other.web": {Hosts: []string{"other.example.com"}, Targets: []string{"other-v1-1:80"}},
-	})
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
+	f.out[frags] = fragment(t, "bot", "bot-v1-1", botPort, config.Port{Name: "api", Port: 3001, Host: "api.example.com"}) + "\n" +
+		fragment(t, "other", "other-v1-1", config.Port{Name: "web", Port: 80, Host: "other.example.com"})
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
 	}
-	healthy, retired := f.at("docker inspect --format"), f.at("docker rm bot-v1-1")
-	for _, gone := range []string{"bot.web", "bot-api"} {
-		if at := f.at(removeVia + gone); at < healthy || at > retired {
-			t.Errorf("%s must go after the new copy is healthy and before the old one is retired: %v", gone, f.calls)
-		}
+	healthy, reloaded, retired := f.at("docker inspect --format"), f.at(reloadVia), f.at("docker rm bot-v1-1")
+	if reloaded < healthy || retired < reloaded {
+		t.Errorf("the routes must go after the new copy is healthy and before the old one is retired: %v", f.calls)
 	}
-	if f.has(removeVia+"other.web") || f.has(deployVia) || f.has("docker start boks-proxy") {
-		t.Errorf("only this app's routes may go, and the proxy is not routed through: %v", f.calls)
+	next := f.uploads[".boks/_proxy/caddy.next.json"]
+	if strings.Contains(next, "bot.example.com") || strings.Contains(next, "api.example.com") || !strings.Contains(next, "other.example.com") {
+		t.Errorf("only this app's routes may go:\n%s", next)
+	}
+	if !f.has("rm -f .boks/_proxy/routes/bot.json") || f.has("docker start boks-proxy") || f.has("docker network inspect boks") {
+		t.Errorf("the fragment goes and the proxy is not booted: %v", f.calls)
+	}
+}
+
+// A removal a cut run wrote to the fragments but never got into the proxy's config — the fragment
+// gone, the applied config still routing the app — is finished by the next deploy, though the app
+// has no fragment left to say so.
+func TestRoutelessFinishesARemovalACutRunLeft(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
+	other := fragment(t, "other", "other-v1-1", config.Port{Name: "web", Port: 80, Host: "other.example.com"})
+	f.out[frags] = other
+	var both []proxy.Fragment
+	for _, fr := range []string{fragment(t, "bot", "bot-v1-1", botPort), other} {
+		var x proxy.Fragment
+		if err := json.Unmarshal([]byte(fr), &x); err != nil {
+			t.Fatal(err)
+		}
+		both = append(both, x)
+	}
+	stale, _ := proxy.Config(both)
+	f.out[applied] = "present\n" + strings.TrimSuffix(string(stale), "\n")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	next := f.uploads[".boks/_proxy/caddy.next.json"]
+	if !f.has(reloadVia) || strings.Contains(next, "bot.example.com") || !strings.Contains(next, "other.example.com") {
+		t.Errorf("want a reload without the app's routes:\n%s\n%v", next, f.calls)
+	}
+	if f.at(reloadVia) > f.at("docker rm bot-v1-1") {
+		t.Errorf("the routes go before the old copy: %v", f.calls)
+	}
+}
+
+// An app that drops its routes on a server still on kamal-proxy is refused before anything of it
+// changes: its routes are kamal-proxy's, and retiring the copies they dial would leave them on 502.
+func TestRoutelessRefusesToDropKamalRoutes(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running\t"
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t" + `[{"name":"web","port":3000,"host":"bot.example.com"}]` + "\n"
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "boks proxy migrate") || f.has("docker stop") || f.has("docker run") {
+		t.Errorf("want the migration asked for and nothing changed: %v %v", err, f.calls)
+	}
+	// An app that never had routes deploys there as before.
+	g := routelessFake("healthy")
+	g.out["docker ps -a --filter name=^boks-proxy$"] = "running\t"
+	g.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t[]\n"
+	if err := Run(context.Background(), g, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Errorf("a routeless app has nothing on kamal-proxy: %v", err)
+	}
+}
+
+// An app that never had routes reloads nothing.
+func TestRoutelessWithoutRoutesLeavesTheProxyAlone(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
+	f.out[frags] = fragment(t, "other", "other-v1-1", config.Port{Name: "web", Port: 80, Host: "other.example.com"})
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if f.has("docker exec boks-proxy") || f.has("rm -f .boks/_proxy") || proxyWrites(f) {
+		t.Errorf("nothing of the proxy changes: %v %v", f.calls, f.uploads)
 	}
 }
 
@@ -1113,106 +1029,258 @@ func ports(t *testing.T, spec ...config.Port) string {
 	return string(b)
 }
 
+// A reload that fails may still have gone through, so the routes are put back on the old copy with a
+// forced reload before the new copy goes; the old copy keeps serving, and the outcome is known.
 func TestRunKeepsOldWhenSwitchFails(t *testing.T) {
-	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy"] = errors.New("health check failed")
-	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
-	if err == nil || !strings.Contains(err.Error(), "left running for inspection") {
-		t.Fatalf("want switch error, got %v", err)
+	f := routedFake(t)
+	reloads := 0
+	f.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, reloadVia) {
+			if reloads++; reloads == 1 {
+				f.fail[reloadVia] = errors.New("loading new config: connection reset")
+			} else {
+				delete(f.fail, reloadVia)
+			}
+		}
 	}
-	if f.has("docker stop") || f.has("docker rm ") {
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("want the switch error, got %v", err)
+	}
+	restored, removed := f.at(reloadVia+" --force"), f.at("docker rm -f "+newCopy)
+	if restored < 0 || removed < restored {
+		t.Errorf("want the routes put back, then the new copy removed: %v", f.calls)
+	}
+	if f.has("docker stop demo-v1-1") || f.has("docker rm demo-v1-1") {
 		t.Errorf("old container must survive a failed switch, got %v", f.calls)
+	}
+	if !strings.Contains(f.uploads[".boks/_proxy/caddy.next.json"], `"dial": "demo-v1-1:3000"`) {
+		t.Errorf("want the restored config dialling the old copy: %s", f.uploads[".boks/_proxy/caddy.next.json"])
+	}
+	if journalOpen(f, journal) || !strings.Contains(f.appends[journal], `"result":"failed"`) {
+		t.Errorf("the routes are back, so the outcome is known: %q", f.appends[journal])
 	}
 	if f.calls[len(f.calls)-1] != "rmdir /tmp/boks-demo.lock" {
 		t.Errorf("lock must be released on failure, last call %s", f.calls[len(f.calls)-1])
 	}
 }
 
-func TestRunRevertsSwitchedRoutesWhenLaterPortFails(t *testing.T) {
-	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
-		ports(t, config.Port{Name: "web", Port: 3000, Host: "demo.example.com"}) + "\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("host is used by another service")
-	err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now})
-	if err == nil {
-		t.Fatal("want error")
+// When the routes cannot be put back either, the new copy may be what serves: it stays, the old one
+// too, and the operation stays open.
+func TestAFailedSwitchThatCannotBePutBackKeepsBothCopies(t *testing.T) {
+	f := routedFake(t)
+	f.fail[reloadVia] = errors.New("connection reset")
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "putting the routes back failed too") {
+		t.Fatalf("want both failures named, got %v", err)
 	}
-	revert := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --forward-headers=false --deploy-timeout 60s"
-	if !f.has(revert) {
-		t.Errorf("web route must be pointed back at the old container, calls:\n%s", strings.Join(f.calls, "\n"))
-	}
-	if f.has("docker stop") {
-		t.Errorf("old container must not be retired after a failed switch")
+	if f.has("docker rm -f "+newCopy) || f.has("docker stop demo-v1-1") || !journalOpen(f, journal) {
+		t.Errorf("want both copies kept and the operation open: %v %q", f.calls, f.appends[journal])
 	}
 }
 
-// The port a route is reverted to must come from the old container, not from a config that
-// changed since: the old container listens where it was started.
-func TestRunRevertsToThePortTheOldContainerActuallyListensOn(t *testing.T) {
-	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
-		ports(t, config.Port{Name: "web", Port: 8080, Host: "demo.example.com", HealthPath: "/healthz"}) + "\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("boom")
-	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
-		t.Fatal("want error")
+// A copy that never passes its health check never got the routes: it goes without a reload, the old
+// copy keeps serving, and the outcome is known.
+func TestAnUnhealthyCopyGetsNoRoute(t *testing.T) {
+	f := routedFake(t)
+	f.fail[probe] = errors.New("wget: server returned error: HTTP/1.1 503 Service Unavailable")
+	cfg := parse(t, onePort+"deploy_timeout: 1ms\n")
+	err := Run(context.Background(), f, io.Discard, cfg, "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "did not pass its health check within 1ms, so no route moved") || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("want the health check named, got %v", err)
 	}
-	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:8080 " +
-		"--host demo.example.com --forward-headers=false --health-check-path /healthz --deploy-timeout 60s"
-	if !f.has(want) {
-		t.Errorf("revert must use the old container's port and health check, calls:\n%s", strings.Join(f.calls, "\n"))
+	if f.has(reloadVia) || !f.has("docker rm -f "+newCopy) || f.has("docker stop demo-v1-1") {
+		t.Errorf("no reload, the new copy removed, the old one kept: %v", f.calls)
 	}
-	if f.has("--target demo-v1-1:3000") {
-		t.Error("revert must not aim at the current config's port")
+	if journalOpen(f, journal) {
+		t.Errorf("nothing moved, so the outcome is known: %q", f.appends[journal])
+	}
+	// deploy_timeout bounds the probes themselves: one that never answers is cut off at it.
+	g := routedFake(t)
+	g.hang = []string{probe}
+	done, hung := make(chan error, 1), parse(t, onePort+"deploy_timeout: 100ms\n")
+	go func() { done <- Run(context.Background(), g, io.Discard, hung, "v2", quick()) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "did not pass its health check within 100ms") || g.has(reloadVia) {
+			t.Errorf("want the timeout, and no route moved: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a hung probe held the deploy past deploy_timeout")
 	}
 }
 
-// A container started by a boks without the label — the first deploy after an upgrade — must
-// still get its routes back, using the current config's ports, exactly as boks did before the
-// label existed. Refusing here would make the upgrade itself a regression.
-func TestRunRevertsWithoutTheLabelUsingTheCurrentConfig(t *testing.T) {
-	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("boom")
+// Each port is checked where kamal-proxy checked it: its health_port when set, its path or /up, by the
+// name the route will dial; a port that answered is not asked again while another one is waited for.
+func TestTheHealthCheckOfEveryPortComesFirst(t *testing.T) {
+	f := routedFake(t)
+	const ready = probe + "http://" + newCopy + ":3002/ready"
+	tries := 0
+	f.onRun = func(cmd string) {
+		if cmd == probe+"http://"+newCopy+":3000/up"+probeEnd {
+			if tries++; tries < 3 {
+				f.fail[probe+"http://"+newCopy+":3000/up"] = errors.New("refused")
+			} else {
+				delete(f.fail, probe+"http://"+newCopy+":3000/up")
+			}
+		}
+	}
+	cfg := parse(t, twoPorts+"  - {name: admin, port: 3002, host: admin.example.com, health_path: /ready}\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(strings.Join(f.calls, "\n"), probe+"http://"+newCopy+":3000/up"); n != 4 {
+		t.Errorf("web (3000/up) three times, actions (health_port 3000) once: %d probes %v", n, f.calls)
+	}
+	if n := strings.Count(strings.Join(f.calls, "\n"), ready); n != 1 {
+		t.Errorf("admin answered at once and is not asked again: %d probes %v", n, f.calls)
+	}
+	if last, reload := f.lastAt(probe), f.at(reloadVia); reload < last {
+		t.Errorf("the routes move once every port answers: %v", f.calls)
+	}
+}
+
+// Each port has its own deploy_timeout from when the one before it answered, as kamal-proxy gave each
+// route it deployed: two ports that answer 250ms apart pass under a 300ms timeout though together they
+// take longer.
+func TestEveryPortHasItsOwnDeployTimeout(t *testing.T) {
+	f := routedFake(t)
+	start := time.Now()
+	web, admin := probe+"http://"+newCopy+":3000/up", probe+"http://"+newCopy+":3002/ready"
+	f.onRun = func(cmd string) {
+		for url, at := range map[string]time.Duration{web: 250 * time.Millisecond, admin: 500 * time.Millisecond} {
+			if strings.HasPrefix(cmd, url) {
+				if time.Since(start) < at {
+					f.fail[url] = errors.New("refused")
+				} else {
+					delete(f.fail, url)
+				}
+			}
+		}
+	}
+	cfg := parse(t, onePort+"deploy_timeout: 300ms\n")
+	cfg.Ports = append(cfg.Ports, config.Port{Name: "admin", Port: 3002, Host: "admin.example.com", HealthPath: "/ready"})
+	opts := quick()
+	opts.Poll = 10 * time.Millisecond
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", opts); err != nil {
+		t.Fatalf("want both ports through, each within its own budget: %v", err)
+	}
+}
+
+// The previous copy finishes the requests the proxy still holds for it before it is stopped, within
+// drain_timeout; one that never finishes is stopped at the bound, with a warning.
+func TestTheOldCopyDrainsBeforeItGoes(t *testing.T) {
+	f := routedFake(t)
+	asked := 0
+	f.onRun = func(cmd string) {
+		if cmd == upstreams {
+			if asked++; asked < 3 {
+				f.out[upstreams] = `[{"address":"demo-v1-1:3000","num_requests":2}]`
+			} else {
+				f.out[upstreams] = `[{"address":"demo-v1-1:3000","num_requests":0}]`
+			}
+		}
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if asked != 3 || f.lastAt(upstreams) > f.at("docker stop demo-v1-1") || f.at(upstreams) < f.at(reloadVia) {
+		t.Errorf("want the drain between the reload and the stop: %d %v", asked, f.calls)
+	}
+	g := routedFake(t)
+	g.out[upstreams] = `[{"address":"demo-v1-1:3000","num_requests":1}]`
 	var log strings.Builder
-	if err := Run(context.Background(), f, &log, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
-		t.Fatal("want error")
+	if err := Run(context.Background(), g, &log, parse(t, onePort+"drain_timeout: 1ms\n"), "v2", quick()); err != nil {
+		t.Fatal(err)
 	}
-	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --forward-headers=false --deploy-timeout 60s"
-	if !f.has(want) {
-		t.Errorf("route must go back to the old container, calls:\n%s", strings.Join(f.calls, "\n"))
+	if !strings.Contains(log.String(), "1 requests to the previous copies still in flight after 1ms") || !g.has("docker stop demo-v1-1") {
+		t.Errorf("want the bound to end the drain, with a warning: %q %v", log.String(), g.calls)
 	}
-	if !strings.Contains(log.String(), "no record of port") {
-		t.Errorf("the assumption must be stated, log:\n%s", log.String())
+	// A proxy that cannot say what it holds is waited out to the bound: stopping early is what the
+	// drain exists to prevent.
+	q := routedFake(t)
+	q.fail[upstreams] = errors.New("connection lost")
+	log.Reset()
+	start := time.Now()
+	if err := Run(context.Background(), q, &log, parse(t, onePort+"drain_timeout: 200ms\n"), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < 200*time.Millisecond || !strings.Contains(log.String(), "could not say") || q.at("docker stop demo-v1-1") < q.lastAt(upstreams) {
+		t.Errorf("want the bound waited out before the stop, with a warning: %s %q", time.Since(start), log.String())
+	}
+	// A question the bound cuts off after the proxy said what it holds: the warning reports that.
+	k := routedFake(t)
+	answered := 0
+	k.onRun = func(cmd string) {
+		if cmd == upstreams {
+			if answered++; answered > 1 {
+				k.hang = []string{upstreams}
+			}
+		}
+	}
+	k.out[upstreams] = `[{"address":"demo-v1-1:3000","num_requests":1}]`
+	log.Reset()
+	if err := Run(context.Background(), k, &log, parse(t, onePort+"drain_timeout: 100ms\n"), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "1 requests to the previous copies still in flight after 100ms") {
+		t.Errorf("want the proxy's last answer in the warning: %q", log.String())
+	}
+	// A question that never answers is cut off at the bound, not waited on forever.
+	w := routedFake(t)
+	w.hang = []string{upstreams}
+	done, hung := make(chan error, 1), parse(t, onePort+"drain_timeout: 100ms\n")
+	go func() { done <- Run(context.Background(), w, io.Discard, hung, "v2", quick()) }()
+	select {
+	case err := <-done:
+		if err != nil || !w.has("docker stop demo-v1-1") {
+			t.Errorf("want the deploy to finish after the bound: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a hung drain question held the deploy past drain_timeout")
+	}
+	// The drain is by container: a fragment a cut run left, naming a copy Caddy never sent anything
+	// to, does not let the copy that served go before its requests end.
+	c := routedFake(t)
+	c.out[frags] = fragment(t, "demo", "demo-cut-1", webPort)
+	busy := 0
+	c.onRun = func(cmd string) {
+		if cmd == upstreams {
+			if busy++; busy < 3 {
+				c.out[upstreams] = `[{"address":"demo-cut-1:3000","num_requests":0},{"address":"demo-v1-1:3000","num_requests":1}]`
+			} else {
+				c.out[upstreams] = `[]`
+			}
+		}
+	}
+	if err := Run(context.Background(), c, io.Discard, parse(t, onePort), "v2", quick()); err != nil || busy != 3 {
+		t.Errorf("want the copy that served drained: %d %v", busy, err)
+	}
+	// A first deploy has nothing to drain.
+	h := routedFake(t)
+	h.out[frags] = ""
+	h.out["docker ps -a --filter label=boks.app=demo"] = ""
+	if err := Run(context.Background(), h, io.Discard, parse(t, onePort), "v2", quick()); err != nil || h.has(upstreams) {
+		t.Errorf("nothing to drain: %v %v", err, h.calls)
 	}
 }
 
-// A port name added to the config since the old container started is not in its label, but the
-// container may well listen on that port anyway — two hosts can share one container port. The
-// route must still be attempted: kamal-proxy's health check is what decides, and skipping would
-// strand the route on the failed release for nothing.
-func TestRunRevertsPortsMissingFromTheLabel(t *testing.T) {
-	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" +
-		ports(t, config.Port{Name: "actions", Port: 3001, Host: "actions.example.com"}) + "\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("boom")
-	if err := Run(context.Background(), f, io.Discard, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
-		t.Fatal("want error")
+// A health path written without its slash means what kamal-proxy made of it: /up, joined onto the
+// copy's address.
+func TestARelativeHealthPathIsJoinedOntoTheAddress(t *testing.T) {
+	f := routedFake(t)
+	cfg := parse(t, strings.Replace(onePort, "health_path: /up", "health_path: up", 1))
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", quick()); err != nil {
+		t.Fatal(err)
 	}
-	want := "docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1:3000 --host demo.example.com --forward-headers=false --deploy-timeout 60s"
-	if !f.has(want) {
-		t.Errorf("an unrecorded port must still be reverted with the config's value, calls:\n%s", strings.Join(f.calls, "\n"))
+	if !f.has(probe + "http://demo-v2-1700000000:3000/up") {
+		t.Errorf("want the probe at /up: %v", f.calls)
 	}
 }
 
 func TestPruneRemovesUntaggedImages(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out["docker images ghcr.io/x/y"] = "v2 sha-new\n<none> sha-dangling\nv1 sha-b\nv0 sha-c\n"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
@@ -1229,30 +1297,10 @@ func TestPruneRemovesUntaggedImages(t *testing.T) {
 	}
 }
 
-func TestRunDoesNotGuessRevertTargetAmongSeveralOld(t *testing.T) {
-	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	// Both are labelled: what stops the revert here is the ambiguity, not a missing label.
-	p := ports(t, config.Port{Name: "web", Port: 3000, Host: "demo.example.com"})
-	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t" + p + "\ndemo-v0-9\t" + p + "\n"
-	f.fail["docker exec boks-proxy kamal-proxy deploy demo.actions"] = errors.New("boom")
-	var log strings.Builder
-	if err := Run(context.Background(), f, &log, parse(t, twoPorts), "v2", Options{Now: fixed.Now}); err == nil {
-		t.Fatal("want error")
-	}
-	if f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1") ||
-		f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v0-9") {
-		t.Errorf("must not revert to an arbitrary previous container, calls:\n%s", strings.Join(f.calls, "\n"))
-	}
-	if !strings.Contains(log.String(), "cannot be reverted automatically") {
-		t.Errorf("operator must be told the routes are split, log:\n%s", log.String())
-	}
-}
-
 // No env means no env file.
 func TestRunWithoutEnv(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v1", Options{Now: fixed.Now}); err != nil {
 		t.Fatal(err)
 	}
@@ -1274,7 +1322,7 @@ func TestContainerNameSanitizes(t *testing.T) {
 // config that may since have changed.
 func TestDeployRecordsWhatItRan(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out[digests] = `["mirror.example.com/x/y@sha256:other","ghcr.io/x/y@sha256:abc"]`
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
@@ -1307,7 +1355,7 @@ func TestDeployRecordsWhatItRan(t *testing.T) {
 // docker. The journal is the only place that knows, and the next run has to say so.
 func TestDeployWarnsAboutAnOperationThatNeverFinished(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out["sh -c cat '.boks/demo/journal.jsonl'"] =
 		`{"op":"1","action":"deploy","to":"demo-v1-1","started_at":"2026-09-15T10:00:00Z"}`
 	var log strings.Builder
@@ -1329,11 +1377,11 @@ func TestDeployWarnsAboutAnOperationThatNeverFinished(t *testing.T) {
 // next deploy are what show it.
 func TestFailedSwitchLeavesTheJournalOpen(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.fail["docker exec boks-proxy kamal-proxy deploy"] = errors.New("connection reset")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
+	f.fail[reloadVia] = errors.New("connection reset")
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
-	if err == nil || !strings.Contains(err.Error(), "may still have switched") {
-		t.Fatalf("want an error saying the route may have switched, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "may be serving") {
+		t.Fatalf("want an error saying the new copy may serve, got %v", err)
 	}
 	opened := f.appends[".boks/demo/journal.jsonl"]
 	if !strings.Contains(opened, `"action":"deploy"`) || strings.Contains(opened, `"result"`) {
@@ -1341,7 +1389,7 @@ func TestFailedSwitchLeavesTheJournalOpen(t *testing.T) {
 	}
 	// The next deploy reads that journal: it reports the operation and closes it as abandoned.
 	next := newFake()
-	next.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	next.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	next.out["sh -c cat '.boks/demo/journal.jsonl'"] = opened
 	var log strings.Builder
 	if err := Run(context.Background(), next, &log, parse(t, onePort), "v3", fixed); err != nil {
@@ -1362,7 +1410,7 @@ func journalOpen(f *fake, path string) bool {
 
 func TestFailedStartClosesTheJournalEntry(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.fail["docker run"] = errors.New("no such image")
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
@@ -1372,28 +1420,10 @@ func TestFailedStartClosesTheJournalEntry(t *testing.T) {
 	}
 }
 
-// A deploy whose routes could not be brought in line is not finished: the entry stays open, and
-// nothing claims the new version is the current release.
-func TestSettleFailureLeavesTheJournalOpen(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{
-		"demo.legacy": {Hosts: []string{"old.example.com"}, Targets: []string{"demo-v1-1:3000"}},
-	})
-	f.fail[removeVia] = errors.New("boom")
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
-		t.Fatal("want an error")
-	}
-	if !journalOpen(f, journal) {
-		t.Errorf("the entry must stay open: %q", f.appends[journal])
-	}
-	if _, ok := f.uploads[".boks/demo/current"]; ok {
-		t.Errorf("current must not move: %v", f.uploads)
-	}
-}
-
 // The release is written down before the previous containers go, and in the order that leaves more
 // evidence when cut short: snapshot, then current, then the closing line.
 func TestDeployRecordsBeforeItRetires(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -1412,7 +1442,7 @@ func TestDeployRecordsBeforeItRetires(t *testing.T) {
 // before it, so they stay and the deploy reports the failure.
 func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
 	t.Run("digest", func(t *testing.T) {
-		f := routedFake(t, nil)
+		f := routedFake(t)
 		f.fail[digests] = errors.New("connection reset")
 		err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
 		if err == nil || !strings.Contains(err.Error(), "could not record") || f.has("docker rm demo-v1-1") {
@@ -1441,7 +1471,7 @@ func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
 		"journal":  func(path, content string) bool { return path == journal && strings.Contains(content, `"result":"ok"`) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := routedFake(t, nil)
+			f := routedFake(t)
 			f.pipeFail = func(path, content string) error {
 				if fails(path, content) {
 					return errors.New("disk full")
@@ -1461,7 +1491,7 @@ func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
 
 // A journal that cannot be opened stops the deploy before anything of the app changes.
 func TestDeployDoesNotStartWithoutAJournalEntry(t *testing.T) {
-	for cfg, f := range map[string]*fake{onePort: routedFake(t, nil), noPorts: routelessFake("healthy")} {
+	for cfg, f := range map[string]*fake{onePort: routedFake(t), noPorts: routelessFake("healthy")} {
 		f.pipeFail = func(path, content string) error {
 			if strings.HasSuffix(path, "journal.jsonl") {
 				return errors.New("read-only file system")
@@ -1479,7 +1509,7 @@ func TestDeployDoesNotStartWithoutAJournalEntry(t *testing.T) {
 
 // An app without environment gets no env file, so its snapshot must not name one.
 func TestSnapshotNamesNoEnvFileWhenThereIsNone(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	o := fixed
 	o.Env = nil
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o); err != nil {
@@ -1496,7 +1526,7 @@ func TestSnapshotNamesNoEnvFileWhenThereIsNone(t *testing.T) {
 
 // Hosts covered by a certificate were routed at it; the snapshot keeps which domains those were.
 func TestSnapshotKeepsTheCertificateDomains(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out["docker exec boks-proxy cat /certs/boks/_.example.com.crt"] = "-----BEGIN CERTIFICATE-----"
 	cfg := parse(t, onePort+"cert: {domains: [\"*.example.com\"], dns: cloudflare, email: a@example.com}\n")
 	if err := Run(context.Background(), f, io.Discard, cfg, "v2", fixed); err != nil {
@@ -1519,7 +1549,7 @@ func TestTheCertificateIsCheckedOnceTheProxyIsUp(t *testing.T) {
 	const crt = "docker exec boks-proxy cat /certs/boks/_.example.com.crt"
 	f.fail[crt] = errors.New("Error response from daemon: No such container: boks-proxy")
 	f.onRun = func(cmd string) {
-		if strings.HasPrefix(cmd, "docker run -d --name boks-proxy") {
+		if strings.HasPrefix(cmd, "docker start boks-proxy") {
 			delete(f.fail, crt)
 			f.out[crt] = "-----BEGIN CERTIFICATE-----"
 		}
@@ -1528,7 +1558,7 @@ func TestTheCertificateIsCheckedOnceTheProxyIsUp(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, cfg, "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
-	if boot, check := f.callAt("docker run -d --name boks-proxy"), f.callAt(crt); boot < 0 || check < boot {
+	if boot, check := f.callAt("docker start boks-proxy"), f.callAt(crt); boot < 0 || check < boot {
 		t.Errorf("want the proxy booted before the certificate is read: %d %d", boot, check)
 	}
 }
@@ -1582,21 +1612,6 @@ func TestRoutelessFailedStartClosesTheJournalAfterTheCleanup(t *testing.T) {
 	}
 }
 
-func TestRoutelessRouteFailureLeavesTheJournalOpen(t *testing.T) {
-	f := routelessFake("healthy")
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
-	f.out[proxyList] = listed(t, map[string]proxy.Listed{
-		"bot.web": {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:3000"}},
-	})
-	f.fail[removeVia] = errors.New("boom")
-	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
-		t.Fatal("want an error")
-	}
-	if !journalOpen(f, botJournal) {
-		t.Errorf("the entry must stay open: %q", f.appends[botJournal])
-	}
-}
-
 // A refused deploy changed nothing, so it leaves nothing in the journal either.
 func TestRoutelessNameCollisionWritesNoJournal(t *testing.T) {
 	f := routelessFake("unhealthy")
@@ -1612,7 +1627,7 @@ func TestRoutelessNameCollisionWritesNoJournal(t *testing.T) {
 // The opening line names the release being replaced, which is what a later run needs to say what
 // was serving; and a current pointer that cannot be read stops the deploy before it changes anything.
 func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
@@ -1620,7 +1635,7 @@ func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
 	if !strings.Contains(f.appends[journal], `"from":"demo-v1-1","to":"demo-v2-1700000000"`) {
 		t.Errorf("want the replaced release in the opening line: %q", f.appends[journal])
 	}
-	f = routedFake(t, nil)
+	f = routedFake(t)
 	f.fail["sh -c cat '.boks/demo/current'"] = errors.New("connection reset")
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
@@ -1633,7 +1648,7 @@ func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
 // A Docker Hub image configured by its short name is recorded under its canonical repository; the
 // digest is still the one to keep, not dropped because the names differ.
 func TestSnapshotKeepsTheDigestOfAShortImageName(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out[digests] = `["docker.io/library/redis@sha256:abc"]`
 	cfg := parse(t, strings.Replace(onePort, "image: ghcr.io/x/y", "image: redis", 1))
 	if err := Run(context.Background(), f, io.Discard, cfg, "7", fixed); err != nil {
@@ -1651,7 +1666,7 @@ func TestSnapshotKeepsTheDigestOfAShortImageName(t *testing.T) {
 // A snapshot names the release it was deployed over: that, not deploy order, is where a rollback
 // without an id returns once a rollback has happened.
 func TestSnapshotNamesTheReleaseItWasDeployedOver(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v1-1\n"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)

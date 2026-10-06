@@ -19,7 +19,7 @@ import (
 // ports and volumes of that release — rather than today's config with an old tag.
 func TestRollbackRunsTheRecordedRelease(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v2-2\n"
 	f.out["cat .boks/demo/releases/demo-v2-2.json"] = `{"id":"demo-v2-2","previous":"demo-v1-1"}`
@@ -41,7 +41,7 @@ func TestRollbackRunsTheRecordedRelease(t *testing.T) {
 	if !strings.Contains(joined, "--env-file .boks/demo/demo-v1-1.env") {
 		t.Errorf("the environment of that release must be used: %v", f.calls)
 	}
-	if !strings.Contains(joined, "kamal-proxy deploy demo.web --target demo-v1-1700000000:3000") {
+	if !strings.Contains(f.uploads[".boks/_proxy/caddy.next.json"], `"dial": "demo-v1-1700000000:3000"`) {
 		t.Errorf("routes must point at the restored container: %v", f.calls)
 	}
 	if !strings.Contains(f.appends[".boks/demo/journal.jsonl"], `"action":"rollback"`) {
@@ -53,7 +53,7 @@ func TestRollbackRunsTheRecordedRelease(t *testing.T) {
 // instead of starting the app with today's variables under an old image.
 func TestRollbackRefusesWhenTheReleaseEnvIsGone(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v2-2\n"
 	f.out["cat .boks/demo/releases/demo-v2-2.json"] = `{"id":"demo-v2-2","previous":"demo-v1-1"}`
@@ -79,7 +79,7 @@ func TestRollbackRefusesWhenTheReleaseEnvIsGone(t *testing.T) {
 
 func TestRollbackWithoutAnyEarlierRelease(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed)
 	if err == nil || !strings.Contains(err.Error(), "no earlier release") {
 		t.Fatalf("want a clear refusal, got %v", err)
@@ -208,7 +208,7 @@ func TestRollbackHandlesTheCertificateLikeADeploy(t *testing.T) {
 			"ports":[{"name":"web","port":3000,"host":"demo.example.com"}],"network":"boks"}`
 	}
 
-	missing := routedFake(t, nil)
+	missing := routedFake(t)
 	snapshot(missing)
 	err := Rollback(context.Background(), missing, io.Discard, parse(t, withCert), "", fixed)
 	if err == nil || !strings.Contains(err.Error(), "boks cert issue") {
@@ -218,7 +218,7 @@ func TestRollbackHandlesTheCertificateLikeADeploy(t *testing.T) {
 		t.Errorf("nothing may start without the certificate: %v", missing.calls)
 	}
 
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	snapshot(f)
 	f.out["docker exec boks-proxy cat /certs/boks/_.example.com.crt"] = "-----BEGIN CERTIFICATE-----"
 	if err := Rollback(context.Background(), f, io.Discard, parse(t, withCert), "", fixed); err != nil {
@@ -226,12 +226,15 @@ func TestRollbackHandlesTheCertificateLikeADeploy(t *testing.T) {
 	}
 	marked := false
 	for _, c := range f.calls {
-		if strings.HasPrefix(c, "docker exec -i -u 0 boks-proxy sh -c") && strings.Contains(c, ".demo.loaded") {
+		if strings.HasPrefix(c, "docker exec -i -u 0 boks-proxy sh -c") && strings.Contains(c, "_.example.com.restarted") {
 			marked = true
 		}
 	}
 	if !marked {
-		t.Errorf("the certificate the routes now load must be recorded as loaded: %v", f.calls)
+		t.Errorf("the reload read the certificate, which must be recorded as loaded: %v", f.calls)
+	}
+	if !strings.Contains(f.uploads[".boks/_proxy/caddy.next.json"], `"certificate": "/certs/boks/_.example.com.crt"`) {
+		t.Errorf("the host under the certificate is served from its file:\n%s", f.uploads[".boks/_proxy/caddy.next.json"])
 	}
 }
 
@@ -239,7 +242,7 @@ func TestRollbackHandlesTheCertificateLikeADeploy(t *testing.T) {
 // route and mounts are the recorded ones, not those the config names today.
 func TestRollbackToAnExplicitRelease(t *testing.T) {
 	f := newFake()
-	f.out["docker ps -a --filter name=^boks-proxy$"] = "running"
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
 	f.out["sh -c cat '.boks/demo/current'"] = "demo-v3-3\n"
 	f.out["cat .boks/demo/releases/demo-v3-3.json"] = `{"id":"demo-v3-3","previous":"demo-v2-2"}`
@@ -258,7 +261,7 @@ func TestRollbackToAnExplicitRelease(t *testing.T) {
 	if run >= 0 && !strings.Contains(f.calls[run], "--network boks-demo --network-alias demo ") {
 		t.Errorf("want the app's own network, got %s", f.calls[run])
 	}
-	if !f.has("docker exec boks-proxy kamal-proxy deploy demo.web --target demo-v1-1700000000:4000 --host old.example.com --forward-headers=false") {
+	if next := f.uploads[".boks/_proxy/caddy.next.json"]; !strings.Contains(next, `"dial": "demo-v1-1700000000:4000"`) || !strings.Contains(next, `"old.example.com"`) {
 		t.Errorf("the route must be the recorded one, port and host: %v", f.calls)
 	}
 	if got := f.uploads[".boks/demo/current"]; got != "demo-v1-1\n" {
@@ -295,7 +298,7 @@ func TestRollbackPrunesReleasesBeyondKeep(t *testing.T) {
 // A command over several servers names its releases with one stamp, so a release has one id
 // everywhere: the id `boks releases` prints for one server is the one `boks rollback` finds on all.
 func TestStampNamesTheRelease(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	o := fixed
 	o.Stamp = time.Unix(1600000000, 0)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", o); err != nil {
@@ -316,8 +319,29 @@ func TestCheckRollbackChangesNothing(t *testing.T) {
 	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), "bot-v9-9"); err == nil {
 		t.Error("want a refusal for a release this server does not have")
 	}
-	if f.has("docker") || f.has("mkdir") || len(f.uploads) > 0 || len(f.appends) > 0 {
-		t.Errorf("a check must not change the server: %v", f.calls)
+	// It reads (the proxy's state is asked, as below); it runs nothing that changes the server.
+	for _, change := range []string{"docker run", "docker stop", "docker rm", "docker start", "docker create", "docker rename", "docker network create", "mkdir"} {
+		if f.has(change) {
+			t.Errorf("a check must not change the server (%s): %v", change, f.calls)
+		}
+	}
+	if len(f.uploads) > 0 || len(f.appends) > 0 {
+		t.Errorf("a check must not change the server: %v %v", f.uploads, f.appends)
+	}
+}
+
+// A server still on kamal-proxy refuses a rollback with routes partway through: the check asks first,
+// so a rollback over several servers does not leave the earlier ones on another release.
+func TestCheckRollbackAsksForTheMigration(t *testing.T) {
+	f := botReleases("healthy")
+	f.out[proxyState] = "running\t"
+	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err != nil {
+		t.Errorf("no routes either side: kamal-proxy is not in the way, got %v", err)
+	}
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = strings.Replace(f.out["cat .boks/bot/releases/bot-v1-1.json"],
+		`"ports":[]`, `"ports":[{"name":"web","port":80,"host":"bot.example.com"}]`, 1)
+	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err == nil || !strings.Contains(err.Error(), "boks proxy migrate") {
+		t.Errorf("want the migration asked for, got %v", err)
 	}
 }
 

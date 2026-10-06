@@ -22,8 +22,24 @@ func TestParseDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Network.Kind != 0 || cfg.ProxyImage != DefaultProxyImage ||
-		cfg.Keep != DefaultKeep || cfg.DeployTimeout != DefaultDeployTimeout {
+		cfg.Keep != DefaultKeep || cfg.DeployTimeout != DefaultDeployTimeout || cfg.DrainTimeout != "30s" {
 		t.Errorf("defaults not applied: %+v", cfg)
+	}
+}
+
+// proxy_image named kamal-proxy's image before boks ran Caddy: one pinned then is refused, in any of
+// the ways an image is written; a Caddy image, or another named like it, is not.
+func TestProxyImagePinnedToKamalIsRefused(t *testing.T) {
+	for _, img := range []string{"basecamp/kamal-proxy:v0.10.0", "basecamp/kamal-proxy", "ghcr.io/basecamp/kamal-proxy@sha256:ab",
+		"registry.local:5000/kamal-proxy:v0.9.0"} {
+		if _, err := Parse([]byte(minimal + "proxy_image: " + img + "\n")); err == nil || !strings.Contains(err.Error(), "boks runs Caddy now") {
+			t.Errorf("%s: want a refusal, got %v", img, err)
+		}
+	}
+	for _, img := range []string{"caddy:2.11.7-alpine", "registry.local:5000/caddy:2", "example/kamal-proxy-caddy:1"} {
+		if _, err := Parse([]byte(minimal + "proxy_image: " + img + "\n")); err != nil {
+			t.Errorf("%s: want it taken, got %v", img, err)
+		}
 	}
 }
 
@@ -36,6 +52,8 @@ func TestParseRejects(t *testing.T) {
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1}]":                                       "host is required",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\nvolumes: [data]":             "volumes",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\ndeploy_timeout: soon":        "deploy_timeout",
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\ndrain_timeout: soon":         "drain_timeout",
+		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\ndrain_timeout: -1s":          "drain_timeout",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: a}, {name: w, port: 2, host: b}]": "duplicate name",
 		"app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: a}, {name: v, port: 2, host: a}]": "duplicate host",
 	}
@@ -149,7 +167,7 @@ func TestCertCovers(t *testing.T) {
 		}
 	}
 	// A wildcard matches exactly one label: the bare domain and a deeper name are not covered,
-	// and neither is an unrelated host — those keep kamal-proxy's autocert.
+	// and neither is an unrelated host — those keep the proxy's automatic HTTPS.
 	for _, h := range []string{"lab.example.com", "a.b.lab.example.com", "other.example.com", ""} {
 		if c.Covers(h) {
 			t.Errorf("%q must not be covered", h)

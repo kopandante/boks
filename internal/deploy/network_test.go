@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/config"
 )
 
 // boxLine is one container as the inventory prints it, attached to boks-demo with these aliases.
@@ -39,7 +39,7 @@ func TestANameTakenOnTheNetworkIsRefusedBeforeAnyChange(t *testing.T) {
 		"a hostname":                   boxLine("x", "other", "demo", `null`),
 		"the new container's own name": boxLine("x", "other", "abc", `["demo-v2-1700000000"]`),
 	} {
-		f := routedFake(t, nil)
+		f := routedFake(t)
 		f.out[boxes] = line
 		err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
 		if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
@@ -53,7 +53,7 @@ func TestANameTakenOnTheNetworkIsRefusedBeforeAnyChange(t *testing.T) {
 
 // Overlap runs two copies of the app under its one alias on purpose: its own copies are no conflict.
 func TestTheAppsOwnCopiesShareItsAlias(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out[boxes] = boxLine("demo-v1-1", "demo", "abc", `["demo"]`)
 	f.out[netOwner] = `{"boks.app":"demo"}`
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
@@ -68,7 +68,7 @@ func TestTheAppsOwnCopiesShareItsAlias(t *testing.T) {
 // The proxy joins the network of a routed app with the names it has, so an app the proxy's names
 // would collide with is refused too — the proxy that is yet to be started included.
 func TestTheProxysNamesAreTakenOnARoutedAppsNetwork(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out[boxes] = `{"id":"0123456789abcdef","name":"/boks-proxy","hostname":"demo","labels":{},"networks":{"boks":{"Aliases":null}}}`
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil || !changedNothing(f) {
 		t.Errorf("want a refusal before any change, got %v: %v", err, f.calls)
@@ -95,7 +95,7 @@ func TestTheAppsNetworkMustBeItsOwn(t *testing.T) {
 		"unanswered":      func(f *fake) { f.fail[netOwner] = errors.New("connection reset") },
 		"unreadable list": func(f *fake) { f.fail[boxes] = errors.New("No such object") },
 	} {
-		f := routedFake(t, nil)
+		f := routedFake(t)
 		set(f)
 		if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil || !changedNothing(f) {
 			t.Errorf("%s: want a refusal before any change, got %v: %v", name, err, f.calls)
@@ -106,7 +106,7 @@ func TestTheAppsNetworkMustBeItsOwn(t *testing.T) {
 // A container another app removes between the listing and the inspect fails one listing, not the
 // deploy: it is asked again. The network the apps shared before is not to be removed on boks's word.
 func TestTheListingIsAskedAgainAndTheSharedNetworkLeftAlone(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.fail[boxes] = errors.New("Error: No such object: 0123")
 	listings := 0
 	f.onRun = func(cmd string) {
@@ -119,7 +119,7 @@ func TestTheListingIsAskedAgainAndTheSharedNetworkLeftAlone(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatalf("a listing that fails once is asked again: %v", err)
 	}
-	g := routedFake(t, nil)
+	g := routedFake(t)
 	g.out[netOwner] = `{}`
 	err := Run(context.Background(), g, io.Discard, parse(t, strings.Replace(onePort, "app: demo", "app: test", 1)), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "rename the app") {
@@ -130,7 +130,7 @@ func TestTheListingIsAskedAgainAndTheSharedNetworkLeftAlone(t *testing.T) {
 // What runs on the server can change while a deploy pulls and waits for its admission, so the names
 // are asked again under the lock; a conflict found then still changes nothing of the app.
 func TestTheNetworkIsAskedAgainUnderTheAdmissionLock(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.onRun = func(cmd string) {
 		if cmd == admitTake("demo") {
 			f.out[boxes] = boxLine("other-v1-1", "other", "abc", `["demo"]`)
@@ -148,7 +148,7 @@ func TestTheNetworkIsAskedAgainUnderTheAdmissionLock(t *testing.T) {
 // A proxy already on the app's network is not connected again; one that cannot be put there moves no
 // route and leaves the old copy serving.
 func TestTheProxyJoinsTheAppsNetworkOnce(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out[proxyNets] = "boks,boks-demo"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
@@ -156,19 +156,19 @@ func TestTheProxyJoinsTheAppsNetworkOnce(t *testing.T) {
 	if f.has("docker network connect") {
 		t.Errorf("the proxy is on the network already: %v", f.calls)
 	}
-	g := routedFake(t, nil)
+	g := routedFake(t)
 	g.fail["docker network connect"] = errors.New("network not found")
 	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want the failed connect")
 	}
-	if g.has(deployVia) || g.has("docker rm demo-v1-1") || !g.has("docker rm -f "+newCopy) {
+	if g.has(reloadVia) || g.has("docker rm demo-v1-1") || !g.has("docker rm -f "+newCopy) {
 		t.Errorf("no route moves, the old copy stays and the new one goes: %v", g.calls)
 	}
 	if journalOpen(g, journal) || !strings.Contains(g.appends[journal], `"result":"failed"`) {
 		t.Errorf("no route moved, so the outcome is known: %q", g.appends[journal])
 	}
 	// A new copy that cannot be confirmed gone is named.
-	k := routedFake(t, nil)
+	k := routedFake(t)
 	k.fail["docker network connect"] = errors.New("network not found")
 	k.out["docker ps -a --filter name=^"+newCopy+"$"] = newCopy + "\tdemo"
 	if err := Run(context.Background(), k, io.Discard, parse(t, onePort), "v2", fixed); err == nil || !strings.Contains(err.Error(), "could not be confirmed removed") {
@@ -180,14 +180,14 @@ func TestTheProxyJoinsTheAppsNetworkOnce(t *testing.T) {
 	if err := Run(context.Background(), h, io.Discard, parse(t, stopFirst), "v2", fixed); err == nil {
 		t.Fatal("want the failed connect")
 	}
-	if h.has(deployVia) || !h.has("docker start demo-v1-1") || journalOpen(h, journal) {
+	if h.has(reloadVia) || !h.has("docker start demo-v1-1") || journalOpen(h, journal) {
 		t.Errorf("want the old copy back, no route touched, the operation closed: %v / %q", h.calls, h.appends[journal])
 	}
 }
 
 // The proxy joins only to move a route: a deploy that fails before then leaves it where it was.
 func TestAFailedStartDoesNotPutTheProxyOnTheNetwork(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.fail["docker run"] = errors.New("no such image")
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
@@ -199,63 +199,63 @@ func TestAFailedStartDoesNotPutTheProxyOnTheNetwork(t *testing.T) {
 
 // The deploy that moves an app off the shared network, as convex-lab's will (stop-first, the proxy
 // on the shared boks-test): the old copy is on the shared network, and the proxy joins the app's own
-// network before the first route moves to the new copy there. When the switch fails, the old copy
-// comes back where it was — `docker start` keeps its networks — and the route goes back to it over
-// the shared network the proxy never left.
+// network to probe the new copy there. When the new copy never passes, the old one comes back where
+// it was — `docker start` keeps its networks — and the routes, which never moved, reach it over the
+// shared network the proxy never left.
 func TestTheFirstDeployMovesTheAppOffTheSharedNetwork(t *testing.T) {
 	f := stopFirstFake(t)
 	f.out[proxyNets] = "boks-test"
-	f.fail[deployVia+"demo.web --target "+newCopy] = errors.New("target failed to become healthy")
-	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err == nil {
-		t.Fatal("want the failed switch")
+	f.fail[probe] = errors.New("wget: server returned error: HTTP/1.1 502 Bad Gateway")
+	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst+"deploy_timeout: 1ms\n"), "v2", quick()); err == nil {
+		t.Fatal("want the failed health check")
 	}
 	run, joined := f.callAt("docker run -d --name "+newCopy+" --network boks-demo --network-alias demo "), f.callAt("docker network connect boks-demo boks-proxy")
-	moved, revived := f.callAt(deployVia+"demo.web --target "+newCopy), f.callAt("docker start demo-v1-1")
-	back := f.callAt(deployVia + "demo.web --target demo-v1-1:3000")
-	if run < 0 || joined < run || moved < joined || revived < moved || back < revived {
-		t.Errorf("want run < proxy joins < switch < revive < revert: %d %d %d %d %d\n%v", run, joined, moved, revived, back, f.calls)
+	probed, revived := f.callAt(probe+"http://"+newCopy+":3000/up"), f.callAt("docker start demo-v1-1")
+	if run < 0 || joined < run || probed < joined || revived < probed {
+		t.Errorf("want run < proxy joins < probe < revive: %d %d %d %d\n%v", run, joined, probed, revived, f.calls)
 	}
-	if f.has("docker network disconnect") || f.has("docker rm demo-v1-1") {
-		t.Errorf("the old copy and the proxy's networks stay: %v", f.calls)
+	if f.has(reloadVia) || f.has("docker network disconnect") || f.has("docker rm demo-v1-1") {
+		t.Errorf("no route moved, and the old copy and the proxy's networks stay: %v", f.calls)
 	}
 }
 
-// An app that loses its routes takes the proxy off its network once they are gone — but not while
-// the proxy cannot be asked whether they are.
+// An app that loses its routes takes the proxy off its network once they are gone, whether or not the
+// proxy runs: the fragments, not the proxy, say what it routes.
 func TestAnAppWithoutRoutesTakesTheProxyOffItsNetwork(t *testing.T) {
 	f := routelessFake("healthy")
-	f.out[proxyProbe] = "running"
+	f.out[proxyProbe] = caddyUp
 	f.out[proxyNets] = "boks,boks-bot"
-	f.out[proxyList] = listed(t, map[string]proxy.Listed{"bot.web": {Hosts: []string{"bot.example.com"}, Targets: []string{"bot-v1-1:80"}}})
+	f.out[frags] = fragment(t, "bot", "bot-v1-1", botPort)
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
 	}
-	removed, left := f.callAt("docker exec boks-proxy kamal-proxy remove bot.web"), f.callAt("docker network disconnect boks-bot boks-proxy")
+	removed, left := f.callAt(reloadVia), f.callAt("docker network disconnect boks-bot boks-proxy")
 	recorded := f.writeAt(".boks/bot/current", "bot-v2")
 	if removed < 0 || left < removed || left < recorded {
 		t.Errorf("the proxy leaves once the app's last route is gone and the release is recorded: %d %d %d %v", removed, left, recorded, f.calls)
 	}
 	// A route that could not be removed keeps the proxy where it reaches the old copy.
 	k := routelessFake("healthy")
-	k.out[proxyProbe] = "running"
+	k.out[proxyProbe] = caddyUp
 	k.out[proxyNets] = "boks,boks-bot"
-	k.out[proxyList] = f.out[proxyList]
-	k.fail["docker exec boks-proxy kamal-proxy remove"] = errors.New("connection reset")
+	k.out[frags] = f.out[frags]
+	k.fail[reloadVia] = errors.New("connection reset")
 	if err := Run(context.Background(), k, io.Discard, parse(t, noPorts), "v2", quick()); err == nil || k.has("docker network disconnect") {
 		t.Errorf("want the failed removal, and the proxy kept on the network: %v: %v", err, k.calls)
 	}
 	g := routelessFake("healthy")
-	g.out[proxyProbe] = "exited"
+	g.out[proxyProbe] = "exited\tcaddy"
 	g.out[proxyNets] = "boks,boks-bot"
+	g.out[frags] = f.out[frags]
 	if err := Run(context.Background(), g, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
 	}
-	if g.has("docker network disconnect") {
-		t.Errorf("the routes were not checked, so the proxy stays: %v", g.calls)
+	if !g.has("docker network disconnect boks-bot boks-proxy") {
+		t.Errorf("a stopped proxy leaves the network too: %v", g.calls)
 	}
 	// A disconnect that fails costs isolation, not the deploy.
 	h := routelessFake("healthy")
-	h.out[proxyProbe] = "running"
+	h.out[proxyProbe] = caddyUp
 	h.out[proxyNets] = "boks-bot"
 	h.fail["docker network disconnect"] = errors.New("connection reset")
 	var log strings.Builder
@@ -331,19 +331,20 @@ func TestCheckRollbackAsksTheNetwork(t *testing.T) {
 
 // The names the proxy brings to a routed app's network must be free there too.
 func TestTheProxysOwnNameMustBeFreeOnTheNetwork(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out[boxes] = boxLine("other-v1-1", "other", "abc", `["boks-proxy"]`)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil || !changedNothing(f) {
 		t.Errorf("want a refusal before any change, got %v: %v", err, f.calls)
 	}
 }
 
-// A proxy that cannot reach the target of another app's route fails the boot, and with it the deploy,
+// A proxy that cannot reach the copy another app's route dials fails the boot, and with it the deploy,
 // before anything of this app changes; the admission lock is given back. The image is already pulled
 // by then — the pull goes first, so that a registry refusing the login leaves the proxy untouched —
 // and an image on disk changes nothing that runs.
 func TestAProxyThatCannotReachARouteStopsTheDeploy(t *testing.T) {
-	f := routedFake(t, map[string]proxy.Listed{"other.web": {Hosts: []string{"o.example.com"}, Targets: []string{"other-v1-1:80"}}})
+	f := routedFake(t)
+	f.out[frags] = fragment(t, "other", "other-v1-1", config.Port{Name: "web", Port: 80, Host: "o.example.com"})
 	f.fail["sh -c out=$(docker container inspect"] = errors.New("connection reset")
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "other-v1-1") {
@@ -356,7 +357,7 @@ func TestAProxyThatCannotReachARouteStopsTheDeploy(t *testing.T) {
 
 // A lock left by a proxy boot outside any deploy is named as that, with the way to clear it.
 func TestALeftoverProxyBootLockIsNamed(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.fail["ln -sn"] = errors.New("File exists")
 	f.out["sh -c readlink /tmp/boks.admit.lock"] = "_proxy.1699999999000000000"
 	o := fixed

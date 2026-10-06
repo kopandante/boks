@@ -31,7 +31,7 @@ func depLine(name, app, network, aliases string, running bool, health string) st
 
 // cacheFake is a routed demo whose dependency cache runs healthy on its own network.
 func cacheFake(t *testing.T) *fake {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out[netOwnerQuery("boks-cache")] = `{"boks.app":"cache"}`
 	f.out[boxes] = depLine("cache-v1-1", "cache", "boks-cache", `["cache"]`, true, "healthy")
 	return f
@@ -154,7 +154,7 @@ func TestACreatedContainerThatCannotJoinIsRemoved(t *testing.T) {
 			t.Fatalf("%s: want an error", failing)
 		}
 		// A failed create may have created the copy all the same, so it is removed too.
-		if !f.has("docker rm -f "+newCopy) || f.has(deployVia) {
+		if !f.has("docker rm -f "+newCopy) || f.has(reloadVia) {
 			t.Errorf("%s: want the new container removed and no route moved: %v", failing, f.calls)
 		}
 	}
@@ -222,12 +222,12 @@ func TestRollbackRefusesNetworksThatDoNotMatchTheUses(t *testing.T) {
 
 // Docker's DNS ignores case: a name answered as DEMO by another owner is the app's name too.
 func TestANameTakenInAnotherCaseIsTaken(t *testing.T) {
-	f := routedFake(t, nil)
+	f := routedFake(t)
 	f.out[boxes] = boxLine("x", "other", "abc", `["DEMO"]`)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil || !changedNothing(f) {
 		t.Errorf("want a refusal before any change, got %v: %v", err, f.calls)
 	}
-	g := routedFake(t, nil)
+	g := routedFake(t)
 	g.out[boxes] = `{"id":"0123456789abcdef","name":"/x","hostname":"abc","labels":{},"networks":{"boks-demo":{"Aliases":["BOKS-PROXY"]}}}`
 	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err == nil || !changedNothing(g) {
 		t.Errorf("the proxy's name in another case: want a refusal, got %v: %v", err, g.calls)

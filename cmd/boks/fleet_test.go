@@ -80,6 +80,20 @@ func parseConfig(t *testing.T, yaml string) *config.Config {
 	return cfg
 }
 
+// changed says whether the server was touched: a lock taken or a docker command other than a read. The
+// checks a multi-server command asks first read the proxy's state with `docker ps`, and change nothing.
+func (r *recorder) changed() bool {
+	if r.ran("mkdir") {
+		return true
+	}
+	for _, c := range r.calls {
+		if strings.HasPrefix(c, "docker ") && !strings.HasPrefix(c, "docker ps ") {
+			return true
+		}
+	}
+	return false
+}
+
 // After a deploy that reached only server a, a plain rollback would take a back to v2 and the
 // healthy b back to v1. Every server is asked first, and nothing is touched on either.
 func TestRollbackRefusesWhenServersWouldDiverge(t *testing.T) {
@@ -90,7 +104,7 @@ func TestRollbackRefusesWhenServersWouldDiverge(t *testing.T) {
 		t.Fatalf("want a refusal naming the divergence, got %v", err)
 	}
 	for name, s := range map[string]*recorder{"a": a, "b": b} {
-		if s.ran("mkdir") || s.ran("docker") {
+		if s.changed() {
 			t.Errorf("server %s must be left alone: %v", name, s.calls)
 		}
 	}
@@ -105,7 +119,7 @@ func TestRollbackRefusesWhenAServerLacksTheRelease(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no server was rolled back") {
 		t.Fatalf("want a refusal before anything changed, got %v", err)
 	}
-	if a.ran("mkdir") || a.ran("docker") {
+	if a.changed() {
 		t.Errorf("server a must be left alone: %v", a.calls)
 	}
 }
@@ -121,7 +135,7 @@ func TestRollbackRefusesWhenAServerLacksTheReleasesFiles(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no server was rolled back") || !strings.Contains(err.Error(), "0-site.conf") {
 		t.Fatalf("want a refusal naming the missing file before anything changed, got %v", err)
 	}
-	if a.ran("mkdir") || a.ran("docker") {
+	if a.changed() {
 		t.Errorf("server a must be left alone: %v", a.calls)
 	}
 }
@@ -181,7 +195,7 @@ func TestDeployNamesTheReleaseOnceForAllServers(t *testing.T) {
 // `boks proxy boot` changes what every app on the server shares — the proxy and its networks — so it
 // takes the server's admission lock around the boot, under a holder no deploy mistakes for its own.
 func TestProxyBootTakesTheAdmissionLock(t *testing.T) {
-	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running", "docker exec boks-proxy kamal-proxy list --json": "{}"}}
+	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1"}}
 	fleet(t, map[string]*recorder{"a": a}, time.Now)
 	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "boot"}, io.Discard); err != nil {
 		t.Fatal(err)
@@ -199,6 +213,50 @@ func TestProxyBootTakesTheAdmissionLock(t *testing.T) {
 	}
 	if took < 0 || booted < took || gave < booted {
 		t.Errorf("want the lock taken, the proxy booted, the lock given back: %d %d %d %v", took, booted, gave, a.calls)
+	}
+}
+
+// `boks proxy list` shows every app's routes from the fragments on the server: host, the copy it
+// dials, how TLS is served.
+func TestProxyListShowsTheRoutesOfEveryApp(t *testing.T) {
+	a := &recorder{server: server{"sh -c for f in": `{"app":"bot","routes":[{"host":"b.example.com","dial":"bot-v1-1:80"}]}` + "\n" +
+		`{"app":"demo","routes":[{"host":"a.example.com","dial":"demo-v2-2:3000","tls":true},` +
+		`{"host":"w.example.com","dial":"demo-v2-2:3001","tls":true,"cert":{"certificate":"/certs/boks/_.example.com.crt","key":"k"}}]}`}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var out strings.Builder
+	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "list"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	want := "== a\nbot\tb.example.com → bot-v1-1:80\thttp\ndemo\ta.example.com → demo-v2-2:3000\ttls acme\n" +
+		"demo\tw.example.com → demo-v2-2:3001\ttls /certs/boks/_.example.com.crt\n"
+	if out.String() != want {
+		t.Errorf("got\n%s\nwant\n%s", out.String(), want)
+	}
+}
+
+// On a server still on kamal-proxy there are no fragments while kamal-proxy serves every app's routes:
+// `boks proxy list` and `boks ps` say to migrate rather than print an empty list.
+func TestRoutesOnAKamalServerAreNotShownAsNone(t *testing.T) {
+	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running\t"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	cfg := parseConfig(t, "app: bot\nimage: x\nservers: [a]\nports: [{name: web, port: 80, host: b.example.com}]\n")
+	for _, args := range [][]string{{"proxy", "list"}, {"ps"}} {
+		if err := dispatch(context.Background(), cfg, args, io.Discard); err == nil || !strings.Contains(err.Error(), "boks proxy migrate") {
+			t.Errorf("%v: want the migration asked for, got %v", args, err)
+		}
+	}
+}
+
+// `boks proxy migrate` changes the whole server: it runs under the admission lock like a proxy boot.
+func TestProxyMigrateTakesTheAdmissionLock(t *testing.T) {
+	a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var out strings.Builder
+	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "migrate"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !a.ran("ln -sn _proxy.") || !strings.Contains(out.String(), "Caddy already") {
+		t.Errorf("want the migration run under the lock: %q %v", out.String(), a.calls)
 	}
 }
 

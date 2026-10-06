@@ -20,9 +20,14 @@ import (
 )
 
 const (
-	DefaultProxyImage    = "basecamp/kamal-proxy:v0.10.0"
+	// DefaultProxyImage is pinned: a proxy that changes under a moving tag changes every app's routing.
+	// 2.11.7 was the newest Caddy on Docker Hub on 2026-10-06, and the one boks-lab was measured with.
+	DefaultProxyImage    = "caddy:2.11.7-alpine"
 	DefaultKeep          = 3
 	DefaultDeployTimeout = "60s"
+	// DefaultDrainTimeout is kamal-proxy's: how long the previous copy may go on finishing the requests
+	// it holds once the routes have moved, before it is stopped.
+	DefaultDrainTimeout = "30s"
 	// DefaultHealthInterval is shorter than docker's 30s on purpose: docker runs the first check only
 	// after one interval, and a deploy without routes waits on that answer — at 30s a 60s deploy_timeout
 	// would see two checks at most.
@@ -61,9 +66,9 @@ const DefaultRegistryUser = "x-token"
 // to hear that from the config than from a half-done deploy.
 const minMemory = 6 << 20
 
-// Port is one published port of the app, routed by kamal-proxy under its own host.
+// Port is one published port of the app, routed by the proxy under its own host.
 // The json tags are load-bearing, not decoration: a deploy stores this spec verbatim in the
-// container's `boks.ports` label and a later deploy reads it back to revert a route, so the
+// container's `boks.ports` label and in the release snapshot a rollback reads back, so the
 // field names must survive a rename of the Go fields.
 type Port struct {
 	Name       string `yaml:"name" json:"name"`
@@ -123,9 +128,9 @@ type Schedule struct {
 	Command string `yaml:"command" json:"command"`
 }
 
-// Cert describes a certificate obtained by lego over DNS-01 — the case kamal-proxy's built-in
-// autocert cannot serve, because a wildcard has no HTTP-01 challenge. Hosts not covered by it
-// keep using autocert, so an app can mix both.
+// Cert describes a certificate obtained by lego over DNS-01 — the case the proxy's automatic HTTPS
+// cannot serve, because a wildcard has no HTTP-01 challenge. Hosts not covered by it keep using
+// automatic HTTPS, so an app can mix both.
 type Cert struct {
 	Domains   []string `yaml:"domains"`
 	DNS       string   `yaml:"dns"`   // lego provider name, e.g. "cloudflare"
@@ -153,6 +158,8 @@ type Config struct {
 	TLS           bool              `yaml:"tls"`
 	Keep          int               `yaml:"keep"`
 	DeployTimeout string            `yaml:"deploy_timeout"`
+	// DrainTimeout bounds the wait for the previous copy's requests in flight after a switch.
+	DrainTimeout string `yaml:"drain_timeout"`
 	// Memory is the container's hard memory limit in docker's format (512m, 1g); empty means none.
 	Memory string `yaml:"memory"`
 	// Healthcheck is the container's health check; nil leaves the image's HEALTHCHECK, if any.
@@ -364,6 +371,9 @@ func (c *Config) applyDefaults() {
 	if c.DeployTimeout == "" {
 		c.DeployTimeout = DefaultDeployTimeout
 	}
+	if c.DrainTimeout == "" {
+		c.DrainTimeout = DefaultDrainTimeout
+	}
 	if c.Registry != nil && c.Registry.User == "" {
 		c.Registry.User = DefaultRegistryUser
 	}
@@ -388,11 +398,20 @@ func (c *Config) validate() error {
 		return fmt.Errorf("network: no longer set per app — each app runs on its own network %s, and the proxy joins it; "+
 			"remove the key", AppNetwork(c.App))
 	}
+	// proxy_image named kamal-proxy's image until boks ran Caddy; one pinned then would have migrate stop
+	// kamal-proxy for a container that cannot run Caddy.
+	if repo, _, _ := strings.Cut(c.ProxyImage, "@"); strings.Split(path.Base(repo), ":")[0] == "kamal-proxy" {
+		return fmt.Errorf("proxy_image: %s is kamal-proxy, and boks runs Caddy now: remove the key (the default is %s) or name a Caddy image",
+			c.ProxyImage, DefaultProxyImage)
+	}
 	if c.Keep < 1 {
 		return fmt.Errorf("keep: must be at least 1")
 	}
 	if _, err := time.ParseDuration(c.DeployTimeout); err != nil {
 		return fmt.Errorf("deploy_timeout: %q is not a duration such as 60s or 2m", c.DeployTimeout)
+	}
+	if d, err := time.ParseDuration(c.DrainTimeout); err != nil || d < 0 {
+		return fmt.Errorf("drain_timeout: %q is not a duration such as 30s", c.DrainTimeout)
 	}
 	if err := c.validateResources(); err != nil {
 		return err
@@ -581,8 +600,8 @@ func (c *Config) validateLists() error {
 		if seenName[p.Name] {
 			return fmt.Errorf("ports: duplicate name %q", p.Name)
 		}
-		// Two ports on one host would fight over the same proxy service: kamal-proxy allows
-		// one service per host and the second deploy would take the route from the first.
+		// Two ports on one host would be two routes for one host: the proxy would send it to the
+		// first and never to the second.
 		if seenHost[p.Host] {
 			return fmt.Errorf("ports: duplicate host %q", p.Host)
 		}

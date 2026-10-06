@@ -1,4 +1,4 @@
-// Command boks deploys pre-built images to servers through Docker and kamal-proxy over SSH.
+// Command boks deploys pre-built images to servers through Docker and Caddy over SSH.
 package main
 
 import (
@@ -19,14 +19,17 @@ import (
 
 const usage = `usage: boks [-f boks.yml] <command>
 
-  deploy <tag>     pull image:<tag>, start it, switch the proxy, retire the previous version
+  deploy <tag>     pull image:<tag>, start it, switch the proxy once it is healthy, retire the
+                   previous version once it has drained
   rollback [id]    return to a recorded release (the previous one by default), reproducing the
                    image by digest, the ports, volumes and environment it actually ran with.
                    The ids are what "boks releases" prints
   ps               containers and proxy routes of this app on every server
   releases         releases recorded on each server, newest last
-  proxy boot       make sure kamal-proxy is running (idempotent)
-  proxy list       routes known to kamal-proxy
+  proxy boot       make sure the proxy (Caddy) is running (idempotent)
+  proxy list       routes the proxy serves, for every app on each server
+  proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
+                   every app on the server (once per server)
   unlock           clear a stale deploy lock, and the server's admission lock if this app or a
                    proxy boot left it
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
@@ -186,12 +189,46 @@ func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config)
 	if len(cfg.Ports) == 0 {
 		return nil
 	}
-	routes, err := proxy.List(ctx, r)
+	fs, err := routesOnFile(ctx, r)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(out, routes)
+	for _, f := range fs {
+		if f.App == cfg.App {
+			printRoutes(out, []proxy.Fragment{f})
+		}
+	}
 	return nil
+}
+
+// routesOnFile are the routes boks keeps for the proxy. On a server still on kamal-proxy there are none,
+// while kamal-proxy serves every app's: an empty list would say the server routes nothing, so that is
+// the refusal that says what to do.
+func routesOnFile(ctx context.Context, r remote.Runner) ([]proxy.Fragment, error) {
+	state, kind, err := proxy.State(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if state != "" && kind != proxy.Kind {
+		return nil, proxy.NotCaddy()
+	}
+	return proxy.Fragments(ctx, r)
+}
+
+// printRoutes shows routes as the proxy serves them: host, where it goes, and how TLS is served.
+func printRoutes(out io.Writer, fs []proxy.Fragment) {
+	for _, f := range fs {
+		for _, rt := range f.Routes {
+			tls := "http"
+			switch {
+			case rt.TLS && rt.Cert != nil:
+				tls = "tls " + rt.Cert.Certificate
+			case rt.TLS:
+				tls = "tls acme"
+			}
+			fmt.Fprintf(out, "%s\t%s → %s\t%s\n", f.App, rt.Host, rt.Dial, tls)
+		}
+	}
 }
 
 // releases shows what the server remembers, which is the only way to see that a deploy was
@@ -234,7 +271,7 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 		return fmt.Errorf("cert needs one of: issue, renew, status, pull")
 	}
 	if cfg.Cert == nil {
-		return fmt.Errorf("no `cert` block in the config: plain domains are served by kamal-proxy's autocert and need nothing here")
+		return fmt.Errorf("no `cert` block in the config: plain domains are served by the proxy's automatic HTTPS and need nothing here")
 	}
 	if args[0] == "status" {
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
@@ -265,43 +302,44 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 		return err
 	}
 	return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-		if err := deploy.BootProxy(ctx, r, out, cfg.ProxyImage); err != nil {
-			return err
-		}
-		if err := cert.Install(ctx, r, out, cfg); err != nil {
-			return err
-		}
-		// Whether a reload is still owed is tracked on the server, not inferred from whether
-		// this run wrote a file: a run that installed and then died must not leave the proxy
-		// serving the old certificate while later runs report success. The question here is
-		// whether the PROXY has re-read the file — not whether this app's routes happen to carry
-		// it — because a restart is the only thing that reaches apps this config never names.
-		pending, err := cert.ReloadPending(ctx, r, cfg)
-		if err != nil {
-			return err
-		}
-		if !pending {
-			fmt.Fprintln(out, "certificate unchanged and already loaded")
-			return nil
-		}
-		return cert.Reload(ctx, r, out, cfg)
+		return deploy.BootProxy(ctx, r, out, cfg.ProxyImage, func() error {
+			if err := cert.Install(ctx, r, out, cfg); err != nil {
+				return err
+			}
+			// Whether a reload is still owed is tracked on the server, not inferred from whether
+			// this run wrote a file: a run that installed and then died must not leave the proxy
+			// serving the old certificate while later runs report success.
+			pending, err := cert.Pending(ctx, r, cfg)
+			if err != nil {
+				return err
+			}
+			if !pending {
+				fmt.Fprintln(out, "certificate unchanged and already loaded")
+				return nil
+			}
+			return cert.Reload(ctx, r, out, cfg)
+		})
 	})
 }
 
 func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
 	if len(args) != 1 {
-		return fmt.Errorf("proxy needs one of: boot, list")
+		return fmt.Errorf("proxy needs one of: boot, list, migrate")
 	}
 	switch args[0] {
 	case "boot":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return deploy.BootProxy(ctx, r, out, cfg.ProxyImage)
+			return deploy.BootProxy(ctx, r, out, cfg.ProxyImage, nil)
 		})
 	case "list":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			routes, err := proxy.List(ctx, r)
-			fmt.Fprintln(out, routes)
+			fs, err := routesOnFile(ctx, r)
+			printRoutes(out, fs)
 			return err
+		})
+	case "migrate":
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			return deploy.MigrateProxy(ctx, r, out, cfg.ProxyImage, deploy.Options{})
 		})
 	}
 	return fmt.Errorf("unknown proxy command %q", args[0])

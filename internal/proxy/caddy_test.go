@@ -1,0 +1,626 @@
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// disk is a server as far as the proxy's state goes: files under Dir, the proxy container's state
+// and label, and what it was asked to run.
+type disk struct {
+	files map[string]string
+	ps    string // what `docker ps` prints for the proxy: "<state>\t<label>"
+	fail  map[string]error
+	calls []string
+}
+
+func newDisk() *disk {
+	return &disk{files: map[string]string{}, ps: "running\tcaddy", fail: map[string]error{}}
+}
+
+func (d *disk) Run(_ context.Context, args ...string) (string, error) {
+	cmd := strings.Join(args, " ")
+	d.calls = append(d.calls, cmd)
+	for prefix, err := range d.fail {
+		if strings.HasPrefix(cmd, prefix) {
+			return "", err
+		}
+	}
+	switch {
+	case strings.HasPrefix(cmd, "docker ps -a --filter name=^boks-proxy$"):
+		return d.ps, nil
+	case strings.HasPrefix(cmd, "sh -c for f in "):
+		var names []string
+		for p := range d.files {
+			if strings.HasPrefix(p, Dir+"/routes/") {
+				names = append(names, p)
+			}
+		}
+		sort.Strings(names)
+		var out []string
+		for _, p := range names {
+			out = append(out, d.files[p])
+		}
+		return strings.TrimSpace(strings.Join(out, "")), nil
+	case strings.HasPrefix(cmd, "sh -c if [ -f "):
+		p := strings.Trim(strings.Fields(cmd)[5], "'")
+		if body, ok := d.files[p]; ok {
+			return strings.TrimSpace("present\n" + body), nil
+		}
+		return "absent", nil
+	case args[0] == "mv":
+		d.files[args[2]] = d.files[args[1]]
+		delete(d.files, args[1])
+	case args[0] == "rm":
+		delete(d.files, args[2])
+	}
+	return "", nil
+}
+
+// Pipe takes an atomic upload: the destination is the last quoted token after `mv`.
+func (d *disk) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	cmd := strings.Join(args, " ")
+	for prefix, err := range d.fail {
+		if strings.HasPrefix("upload "+cmd, prefix) {
+			return "", err
+		}
+	}
+	_, tail, _ := strings.Cut(args[2], " && mv ")
+	_, dest, _ := strings.Cut(tail, "' '")
+	d.files[strings.Trim(dest, "'")] = string(content)
+	d.calls = append(d.calls, "upload "+strings.Trim(dest, "'"))
+	return "", nil
+}
+
+func (d *disk) ran(prefix string) bool {
+	for _, c := range d.calls {
+		if strings.HasPrefix(c, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+const reloadNext = "docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json"
+
+var web = []Route{{Host: "demo.example.com", Dial: "demo:3000", TLS: true}}
+
+// decoded is a config read back as generic JSON, to look into it the way Caddy will.
+func decoded(t *testing.T, b []byte) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func dig(m any, keys ...string) any {
+	for _, k := range keys {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			return nil
+		}
+		m = mm[k]
+	}
+	return m
+}
+
+// The bytes are the comparison that decides a reload, so the same routes make the same config
+// whatever order the fragments were read in.
+func TestConfigIsTheSameForTheSameRoutes(t *testing.T) {
+	a := Fragment{App: "a", Routes: []Route{{Host: "z.example.com", Dial: "a:1", TLS: true}, {Host: "b.example.com", Dial: "a:2"}}}
+	b := Fragment{App: "b", Routes: []Route{{Host: "m.example.com", Dial: "b:1", TLS: true}}}
+	one, err := Config([]Fragment{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, _ := Config([]Fragment{b, a})
+	if string(one) != string(two) {
+		t.Errorf("same routes, different bytes:\n%s\n%s", one, two)
+	}
+	hosts := dig(decoded(t, one), "apps", "http", "servers", "https", "routes").([]any)
+	if first := hosts[0].(map[string]any)["match"].([]any)[0].(map[string]any)["host"].([]any)[0]; first != "m.example.com" {
+		t.Errorf("routes go by host: %v", first)
+	}
+}
+
+// Caddy would give a host claimed twice to the first route and drop the second without a word.
+func TestConfigRefusesAHostRoutedTwice(t *testing.T) {
+	_, err := Config([]Fragment{{App: "a", Routes: web}, {App: "b", Routes: []Route{{Host: "Demo.Example.com", Dial: "b:1"}}}})
+	if err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
+		t.Errorf("want the host refused, got %v", err)
+	}
+}
+
+// TLS hosts on 443 with HTTP/1.1 and HTTP/2 only, plain ones on 80 alone; a host under `cert:` is
+// served from its files and kept out of ACME by name, and one file pair is loaded once.
+func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
+	cert := &CertFiles{Certificate: "/certs/boks/_.example.com.crt", Key: "/certs/boks/_.example.com.key"}
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{
+		{Host: "plain.example.com", Dial: "a:80"},
+		{Host: "auto.example.com", Dial: "a:81", TLS: true},
+		{Host: "w1.example.com", Dial: "a:82", TLS: true, Cert: cert},
+		{Host: "w2.example.com", Dial: "a:83", TLS: true, Cert: cert},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decoded(t, b)
+	https, http := dig(m, "apps", "http", "servers", "https"), dig(m, "apps", "http", "servers", "http")
+	if l := dig(https, "listen").([]any); l[0] != ":443" || len(dig(https, "routes").([]any)) != 3 {
+		t.Errorf("want the three TLS hosts on 443: %v", https)
+	}
+	if p, _ := json.Marshal(dig(https, "protocols")); string(p) != `["h1","h2"]` {
+		t.Errorf("want no HTTP/3 on a port whose udp is not published: %s", p)
+	}
+	if l := dig(http, "listen").([]any); l[0] != ":80" || len(dig(http, "routes").([]any)) != 1 {
+		t.Errorf("want the plain host alone on 80: %v", http)
+	}
+	if s, _ := json.Marshal(dig(https, "automatic_https", "skip_certificates")); string(s) != `["w1.example.com","w2.example.com"]` {
+		t.Errorf("want the hosts under the certificate kept out of ACME: %s", s)
+	}
+	if f, _ := json.Marshal(dig(m, "apps", "tls", "certificates", "load_files")); string(f) != `[{"certificate":"/certs/boks/_.example.com.crt","key":"/certs/boks/_.example.com.key"}]` {
+		t.Errorf("want the file pair loaded once: %s", f)
+	}
+	h := dig(https, "routes").([]any)[0].(map[string]any)["handle"].([]any)[0]
+	if u, _ := json.Marshal(dig(h, "upstreams")); dig(h, "handler") != "reverse_proxy" || string(u) != `[{"dial":"a:81"}]` {
+		t.Errorf("want the host proxied to its dial: %v", h)
+	}
+	if persist := dig(m, "admin", "config", "persist"); persist != false {
+		t.Errorf("the file is the config; no autosave beside it: %v", persist)
+	}
+	// Without a TLS host there is no 443 server and no tls app.
+	plain, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "p.example.com", Dial: "a:1"}}}})
+	if pm := decoded(t, plain); dig(pm, "apps", "http", "servers", "https") != nil || dig(pm, "apps", "tls") != nil {
+		t.Errorf("want plain HTTP only: %s", plain)
+	}
+}
+
+// Nothing trusted stands in front of boks (#48): Caddy is told of no trusted proxy, so it sets
+// X-Forwarded-For from the connection and drops the visitor's own — measured on boks-lab. The one
+// header every route touches is Forwarded, which it deletes: kamal-proxy did, and Caddy passes it on.
+func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"trusted_proxies", "client_ip_headers", "set", "add", "replace"} {
+		if strings.Contains(string(b), `"`+key+`"`) {
+			t.Errorf("the config sets %s, which would let a visitor's forwarded headers through:\n%s", key, b)
+		}
+	}
+	for _, srv := range []string{"http", "https"} {
+		routes, _ := dig(decoded(t, b), "apps", "http", "servers", srv, "routes").([]any)
+		h := dig(routes[0], "handle").([]any)[0]
+		if del, _ := dig(h, "headers", "request", "delete").([]any); len(del) != 1 || del[0] != "Forwarded" {
+			t.Errorf("%s: want Forwarded deleted from the request, got %v", srv, dig(h, "headers"))
+		}
+		if dig(decoded(t, b), "apps", "http", "servers", srv, "logs") == nil {
+			t.Errorf("%s: want access logs on, as kamal-proxy wrote them", srv)
+		}
+	}
+}
+
+// A reload must not cut the WebSockets of the apps it does not change: every route keeps its streams
+// open past the unload of the config they came through. And every route bounds the wait for headers.
+func TestConfigKeepsStreamsAcrossAReload(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:80"}, {Host: "s.example.com", Dial: "a:81", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, srv := range []string{"http", "https"} {
+		routes, _ := dig(decoded(t, b), "apps", "http", "servers", srv, "routes").([]any)
+		if len(routes) != 1 {
+			t.Fatalf("%s: want one route, got %v", srv, routes)
+		}
+		h := dig(routes[0], "handle").([]any)[0]
+		if d := dig(h, "stream_close_delay"); d != "24h" {
+			t.Errorf("%s: want stream_close_delay 24h, got %v", srv, d)
+		}
+		// And a copy that takes a request and sends no headers gets a 504 at kamal-proxy's 30s, not never.
+		if d := dig(h, "transport", "response_header_timeout"); d != "30s" || dig(h, "transport", "protocol") != "http" {
+			t.Errorf("%s: want the http transport with response_header_timeout 30s, got %v", srv, dig(h, "transport"))
+		}
+	}
+}
+
+// A first route reloads the running proxy with the new config: the fragment is written before the
+// reload, the applied config only once Caddy took it.
+func TestSetRoutesReloadsAndThenRecords(t *testing.T) {
+	d := newDisk()
+	reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
+	if err != nil || !reloaded {
+		t.Fatalf("want a reload, got %v %v", reloaded, err)
+	}
+	if !strings.Contains(d.files[Dir+"/routes/demo.json"], `"dial": "demo:3000"`) {
+		t.Errorf("want the fragment recorded: %q", d.files[Dir+"/routes/demo.json"])
+	}
+	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	if d.files[Dir+"/caddy.json"] != string(want) || d.files[Dir+"/caddy.next.json"] != "" {
+		t.Errorf("want the applied config in place and no next left: %v", d.files)
+	}
+	reload, frag := index(d.calls, reloadNext), index(d.calls, "upload "+Dir+"/routes/demo.json")
+	applied := index(d.calls, "mv "+Dir+"/caddy.next.json")
+	if frag < 0 || reload < frag || applied < reload {
+		t.Errorf("want the fragment, then the reload, then the applied config: %v", d.calls)
+	}
+}
+
+// A run cut after Caddy took the config, before it was recorded as applied, leaves a fragment the
+// applied config does not match: the next run, of another app, reloads with this app's new routes
+// rather than putting them back on the copy it left (stopped, in stop-first).
+func TestSetRoutesKeepsTheRoutesOfARunCutAfterItsReload(t *testing.T) {
+	d := newDisk()
+	old := []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	d.fail["mv "+Dir+"/caddy.next.json"] = errors.New("connection lost")
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err == nil {
+		t.Fatal("want the cut run's error")
+	}
+	delete(d.fail, "mv "+Dir+"/caddy.next.json")
+	other := []Route{{Host: "o.example.com", Dial: "other:80"}}
+	d.calls = nil
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", other); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := Config([]Fragment{{App: "demo", Routes: web}, {App: "other", Routes: other}})
+	if d.files[Dir+"/caddy.json"] != string(want) || !d.ran(reloadNext) {
+		t.Errorf("want the other app's reload to keep demo on its new copy: %s", d.files[Dir+"/caddy.json"])
+	}
+}
+
+// The same routes again reload nothing: a reload drops connections.
+func TestSetRoutesLeavesAnUnchangedProxyAlone(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	d.calls = nil
+	reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
+	if err != nil || reloaded || d.ran("docker exec") || d.ran("upload") {
+		t.Errorf("want nothing done, got %v %v %v", reloaded, err, d.calls)
+	}
+}
+
+// A run cut after Caddy took the config leaves the fragment behind it: the next run writes the
+// fragment and reloads nothing, since the proxy already runs that config.
+func TestSetRoutesCatchesUpALaggingFragment(t *testing.T) {
+	d := newDisk()
+	body, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	d.files[Dir+"/caddy.json"] = string(body)
+	reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
+	if err != nil || reloaded || d.ran("docker exec") || d.files[Dir+"/routes/demo.json"] == "" {
+		t.Errorf("want the fragment written and no reload: %v %v %v", reloaded, err, d.calls)
+	}
+}
+
+// A config Caddy refuses: Caddy keeps serving the old one, the applied config does not claim the
+// refused one, and the caller is told to put the routes back — after which no fragment claims it
+// either, or every later run would assemble it again.
+func TestSetRoutesRecordsNothingCaddyRefused(t *testing.T) {
+	d := newDisk()
+	old := []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	before := d.files[Dir+"/caddy.json"]
+	d.fail[reloadNext] = errors.New("loading new config: open /certs/boks/x.crt: no such file")
+	touched, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
+	// A failed call is not known to be a refusal: the message names the reload and claims neither.
+	if err == nil || !strings.Contains(err.Error(), "reloading the proxy with the routes of demo failed") ||
+		!strings.Contains(err.Error(), "may have been lost") {
+		t.Fatalf("want the failed reload, neither refusal nor success claimed, got %v", err)
+	}
+	// Whether Caddy acted is not known from a failed call, so the caller is told to put routes back.
+	if !touched {
+		t.Error("a failed reload may have gone through")
+	}
+	if d.files[Dir+"/caddy.json"] != before {
+		t.Errorf("no applied config for a refused one: %v", d.files)
+	}
+	delete(d.fail, reloadNext)
+	if err := RestoreRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.files[Dir+"/routes/demo.json"], "demo-old:3000") || d.files[Dir+"/caddy.json"] != before {
+		t.Errorf("want the previous routes recorded again: %v", d.files)
+	}
+}
+
+// Any failure once the fragment may have been written tells the caller to put the routes back: the
+// fragment is what the next run of any app reloads with.
+func TestSetRoutesReportsTouchedOnceTheFragmentMayBeWritten(t *testing.T) {
+	for _, fail := range []string{"upload " + "sh -c umask 077 && mkdir -p '" + Dir + "/routes'", "upload sh -c umask 077 && mkdir -p '" + Dir + "' && cat > '" + Dir + "/caddy.next.json"} {
+		d := newDisk()
+		d.fail[fail] = errors.New("connection lost")
+		touched, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
+		if err == nil || !touched {
+			t.Errorf("%s: want an error and touched, got %v %v", fail, touched, err)
+		}
+	}
+}
+
+// A proxy that is not running — or is still kamal-proxy — is not reloaded; the files are written for
+// the Caddy that starts next to load.
+func TestSetRoutesWritesTheFilesForAProxyThatIsNotRunning(t *testing.T) {
+	for _, ps := range []string{"exited\tcaddy", "", "running\t"} {
+		d := newDisk()
+		d.ps = ps
+		reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
+		if err != nil || reloaded || d.ran("docker exec") {
+			t.Errorf("%q: want no reload, got %v %v %v", ps, reloaded, err, d.calls)
+		}
+		if d.files[Dir+"/routes/demo.json"] == "" || d.files[Dir+"/caddy.json"] == "" {
+			t.Errorf("%q: want the files written: %v", ps, d.files)
+		}
+	}
+}
+
+// No routes removes the app's fragment and reloads without its hosts; another app's stay.
+func TestSetRoutesRemovesAnAppsRoutes(t *testing.T) {
+	d := newDisk()
+	other := []Route{{Host: "o.example.com", Dial: "other:80"}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", nil)
+	if err != nil || !reloaded {
+		t.Fatalf("want a reload, got %v %v", reloaded, err)
+	}
+	want, _ := Config([]Fragment{{App: "other", Routes: other}})
+	if _, ok := d.files[Dir+"/routes/demo.json"]; ok || d.files[Dir+"/caddy.json"] != string(want) {
+		t.Errorf("want demo's routes gone and other's kept: %v", d.files)
+	}
+}
+
+// After a failed reload the files still say what the proxy ran before, and may be wrong: putting
+// the routes back reloads with them anyway, forced, and records them.
+func TestRestoreRoutesReloadsEvenWhenNothingChanged(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	d.calls = nil
+	if err := RestoreRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	if !d.ran(reloadNext + " --force") {
+		t.Errorf("want a forced reload: %v", d.calls)
+	}
+	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	if d.files[Dir+"/caddy.json"] != string(want) || d.files[Dir+"/caddy.next.json"] != "" {
+		t.Errorf("want the restored config applied: %v", d.files)
+	}
+}
+
+// A put-back whose reload fails leaves the fragment naming the copy that is kept — the one the routes
+// were moved to — not the copies they were to go back to, which may be stopped until revived: the next
+// run of any app reloads with the fragment.
+func TestRestoreRoutesThatFailsLeavesTheFragmentOnTheKeptCopy(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	d.fail[reloadNext] = errors.New("connection lost")
+	old := []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}
+	if err := RestoreRoutes(context.Background(), d, io.Discard, "demo", old); err == nil {
+		t.Fatal("want the failure")
+	}
+	if !strings.Contains(d.files[Dir+"/routes/demo.json"], "demo:3000") {
+		t.Errorf("want the fragment still on the kept copy: %s", d.files[Dir+"/routes/demo.json"])
+	}
+	// A put-back that succeeds records the routes it put back, after the reload.
+	delete(d.fail, reloadNext)
+	d.calls = nil
+	if err := RestoreRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	if reload, frag := index(d.calls, reloadNext), index(d.calls, "upload "+Dir+"/routes/demo.json"); reload < 0 || frag < reload {
+		t.Errorf("want the reload, then the fragment: %v", d.calls)
+	}
+}
+
+// A wildcard goes after every exact host, whatever their spelling sorts to: Caddy takes the first route
+// that matches, and kamal-proxy served an exact host before a wildcard that covers it.
+func TestConfigPutsAWildcardAfterTheExactHosts(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}},
+		{App: "b", Routes: []Route{{Host: "api.example.com", Dial: "b:80"}, {Host: "zz.example.com", Dial: "b:81"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
+	var hosts []any
+	for _, rt := range routes {
+		hosts = append(hosts, dig(rt, "match").([]any)[0].(map[string]any)["host"].([]any)[0])
+	}
+	if len(hosts) != 3 || hosts[0] != "api.example.com" || hosts[1] != "zz.example.com" || hosts[2] != "*.example.com" {
+		t.Errorf("want the exact hosts first, then the wildcard: %v", hosts)
+	}
+}
+
+// An exact host with TLS covered by a wildcard without TLS lives on the other server, and on :80 Caddy
+// redirects only after its own routes: the wildcard leaves out the hosts with TLS it covers, so their
+// plain HTTP gets Caddy's redirect, as kamal-proxy redirected it. Hosts it does not cover, a wildcard
+// with TLS, and a host two labels deeper stay out of it.
+func TestConfigWildcardWithoutTLSLeavesTheTLSHostsItCovers(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}},
+		{App: "b", Routes: []Route{{Host: "API.example.com", Dial: "b:80", TLS: true}, {Host: "b.example.com", Dial: "b:81", TLS: true},
+			{Host: "plain.example.com", Dial: "b:82"}, {Host: "x.y.example.com", Dial: "b:83", TLS: true},
+			{Host: "other.org", Dial: "b:84", TLS: true}, {Host: "*.tls.example.com", Dial: "b:85", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
+	last := dig(routes[len(routes)-1], "match").([]any)[0].(map[string]any)
+	not, _ := last["not"].([]any)
+	if last["host"].([]any)[0] != "*.example.com" || len(not) != 1 {
+		t.Fatalf("want the wildcard last, with one negated set: %v", last)
+	}
+	got := fmt.Sprint(not[0].(map[string]any)["host"])
+	if got != "[API.example.com b.example.com]" {
+		t.Errorf("want only the exact TLS hosts it covers left out, got %s", got)
+	}
+	// No TLS host under it: the match is the host alone, the bytes as before.
+	c, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}}})
+	if strings.Contains(string(c), `"not"`) {
+		t.Errorf("no negation without a TLS host to leave out:\n%s", c)
+	}
+}
+
+// Validate asks Caddy about the config with the app's routes, and changes nothing: no fragment, no
+// applied config, and the file it asked about is gone.
+func TestValidateChangesNothing(t *testing.T) {
+	d := newDisk()
+	if err := Validate(context.Background(), d, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	if !d.ran("docker exec boks-proxy caddy validate --config /etc/boks/caddy.check.json") || len(d.files) != 0 {
+		t.Errorf("want a validate and no file left: %v %v", d.calls, d.files)
+	}
+	d.fail["docker exec boks-proxy caddy validate"] = errors.New("loading config: tls: failed to find any PEM data in key input")
+	if err := Validate(context.Background(), d, "demo", web); err == nil || !strings.Contains(err.Error(), "would refuse") || len(d.files) != 0 {
+		t.Errorf("want the refusal named and no file left: %v %v", err, d.files)
+	}
+}
+
+// The other way round: a wildcard with TLS leaves out the exact hosts without TLS it covers, so HTTPS
+// for one of them does not reach the wildcard's app — kamal-proxy gave the exact host to its own app.
+func TestConfigWildcardWithTLSLeavesThePlainHostsItCovers(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:443", TLS: true,
+		Cert: &CertFiles{Certificate: "/certs/boks/_.example.com.crt", Key: "/certs/boks/_.example.com.key"}}}},
+		{App: "b", Routes: []Route{{Host: "api.example.com", Dial: "b:80"}, {Host: "secure.example.com", Dial: "b:81", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)
+	last := dig(routes[len(routes)-1], "match").([]any)[0].(map[string]any)
+	not, _ := last["not"].([]any)
+	if last["host"].([]any)[0] != "*.example.com" || len(not) != 1 || fmt.Sprint(not[0].(map[string]any)["host"]) != "[api.example.com]" {
+		t.Errorf("want the TLS wildcard to leave out the plain exact host only: %v", last)
+	}
+}
+
+// peek is a disk that keeps what the config Validate asked about said when Caddy was asked.
+type peek struct {
+	*disk
+	asked string
+}
+
+func (p *peek) Run(ctx context.Context, args ...string) (string, error) {
+	if strings.HasPrefix(strings.Join(args, " "), "docker exec boks-proxy caddy validate") {
+		p.asked = p.files[Dir+"/caddy.check.json"]
+	}
+	return p.disk.Run(ctx, args...)
+}
+
+// What Caddy is asked about is the config the reload would load: the app's new routes in place of its
+// old ones, and every other app's routes, certificate files included.
+func TestValidateAsksAboutTheConfigTheReloadWouldLoad(t *testing.T) {
+	d := newDisk()
+	certified := []Route{{Host: "w.example.com", Dial: "other:80", TLS: true, Cert: &CertFiles{Certificate: "/certs/boks/w.crt", Key: "/certs/boks/w.key"}}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", certified); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}); err != nil {
+		t.Fatal(err)
+	}
+	p := &peek{disk: d}
+	if err := Validate(context.Background(), p, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	want, err := Config([]Fragment{{App: "demo", Routes: web}, {App: "other", Routes: certified}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.asked != string(want) {
+		t.Errorf("Caddy was asked about\n%s\nwant\n%s", p.asked, want)
+	}
+}
+
+// A host another app holds is refused before anything changes.
+func TestCheckHostsRefusesAnotherAppsHost(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", web); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := Fragments(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckHosts(fs, "demo", web); err == nil {
+		t.Errorf("want a refusal, got %v", err)
+	}
+	if err := CheckHosts(fs, "other", web); err != nil {
+		t.Errorf("an app's own host is its own: %v", err)
+	}
+}
+
+// A renewal keeps the paths and replaces the files behind them, which Caddy reads only on a load it
+// would skip for an unchanged config — hence --force.
+func TestReloadIsForced(t *testing.T) {
+	d := newDisk()
+	if err := Reload(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if !d.ran(reloadNext + " --force") {
+		t.Errorf("want a forced reload: %v", d.calls)
+	}
+}
+
+// A reload loads the config the fragments make, not caddy.json as it lies: a run cut after writing its
+// fragment left caddy.json behind it, and loading that would send its routes back to the copy it left.
+func TestReloadLoadsWhatTheFragmentsSay(t *testing.T) {
+	d := newDisk()
+	old := []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	d.fail["mv "+Dir+"/caddy.next.json"] = errors.New("connection lost")
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err == nil {
+		t.Fatal("want the cut run's error")
+	}
+	delete(d.fail, "mv "+Dir+"/caddy.next.json")
+	if err := Reload(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	if d.files[Dir+"/caddy.json"] != string(want) {
+		t.Errorf("want the reload to load demo's new routes: %s", d.files[Dir+"/caddy.json"])
+	}
+}
+
+// The container is labelled as Caddy, has the sysctl a lossless reload needs, keeps its ACME state and
+// the certificate volume kamal-proxy used, reads the state directory, not one file, read-only, and
+// keeps its request log rotated.
+func TestCreateArgs(t *testing.T) {
+	got := strings.Join(CreateArgs("caddy:2.11.7-alpine", "/home/u/.boks/_proxy"), " ")
+	want := "docker create --name boks-proxy --restart unless-stopped --label boks.proxy=caddy " +
+		"--log-driver json-file --log-opt max-size=10m --log-opt max-file=5 " +
+		"--sysctl net.ipv4.tcp_migrate_req=1 --network boks -p 80:80 -p 443:443 " +
+		"-v boks-proxy-data:/data -v boks-certs:/certs -v /home/u/.boks/_proxy:/etc/boks:ro " +
+		"caddy:2.11.7-alpine caddy run --config /etc/boks/caddy.json"
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
+func index(calls []string, prefix string) int {
+	for i, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
+}

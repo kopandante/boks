@@ -1,13 +1,11 @@
 // Package cert obtains DNS-01 certificates with lego on the operator's machine and installs
 // them into the proxy's certificate volume on each server.
 //
-// Three facts shape this design, all measured on the stand:
-//   - A freshly created certificate volume is owned by root (`0:0 755`) and `docker exec`
-//     inherits the image's `USER kamal-proxy`, so the proxy user cannot write there at all.
-//     Files go in as root and are handed over with chown/chmod.
-//   - kamal-proxy keeps a certificate in memory and never re-reads the file. Restarting the
-//     container makes it read the paths recorded in its state again; that costs about 0.19 s of
-//     unavailability and preserves routes and TLS.
+// Two facts shape this design, both measured on the stand:
+//   - Caddy reads a certificate file when it loads a config, and only then: new files under the
+//     same paths change nothing until a reload, and a reload of an unchanged config is skipped
+//     unless forced (boks-lab, caddy 2.11.7, 2026-10-06). So installing a renewal ends in a
+//     forced reload, which re-reads the files for every route on the server.
 //   - DNS tokens are often IP-restricted — the Cloudflare token for these zones is rejected from
 //     the servers and works from the laptop — so issuance belongs on the operator/CI side and
 //     the server only ever receives the finished files.
@@ -38,11 +36,7 @@ const stagingCA = "https://acme-staging-v02.api.letsencrypt.org/directory"
 // dir is where installed certificates live inside the proxy container.
 const dir = "/certs/boks"
 
-// proxyUID is the uid:gid of the `kamal-proxy` user in the image; installed files are handed to
-// it because the proxy process is what has to read them.
-const proxyUID = "1001:1001"
-
-// ServerPaths are the certificate paths as kamal-proxy sees them.
+// ServerPaths are the certificate paths as the proxy sees them.
 func ServerPaths(c *config.Cert) (crt, key string) {
 	return dir + "/" + c.Slug() + ".crt", dir + "/" + c.Slug() + ".key"
 }
@@ -53,21 +47,13 @@ func ServerPaths(c *config.Cert) (crt, key string) {
 // and skipped until it is actually time. The private key is not part of that decision.
 func metaPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".json" }
 
-// There are two ways the proxy comes to hold a certificate, and they differ in reach — which is
-// why they are recorded apart. A restart makes it re-read the files for EVERY service on the
-// server; deploying a route makes it read them for that service only (measured on the stand:
-// replacing the files alone changes nothing until one or the other happens). Collapsing the two
-// into a single mark would let one app's deploy vouch for apps it never touched, and a second
-// app under the same wildcard would then serve the old certificate until expiry with nothing
-// reporting a debt.
-//
-// Written only after the load actually succeeded, so an interrupted run leaves the mark stale
-// and the next run loads again instead of reporting "unchanged" forever.
-func restartedPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".restarted" }
-
-func loadedPath(cfg *config.Config) string {
-	return dir + "/" + cfg.Cert.Slug() + "." + cfg.App + ".loaded"
-}
+// reloadedPath records the certificate the proxy last loaded. Every load is a reload of the whole
+// config — for a renewal, or for a deploy that changed the routes — so it reaches every route on the
+// server, and one mark answers for all of them. It is written only after the load succeeded, so an
+// interrupted run leaves the mark stale and the next run loads again instead of reporting
+// "unchanged" forever. The file keeps the name it had when a restart of kamal-proxy was the load: a
+// server moved to Caddy loaded the same files when Caddy started, and the mark stays true.
+func reloadedPath(c *config.Cert) string { return dir + "/" + c.Slug() + ".restarted" }
 
 // LocalPaths are the files lego writes.
 func LocalPaths(cfg *config.Config) (crt, key string) {
@@ -156,16 +142,20 @@ func Install(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Co
 	if !changed {
 		return nil
 	}
-	// A run that dies partway leaves a mismatched set on the server whichever order these go in.
-	// What makes that recoverable is the comparison above — the next run sees a .crt that differs
-	// from the local one and writes everything again — and the marker, which was never updated,
-	// so the proxy is not restarted onto a half-written pair. The certificate goes last for the
-	// same reason: it is what that comparison keys on.
-	if err := write(ctx, r, key, keyRemote); err != nil {
+	// The pair goes in beside the old one and replaces it with two renames in one command: Caddy loads
+	// every certificate file a config names on every load, so a pair a cut run left mismatched would
+	// stop every app's deploy, and a proxy restarted onto it would not start — and `boks cert`, which
+	// boots the proxy first, could not repair it. A run that dies before the renames leaves the old
+	// pair in place, and the comparison above — on the certificate, renamed last — writes it again.
+	if err := write(ctx, r, key, keyRemote+".new"); err != nil {
 		return err
 	}
-	if err := write(ctx, r, crt, crtRemote); err != nil {
+	if err := write(ctx, r, crt, crtRemote+".new"); err != nil {
 		return err
+	}
+	swap := "mv " + remote.Quote(keyRemote+".new") + " " + remote.Quote(keyRemote) + " && mv " + remote.Quote(crtRemote+".new") + " " + remote.Quote(crtRemote)
+	if _, err := r.Run(ctx, "docker", "exec", "-u", "0", proxy.Container, "sh", "-c", swap); err != nil {
+		return fmt.Errorf("install %s: %w", crtRemote, err)
 	}
 	fmt.Fprintf(log, "cert installed: %s\n", crtRemote)
 	return nil
@@ -234,37 +224,15 @@ func Pull(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Confi
 	return nil
 }
 
-// Pending reports whether THIS APP's routes still have to pick up what is on the server's disk —
-// the question `cert status` asks, and it is answered for the app the config names. Either mark
-// settles it: a restart covers every service, and this app's own deploy covers this app. Both
-// sides of the comparison come from the server, so this answers the same way from a machine that
-// has no lego state at all — a CI runner, or a second operator.
+// Pending reports whether the proxy still has to load what is on the server's disk. Both sides of
+// the comparison come from the server, so this answers the same way from a machine that has no lego
+// state at all — a CI runner, or a second operator.
 func Pending(ctx context.Context, r remote.Runner, cfg *config.Config) (bool, error) {
 	installed, err := serverFingerprint(ctx, r, cfg)
 	if err != nil {
 		return false, err
 	}
-	return !markMatches(ctx, r, installed, restartedPath(cfg.Cert), loadedPath(cfg)), nil
-}
-
-// ReloadPending reports whether the PROXY still owes a restart, which is a different question
-// from Pending and must not be answered with the per-app mark. `cert issue/renew` is the only
-// thing that restarts, and a restart is what reaches services this config knows nothing about:
-// a second app under the same wildcard, deployed from its own boks.yml.
-//
-// Letting one app's deploy settle it opens a path that survives expiry. A renewal installs the
-// new certificate and dies before the restart, or the restart itself fails; an ordinary deploy of
-// app A then makes the proxy read the new file for A's routes and records `<slug>.a.loaded`; and
-// from then on the daily `cert renew -f a.yml` reports "unchanged and already loaded" forever
-// while app B keeps serving the old certificate until it expires, with nothing reporting a debt.
-// So this consults the restart mark alone — the one thing that is written only after the proxy
-// really re-read the files for everyone.
-func ReloadPending(ctx context.Context, r remote.Runner, cfg *config.Config) (bool, error) {
-	installed, err := serverFingerprint(ctx, r, cfg)
-	if err != nil {
-		return false, err
-	}
-	return !markMatches(ctx, r, installed, restartedPath(cfg.Cert)), nil
+	return !markMatches(ctx, r, installed, reloadedPath(cfg.Cert)), nil
 }
 
 // markMatches reports whether any of the given marks records the installed certificate. An absent
@@ -278,22 +246,21 @@ func markMatches(ctx context.Context, r remote.Runner, installed string, paths .
 	return false
 }
 
-// Reload restarts the proxy so it re-reads the certificate files, then records what it loaded.
-// Measured on the stand: about 0.19 s of unavailability, routes and TLS preserved.
+// Reload makes the proxy load the certificate files again, then records what it loaded. The caller
+// holds the server's admission lock: a reload racing a deploy's could put the proxy back on the routes
+// that deploy just replaced.
 func Reload(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
-	fmt.Fprintln(log, "restarting the proxy to load the certificate (~0.2s)")
-	if _, err := r.Run(ctx, "docker", "restart", proxy.Container); err != nil {
+	fmt.Fprintln(log, "reloading the proxy to load the certificate")
+	if err := proxy.Reload(ctx, r); err != nil {
 		return err
 	}
-	return mark(ctx, r, cfg, restartedPath(cfg.Cert))
+	return MarkReloaded(ctx, r, cfg)
 }
 
-// MarkLoaded records that this app's routes now serve the installed certificate. A deploy calls
-// it: pointing a route at a certificate path makes kamal-proxy read the file there and then, so
-// without this an ordinary deploy would leave `cert status` claiming a reload was owed. It
-// deliberately marks this app only — a deploy says nothing about anyone else's services.
-func MarkLoaded(ctx context.Context, r remote.Runner, cfg *config.Config) error {
-	return mark(ctx, r, cfg, loadedPath(cfg))
+// MarkReloaded records that the proxy now serves the installed certificate. A deploy whose routes
+// changed calls it after its own reload, which read the files as well.
+func MarkReloaded(ctx context.Context, r remote.Runner, cfg *config.Config) error {
+	return mark(ctx, r, cfg, reloadedPath(cfg.Cert))
 }
 
 func mark(ctx context.Context, r remote.Runner, cfg *config.Config, path string) error {
@@ -313,8 +280,8 @@ func serverFingerprint(ctx context.Context, r remote.Runner, cfg *config.Config)
 	return fingerprint(content), nil
 }
 
-// Installed reports whether this server already has the certificate a deploy would point
-// kamal-proxy at.
+// Installed reports whether this server already has the certificate a deploy would route its hosts
+// at. Caddy refuses a config naming a file that is not there, and a proxy starting with one exits.
 func Installed(ctx context.Context, r remote.Runner, cfg *config.Config) bool {
 	crtRemote, _ := ServerPaths(cfg.Cert)
 	out, err := read(ctx, r, crtRemote)
@@ -342,8 +309,7 @@ func Read(ctx context.Context, r remote.Runner, cfg *config.Config) (*Status, er
 	if err != nil {
 		return nil, err
 	}
-	// Status speaks for the app the config names, so either mark settles it — see Pending.
-	settled := markMatches(ctx, r, fingerprint(content), restartedPath(cfg.Cert), loadedPath(cfg))
+	settled := markMatches(ctx, r, fingerprint(content), reloadedPath(cfg.Cert))
 	return &Status{Cert: parsed, Pending: !settled}, nil
 }
 
@@ -352,12 +318,10 @@ func fingerprint(pemBytes []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// write puts the file inside the proxy container as root, then hands it to the proxy user:
-// mode 640 so the key is not world-readable, and the directory 750. Writing as the proxy user
-// instead fails outright on a fresh volume, which is root-owned (measured: `0:0 755`).
+// write puts the file inside the proxy container as root, which Caddy runs as: mode 640 so the key
+// is not world-readable, and the directory 750.
 func write(ctx context.Context, r remote.Runner, content []byte, path string) error {
 	script := "set -e; umask 077; mkdir -p " + remote.Quote(dir) + "; cat > " + remote.Quote(path) +
-		"; chown " + proxyUID + " " + remote.Quote(dir) + " " + remote.Quote(path) +
 		"; chmod 750 " + remote.Quote(dir) + "; chmod 640 " + remote.Quote(path)
 	if _, err := r.Pipe(ctx, content, "docker", "exec", "-i", "-u", "0", proxy.Container, "sh", "-c", script); err != nil {
 		return fmt.Errorf("install %s: %w", path, err)

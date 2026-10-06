@@ -23,6 +23,7 @@ ports:
     health_path: /version
 tls: true
 replace: stop-first      # Convex keeps its data in SQLite: one writer at a time
+stop_signal: SIGINT      # Convex exits on SIGINT at once; SIGTERM waits out the 10 s before SIGKILL
 keep: 2
 deploy_timeout: 60s
 cert:
