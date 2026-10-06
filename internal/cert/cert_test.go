@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"os"
@@ -24,15 +25,21 @@ type fake struct {
 	calls  []string
 	writes map[string][]byte
 	files  map[string]string // path inside the proxy container → content
+	fail   map[string]error  // command prefix → its failure
 }
 
 func newFake() *fake {
-	return &fake{writes: map[string][]byte{}, files: map[string]string{}}
+	return &fake{writes: map[string][]byte{}, files: map[string]string{}, fail: map[string]error{}}
 }
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	f.calls = append(f.calls, cmd)
+	for prefix, err := range f.fail {
+		if strings.HasPrefix(cmd, prefix) {
+			return "", err
+		}
+	}
 	if len(args) == 5 && args[3] == "cat" {
 		if content, ok := f.files[args[4]]; ok {
 			return content, nil
@@ -402,6 +409,21 @@ func TestPendingUntilReloadRecordsIt(t *testing.T) {
 	pending, err = Pending(ctx, f, cfg)
 	if err != nil || pending {
 		t.Fatalf("after a reload nothing is owed, got %v %v", pending, err)
+	}
+}
+
+// A reload that fails records nothing: the renewal stays owed, and the next run reloads again.
+func TestAFailedReloadLeavesTheCertificatePending(t *testing.T) {
+	ctx, f, cfg := context.Background(), newFake(), testConfig(t)
+	if err := Install(ctx, f, io.Discard, cfg); err != nil {
+		t.Fatal(err)
+	}
+	f.fail["docker exec boks-proxy caddy reload"] = errors.New("loading new config: open /certs/boks/x.crt: no such file")
+	if err := Reload(ctx, f, io.Discard, cfg); err == nil {
+		t.Fatal("want the reload's failure")
+	}
+	if pending, err := Pending(ctx, f, cfg); err != nil || !pending {
+		t.Errorf("a failed reload loaded nothing, so it is still owed: %v %v", pending, err)
 	}
 }
 

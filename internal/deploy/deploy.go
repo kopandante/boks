@@ -1100,6 +1100,9 @@ func awaitReady(ctx context.Context, r remote.Runner, log io.Writer, cfg *config
 	}
 	fmt.Fprintf(log, "waiting for %s to pass its health checks\n", name)
 	deadline := time.Now().Add(timeout)
+	// The bound covers the probes themselves: one that hangs, or answers after it, does not count.
+	pctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	pending := cfg.Ports
 	for {
 		var left []config.Port
@@ -1112,7 +1115,7 @@ func awaitReady(ctx context.Context, r remote.Runner, log io.Writer, cfg *config
 			if path == "" {
 				path = defaultHealthPath
 			}
-			if err := proxy.Probe(ctx, r, name, port, path); err != nil {
+			if err := proxy.Probe(pctx, r, name, port, path); err != nil {
 				left, last = append(left, p), fmt.Errorf("port %s (%s:%d%s): %w", p.Name, name, port, path, err)
 			}
 		}
@@ -1194,8 +1197,11 @@ func drain(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 		dials = append(dials, rt.Dial)
 	}
 	deadline := time.Now().Add(timeout)
+	// The bound covers the questions themselves: one that hangs is cut off at it.
+	bctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	for {
-		n, err := proxy.Busy(ctx, r, dials)
+		n, err := proxy.Busy(bctx, r, dials)
 		if err == nil && n == 0 {
 			return
 		}

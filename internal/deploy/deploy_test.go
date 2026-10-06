@@ -35,6 +35,9 @@ type fake struct {
 	onRun func(cmd string)
 	// stdin is what each command that is not a file write was given on its standard input.
 	stdin map[string]string
+	// hang is the commands that never answer: they return only when their context ends, as an SSH
+	// call over a connection that stalled does once it is cut off.
+	hang []string
 }
 
 type write struct {
@@ -160,11 +163,17 @@ func inspectOf(c string) string {
 // fragmentWrite is the content written to app's fragment, or "".
 func (f *fake) fragmentWrite(app string) string { return f.uploads[".boks/_proxy/routes/"+app+".json"] }
 
-func (f *fake) Run(_ context.Context, args ...string) (string, error) {
+func (f *fake) Run(ctx context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	f.calls = append(f.calls, cmd)
 	if f.onRun != nil {
 		f.onRun(cmd)
+	}
+	for _, h := range f.hang {
+		if strings.HasPrefix(cmd, h) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
 	}
 	// The longest prefix answers, so a test can answer one network or container apart from the rest.
 	if err, ok := longest(f.fail, cmd); ok {
@@ -1028,6 +1037,19 @@ func TestAnUnhealthyCopyGetsNoRoute(t *testing.T) {
 	if journalOpen(f, journal) {
 		t.Errorf("nothing moved, so the outcome is known: %q", f.appends[journal])
 	}
+	// deploy_timeout bounds the probes themselves: one that never answers is cut off at it.
+	g := routedFake(t)
+	g.hang = []string{probe}
+	done, hung := make(chan error, 1), parse(t, onePort+"deploy_timeout: 100ms\n")
+	go func() { done <- Run(context.Background(), g, io.Discard, hung, "v2", quick()) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "did not pass its health check within 100ms") || g.has(reloadVia) {
+			t.Errorf("want the timeout, and no route moved: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a hung probe held the deploy past deploy_timeout")
+	}
 }
 
 // Each port is checked where kamal-proxy checked it: its health_port when set, its path or /up, by the
@@ -1088,6 +1110,31 @@ func TestTheOldCopyDrainsBeforeItGoes(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "1 requests to the previous copies still in flight after 1ms") || !g.has("docker stop demo-v1-1") {
 		t.Errorf("want the bound to end the drain, with a warning: %q %v", log.String(), g.calls)
+	}
+	// A proxy that cannot say what it holds is waited out to the bound: stopping early is what the
+	// drain exists to prevent.
+	q := routedFake(t)
+	q.fail[upstreams] = errors.New("connection lost")
+	log.Reset()
+	start := time.Now()
+	if err := Run(context.Background(), q, &log, parse(t, onePort+"drain_timeout: 200ms\n"), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < 200*time.Millisecond || !strings.Contains(log.String(), "could not say") || q.at("docker stop demo-v1-1") < q.lastAt(upstreams) {
+		t.Errorf("want the bound waited out before the stop, with a warning: %s %q", time.Since(start), log.String())
+	}
+	// A question that never answers is cut off at the bound, not waited on forever.
+	w := routedFake(t)
+	w.hang = []string{upstreams}
+	done, hung := make(chan error, 1), parse(t, onePort+"drain_timeout: 100ms\n")
+	go func() { done <- Run(context.Background(), w, io.Discard, hung, "v2", quick()) }()
+	select {
+	case err := <-done:
+		if err != nil || !w.has("docker stop demo-v1-1") {
+			t.Errorf("want the deploy to finish after the bound: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a hung drain question held the deploy past drain_timeout")
 	}
 	// A first deploy has nothing to drain.
 	h := routedFake(t)
