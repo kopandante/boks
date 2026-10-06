@@ -428,7 +428,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		for _, s := range sc.Servers {
 			fmt.Fprintf(out, "== %s\n", s)
 			// A user just added to group docker has it only in a new login, not on a shared connection.
-			fresh := func() remote.Runner { return remote.SSH{Host: s} }
+			fresh := func() remote.Runner { return remote.SSH{Host: s, Alone: true} }
 			if err := deploy.Install(ctx, connect(s), fresh, out, config.DefaultProxyImage, o); err != nil {
 				return fmt.Errorf("%s: %w", s, err)
 			}

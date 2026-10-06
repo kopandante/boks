@@ -72,6 +72,9 @@ type SSH struct {
 	// ControlDir, when set, holds the socket of one SSH connection per server that every call of
 	// this run shares (see Mux); empty opens a connection per call.
 	ControlDir string
+	// Alone opens a connection of its own even past a ControlMaster in ~/.ssh/config: a new login,
+	// which a user just added to a group needs to have it.
+	Alone bool
 }
 
 // Mux shares one SSH connection per server across a run. Each call used to open its own, and to a
@@ -151,6 +154,8 @@ func (s SSH) exec(ctx context.Context, stdin []byte, label, script string) (stri
 		// then fails over to a fresh connection that ConnectTimeout does bound.
 		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+controlPath(s.ControlDir, s.Host), "-o", "ControlPersist=60s",
 			"-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3")
+	} else if s.Alone {
+		args = append(args, "-o", "ControlMaster=no", "-o", "ControlPath=none")
 	}
 	cmd := exec.CommandContext(ctx, "ssh", append(args, s.Host, script)...)
 	if stdin != nil {
