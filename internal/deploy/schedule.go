@@ -38,7 +38,10 @@ const cronLock = ".boks/crontab.lock"
 // lock, so a run that fires while another is going never moves the log that one writes — and one
 // run keeps at most 1 MiB of its own output. The rest is read to the end and counted, not cut off:
 // a job whose output pipe closed would get SIGPIPE and stop, and the exit status logged is the
-// job's, not that of whatever cut the output. The pipe's writer is opened before the command file:
+// job's, not that of whatever cut the output. The kept part goes through dd a byte at a time, so it
+// reaches the log as the job writes it, as it did before the cap (head would hold it in its stdio
+// buffer until the job ends, and a hung job's last words are what the log is for); the byte at a
+// time costs about a second of CPU per MiB, only when a run writes that much. The pipe's writer is opened before the command file:
 // a file pruned since the check then fails the run, where the other way round the reader would wait
 // for a writer forever, holding the job's lock.
 const runner = `#!/bin/sh
@@ -62,7 +65,7 @@ rm -f "$out"
 mkfifo -m 600 "$out" || { echo "$(ts) skip: cannot make $out"; exit 0; }
 trap 'rm -f "$out"' EXIT
 echo "$(ts) start release=$rel container=$c"
-{ head -c 1048576; n=$(wc -c); if [ "$n" -gt 0 ]; then echo; echo "$(ts) output past 1 MiB dropped: about $n more bytes"; fi; } < "$out" &
+{ dd bs=1 count=1048576 2>/dev/null; n=$(wc -c); if [ "$n" -gt 0 ]; then echo; echo "$(ts) output past 1 MiB dropped: about $n more bytes"; fi; } < "$out" &
 reader=$!
 docker exec -i "$c" sh -s > "$out" 2>&1 < "$f"
 rc=$?

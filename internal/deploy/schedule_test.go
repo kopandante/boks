@@ -397,3 +397,16 @@ func TestRunnerFinishesWhenTheCommandCannotBeOpened(t *testing.T) {
 		t.Errorf("want the pipe removed: %v", err)
 	}
 }
+
+// What the job writes reaches the log while it runs, as it did before the cap: a job that hangs
+// after a line of progress must leave that line where it can be read.
+func TestRunnerLogsOutputAsTheJobWritesIt(t *testing.T) {
+	out := runRunner(t, "rjob10", func(h, _ string) {
+		serve(h, "rjob10", "r-1", "c-1", `echo step1; l="$HOME/.boks/rjob10/jobs/tick.log"; i=0
+until grep -q step1 "$l" || [ $i -ge 50 ]; do sleep 0.1; i=$((i+1)); done
+grep -q step1 "$l" && echo seen-live`)
+	})
+	if !strings.Contains(out, "seen-live") {
+		t.Errorf("want the job's first line in the log before it ended:\n%s", out)
+	}
+}
