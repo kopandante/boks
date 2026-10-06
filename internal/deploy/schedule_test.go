@@ -222,3 +222,38 @@ cp "$1" "$HOME/installed"
 		t.Errorf("installed crontab %q, want %q", b, want)
 	}
 }
+
+// A log past 1 MB is moved aside before the run writes to it, so a chatty job cannot fill the disk.
+func TestRunnerRotatesALargeLog(t *testing.T) {
+	big := strings.Repeat("x", 1048577)
+	out := runRunner(t, "rjob4", func(home, _ string) {
+		serve(home, "rjob4", "r-1", "c", "echo fresh")
+		os.WriteFile(filepath.Join(home, ".boks", "rjob4", "jobs", "tick.log"), []byte(big), 0o600)
+		t.Cleanup(func() {
+			old, _ := os.ReadFile(filepath.Join(home, ".boks", "rjob4", "jobs", "tick.log.1"))
+			if string(old) != big {
+				t.Errorf("the old log must be kept as tick.log.1 (%d bytes)", len(old))
+			}
+		})
+	})
+	if strings.Contains(out, "xxx") || !strings.Contains(out, "fresh") {
+		t.Errorf("want the run in a fresh log:\n%.200s", out)
+	}
+}
+
+// A rollback is refused when any one of the release's commands is gone, the last one included.
+func TestJobsPresentChecksEveryCommand(t *testing.T) {
+	home := t.TempDir()
+	r := local{home, "/usr/bin:/bin"}
+	jobs := []config.Schedule{{Name: "a"}, {Name: "b"}}
+	dir := filepath.Join(home, ".boks", "app", "jobs", "r-1")
+	os.MkdirAll(dir, 0o700)
+	os.WriteFile(filepath.Join(dir, "a.sh"), []byte("true\n"), 0o600)
+	if err := jobsPresent(context.Background(), r, "app", "r-1", jobs); err == nil || !strings.Contains(err.Error(), "b.sh") {
+		t.Errorf("want a refusal naming b.sh, got %v", err)
+	}
+	os.WriteFile(filepath.Join(dir, "b.sh"), []byte("true\n"), 0o600)
+	if err := jobsPresent(context.Background(), r, "app", "r-1", jobs); err != nil {
+		t.Errorf("all commands are there: %v", err)
+	}
+}
