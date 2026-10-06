@@ -189,7 +189,7 @@ func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config)
 	if len(cfg.Ports) == 0 {
 		return nil
 	}
-	fs, err := proxy.Fragments(ctx, r)
+	fs, err := routesOnFile(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -199,6 +199,20 @@ func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config)
 		}
 	}
 	return nil
+}
+
+// routesOnFile are the routes boks keeps for the proxy. On a server still on kamal-proxy there are none,
+// while kamal-proxy serves every app's: an empty list would say the server routes nothing, so that is
+// the refusal that says what to do.
+func routesOnFile(ctx context.Context, r remote.Runner) ([]proxy.Fragment, error) {
+	state, kind, err := proxy.State(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if state != "" && kind != proxy.Kind {
+		return nil, proxy.NotCaddy()
+	}
+	return proxy.Fragments(ctx, r)
 }
 
 // printRoutes shows routes as the proxy serves them: host, where it goes, and how TLS is served.
@@ -319,7 +333,7 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		})
 	case "list":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			fs, err := proxy.Fragments(ctx, r)
+			fs, err := routesOnFile(ctx, r)
 			printRoutes(out, fs)
 			return err
 		})

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kopandante/boks/internal/config"
+	"github.com/kopandante/boks/internal/proxy"
 	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
 )
@@ -126,12 +127,23 @@ func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id 
 	if _, err := checkNetworks(ctx, r, target, ""); err != nil {
 		return "", err
 	}
-	if target.Memory == "" {
-		return id, nil
-	}
+	// A server still on kamal-proxy refuses whenever routes are involved — the release's, or the copies'
+	// it would replace — as put does, so it is asked here with the rest.
 	old, err := containers(ctx, r, cfg.App)
 	if err != nil {
 		return "", err
+	}
+	if len(target.Ports) > 0 || !allRouteless(old) {
+		state, kind, err := proxy.State(ctx, r)
+		if err != nil {
+			return "", err
+		}
+		if state != "" && kind != proxy.Kind {
+			return "", proxy.NotCaddy()
+		}
+	}
+	if target.Memory == "" {
+		return id, nil
 	}
 	var live []string
 	if target.ReplaceMode() == config.ReplaceStopFirst || cfg.ReplaceMode() == config.ReplaceStopFirst || anyStopFirst(old) {

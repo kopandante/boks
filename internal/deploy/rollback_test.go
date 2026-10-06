@@ -319,8 +319,29 @@ func TestCheckRollbackChangesNothing(t *testing.T) {
 	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), "bot-v9-9"); err == nil {
 		t.Error("want a refusal for a release this server does not have")
 	}
-	if f.has("docker") || f.has("mkdir") || len(f.uploads) > 0 || len(f.appends) > 0 {
-		t.Errorf("a check must not change the server: %v", f.calls)
+	// It reads (the proxy's state is asked, as below); it runs nothing that changes the server.
+	for _, change := range []string{"docker run", "docker stop", "docker rm", "docker start", "docker create", "docker rename", "docker network create", "mkdir"} {
+		if f.has(change) {
+			t.Errorf("a check must not change the server (%s): %v", change, f.calls)
+		}
+	}
+	if len(f.uploads) > 0 || len(f.appends) > 0 {
+		t.Errorf("a check must not change the server: %v %v", f.uploads, f.appends)
+	}
+}
+
+// A server still on kamal-proxy refuses a rollback with routes partway through: the check asks first,
+// so a rollback over several servers does not leave the earlier ones on another release.
+func TestCheckRollbackAsksForTheMigration(t *testing.T) {
+	f := botReleases("healthy")
+	f.out[proxyState] = "running\t"
+	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err != nil {
+		t.Errorf("no routes either side: kamal-proxy is not in the way, got %v", err)
+	}
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = strings.Replace(f.out["cat .boks/bot/releases/bot-v1-1.json"],
+		`"ports":[]`, `"ports":[{"name":"web","port":80,"host":"bot.example.com"}]`, 1)
+	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err == nil || !strings.Contains(err.Error(), "boks proxy migrate") {
+		t.Errorf("want the migration asked for, got %v", err)
 	}
 }
 

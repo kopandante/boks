@@ -398,6 +398,12 @@ func (c *Config) validate() error {
 		return fmt.Errorf("network: no longer set per app — each app runs on its own network %s, and the proxy joins it; "+
 			"remove the key", AppNetwork(c.App))
 	}
+	// proxy_image named kamal-proxy's image until boks ran Caddy; one pinned then would have migrate stop
+	// kamal-proxy for a container that cannot run Caddy.
+	if repo, _, _ := strings.Cut(c.ProxyImage, "@"); strings.Split(path.Base(repo), ":")[0] == "kamal-proxy" {
+		return fmt.Errorf("proxy_image: %s is kamal-proxy, and boks runs Caddy now: remove the key (the default is %s) or name a Caddy image",
+			c.ProxyImage, DefaultProxyImage)
+	}
 	if c.Keep < 1 {
 		return fmt.Errorf("keep: must be at least 1")
 	}

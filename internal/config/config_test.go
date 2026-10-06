@@ -27,6 +27,22 @@ func TestParseDefaults(t *testing.T) {
 	}
 }
 
+// proxy_image named kamal-proxy's image before boks ran Caddy: one pinned then is refused, in any of
+// the ways an image is written; a Caddy image, or another named like it, is not.
+func TestProxyImagePinnedToKamalIsRefused(t *testing.T) {
+	for _, img := range []string{"basecamp/kamal-proxy:v0.10.0", "basecamp/kamal-proxy", "ghcr.io/basecamp/kamal-proxy@sha256:ab",
+		"registry.local:5000/kamal-proxy:v0.9.0"} {
+		if _, err := Parse([]byte(minimal + "proxy_image: " + img + "\n")); err == nil || !strings.Contains(err.Error(), "boks runs Caddy now") {
+			t.Errorf("%s: want a refusal, got %v", img, err)
+		}
+	}
+	for _, img := range []string{"caddy:2.11.7-alpine", "registry.local:5000/caddy:2", "example/kamal-proxy-caddy:1"} {
+		if _, err := Parse([]byte(minimal + "proxy_image: " + img + "\n")); err != nil {
+			t.Errorf("%s: want it taken, got %v", img, err)
+		}
+	}
+}
+
 func TestParseRejects(t *testing.T) {
 	cases := map[string]string{
 		"app: Demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]":                              "app:",
