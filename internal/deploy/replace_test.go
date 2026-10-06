@@ -928,4 +928,21 @@ func TestRollbackSaysWhenItDropsTheCommand(t *testing.T) {
 	if strings.Contains(quiet.String(), "recorded without a") {
 		t.Errorf("no warning for a release that has them: %s", quiet.String())
 	}
+	// Each field on its own: a warning only for the one today's config sets and the release lacks.
+	const noCommand, noSignal = "recorded without a command", "recorded without a stop_signal"
+	for _, c := range []struct{ config, recorded, want, not string }{
+		{"command: [redis-server]\n", ``, noCommand, noSignal},
+		{"stop_signal: SIGINT\n", ``, noSignal, noCommand},
+		{"command: [redis-server]\nstop_signal: SIGINT\n", `,"command":["redis-server"]`, noSignal, noCommand},
+		{"command: [redis-server]\nstop_signal: SIGINT\n", `,"stop_signal":"SIGTERM"`, noCommand, noSignal},
+	} {
+		h := demoReleases(t, `{`+v1Release+c.recorded+`}`)
+		var out strings.Builder
+		if err := Rollback(context.Background(), h, &out, parse(t, onePort+c.config), "", fixed); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), c.want) || strings.Contains(out.String(), c.not) {
+			t.Errorf("config %q, recorded %q: want %q and not %q: %s", c.config, c.recorded, c.want, c.not, out.String())
+		}
+	}
 }
