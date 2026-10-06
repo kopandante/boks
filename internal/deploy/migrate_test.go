@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -398,5 +402,66 @@ func TestBootProxyRunsTheCertificateStepUnderTheLock(t *testing.T) {
 	called := false
 	if err := BootProxy(context.Background(), g, io.Discard, "img", func() error { called = true; return nil }); err == nil || called {
 		t.Errorf("want the boot's refusal and no step: %v %v", err, called)
+	}
+}
+
+// The advice printed when kamal-proxy cannot be put back holds whichever step failed: here kamal-proxy
+// is renamed back and its start fails, so it lies under its own name with nothing aside, and the advice
+// must start it rather than delete it. Run against a stub docker from both states.
+func TestMigrateAdviceKeepsARestoredKamal(t *testing.T) {
+	f := kamalServer()
+	f.out[proxyState] = ""
+	f.out[asideState] = "boks-proxy.kamal"
+	f.fail["docker start boks-proxy"] = errors.New("connection lost")
+	err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed)
+	if err == nil || !strings.Contains(err.Error(), "could not be put back") {
+		t.Fatalf("want the failure to put kamal-proxy back, got %v", err)
+	}
+	msg := err.Error()
+	end := strings.LastIndex(msg, "`")
+	start := strings.LastIndex(msg[:max(end, 0)], "`")
+	if start < 0 || end <= start {
+		t.Fatalf("no command in %q", msg)
+	}
+	advice := msg[start+1 : end]
+	dir := t.TempDir()
+	stub := "#!/bin/sh\necho \"$*\" >> \"$DIR/calls\"\n" +
+		"[ \"$1 $2 $3\" = 'container inspect boks-proxy.kamal' ] && { [ \"$ASIDE\" = 1 ]; exit; }\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		aside string
+		want  []string
+	}{
+		{"", []string{"container inspect boks-proxy.kamal", "start boks-proxy"}},
+		{"1", []string{"container inspect boks-proxy.kamal", "rm -f boks-proxy", "rename boks-proxy.kamal boks-proxy", "start boks-proxy"}},
+	} {
+		_ = os.Remove(filepath.Join(dir, "calls"))
+		cmd := exec.Command("sh", "-c", advice)
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "DIR="+dir, "ASIDE="+c.aside)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("advice %q failed: %v %s", advice, err, out)
+		}
+		calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+		if got := strings.Split(strings.TrimSpace(string(calls)), "\n"); !slices.Equal(got, c.want) {
+			t.Errorf("aside=%q: advice ran %q, want %q", c.aside, got, c.want)
+		}
+	}
+}
+
+// A kamal-proxy that never routed anything — booted by `boks cert issue` before the first deploy —
+// has no state file (kamal-proxy v0.10.0 writes it on the first deploy): it is migrated, not refused
+// for want of a file it never had, since every later deploy on that server refuses until it is.
+func TestMigrateTakesAKamalThatNeverRouted(t *testing.T) {
+	f := kamalServer()
+	f.out[kamalList] = "{}"
+	f.out[appsListed] = ""
+	f.fail[kamalCat] = errors.New("cat: can't open kamal-proxy.state: No such file or directory")
+	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("docker create --name boks-proxy") || !f.has("docker rm boks-proxy.kamal") {
+		t.Errorf("want Caddy in kamal-proxy's place: %v", f.calls)
 	}
 }

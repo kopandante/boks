@@ -25,7 +25,9 @@ const asideName = proxy.Container + ".kamal"
 // route. The routes are each app's current release's hosts, served as kamal-proxy serves them now —
 // the container it sends the host to, TLS, the certificate files — so traffic lands where it landed. A host kamal-proxy routes and
 // no recorded release describes would be lost, so it refuses, changing nothing; so does a deploy in
-// progress, whose lock it would otherwise race. The swap is seconds without a proxy on 80/443.
+// progress, whose lock it would otherwise race. The swap is seconds without a proxy on 80/443. A
+// host kamal-proxy served with its own ACME certificate — TLS without `cert:` — is not carried over:
+// Caddy obtains its own when it starts, and until that order completes the host's TLS handshakes fail.
 //
 // It changes the whole server, not one app: every app's deploy lock and the admission lock are held
 // throughout.
@@ -163,7 +165,8 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 		return errors.Join(fmt.Errorf("Caddy did not come up: %w", err), restoreKamal(context.WithoutCancel(ctx), r, log))
 	}
 	best(ctx, r, log, "docker", "rm", asideName)
-	fmt.Fprintf(log, "Caddy serves the routes now; kamal-proxy's volume boks-proxy-config is left behind and can be removed by hand\n")
+	fmt.Fprintf(log, "Caddy serves the routes now; it obtains its own ACME certificates, and kamal-proxy's volume boks-proxy-config, "+
+		"which holds kamal-proxy's, is left behind: remove it by hand once Caddy serves every host over HTTPS\n")
 	return nil
 }
 
@@ -188,8 +191,11 @@ func restoreKamal(ctx context.Context, r remote.Runner, log io.Writer) error {
 		_, err = r.Run(ctx, "docker", "start", proxy.Container)
 	}
 	if err != nil {
-		return fmt.Errorf("kamal-proxy could not be put back (%w): `docker rm -f %s; docker rename %s %s; docker start %s`",
-			err, proxy.Container, asideName, proxy.Container, proxy.Container)
+		// Which step failed, and whether its answer was lost after it acted, is not known here: the
+		// advice holds from any of them. Caddy goes from the name only while kamal-proxy still waits
+		// aside — once it is renamed back, the name is kamal-proxy's and removing it would delete it.
+		return fmt.Errorf("kamal-proxy could not be put back (%w): `docker container inspect %s >/dev/null 2>&1 && { docker rm -f %s; docker rename %s %s; }; docker start %s`",
+			err, asideName, proxy.Container, asideName, proxy.Container, proxy.Container)
 	}
 	fmt.Fprintln(log, "kamal-proxy is back with its routes")
 	return nil
@@ -247,6 +253,11 @@ func kamalTargets(ctx context.Context, r remote.Runner) (map[string]kamalTarget,
 	}
 	if err := json.Unmarshal([]byte(out), &services); err != nil {
 		return nil, fmt.Errorf("reading kamal-proxy's routes: %w", err)
+	}
+	// kamal-proxy writes its state file on its first deploy: one that never routed anything — booted by
+	// `boks cert issue` before the first deploy — has none, and nothing to read from it.
+	if len(services) == 0 {
+		return map[string]kamalTarget{}, nil
 	}
 	certs, err := kamalCerts(ctx, r)
 	if err != nil {
