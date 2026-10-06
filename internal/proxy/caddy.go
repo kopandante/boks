@@ -119,14 +119,15 @@ func Config(fragments []Fragment) ([]byte, error) {
 		return all[i].r.Host < all[j].r.Host
 	})
 
-	// Hosts with TLS are on another server than a wildcard without TLS, and on :80 Caddy redirects them
-	// to HTTPS only after every route of its own: a wildcard there would take plain HTTP for an exact
-	// host with TLS that it covers. kamal-proxy took the exact host first and redirected; so does this,
-	// by keeping those hosts out of the wildcard's match.
-	var secure []string
+	// A wildcard and an exact host it covers can sit on different servers, one with TLS and one
+	// without, where the exact host comes before the wildcard no more: the wildcard would take plain
+	// HTTP for an exact host with TLS (Caddy redirects on :80 only after its own routes), or HTTPS for
+	// an exact host without it. kamal-proxy gave an exact host to its own app in either case; so does
+	// this, by keeping the exact hosts of the other mode out of the wildcard's match.
+	exact := map[bool][]string{}
 	for _, e := range all {
-		if e.r.TLS && !strings.HasPrefix(e.r.Host, "*") {
-			secure = append(secure, e.r.Host)
+		if !strings.HasPrefix(e.r.Host, "*") {
+			exact[e.r.TLS] = append(exact[e.r.TLS], e.r.Host)
 		}
 	}
 
@@ -151,9 +152,9 @@ func Config(fragments []Fragment) ([]byte, error) {
 			servers[name] = s
 		}
 		m := match{Host: []string{e.r.Host}}
-		if suffix, ok := strings.CutPrefix(strings.ToLower(e.r.Host), "*"); ok && !e.r.TLS {
+		if suffix, ok := strings.CutPrefix(strings.ToLower(e.r.Host), "*"); ok {
 			var covered []string
-			for _, h := range secure {
+			for _, h := range exact[!e.r.TLS] {
 				// Caddy's wildcard stands for one label.
 				if label, ok := strings.CutSuffix(strings.ToLower(h), suffix); ok && label != "" && !strings.Contains(label, ".") {
 					covered = append(covered, h)

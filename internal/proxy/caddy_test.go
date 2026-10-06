@@ -495,6 +495,23 @@ func TestValidateChangesNothing(t *testing.T) {
 	}
 }
 
+// The other way round: a wildcard with TLS leaves out the exact hosts without TLS it covers, so HTTPS
+// for one of them does not reach the wildcard's app — kamal-proxy gave the exact host to its own app.
+func TestConfigWildcardWithTLSLeavesThePlainHostsItCovers(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:443", TLS: true,
+		Cert: &CertFiles{Certificate: "/certs/boks/_.example.com.crt", Key: "/certs/boks/_.example.com.key"}}}},
+		{App: "b", Routes: []Route{{Host: "api.example.com", Dial: "b:80"}, {Host: "secure.example.com", Dial: "b:81", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)
+	last := dig(routes[len(routes)-1], "match").([]any)[0].(map[string]any)
+	not, _ := last["not"].([]any)
+	if last["host"].([]any)[0] != "*.example.com" || len(not) != 1 || fmt.Sprint(not[0].(map[string]any)["host"]) != "[api.example.com]" {
+		t.Errorf("want the TLS wildcard to leave out the plain exact host only: %v", last)
+	}
+}
+
 // peek is a disk that keeps what the config Validate asked about said when Caddy was asked.
 type peek struct {
 	*disk

@@ -254,8 +254,14 @@ func TestMigrateFinishesWhenCaddyServesAndKamalWaitsAside(t *testing.T) {
 	g.out[proxyState] = caddyUp
 	g.out[asideState] = "boks-proxy.kamal"
 	g.out[migrateReq] = "0"
-	if err := MigrateProxy(context.Background(), g, io.Discard, "img", fixed); err == nil || g.has("docker rename") || g.has("docker rm") {
+	err := MigrateProxy(context.Background(), g, io.Discard, "img", fixed)
+	if err == nil || g.has("docker rename") || g.has("docker rm") {
 		t.Errorf("want the failure reported and both containers kept: %v %v", err, g.calls)
+	}
+	// Caddy may well be serving, and kamal-proxy's routes are stale: the advice is to migrate again, and
+	// to put kamal-proxy back only as the last resort.
+	if err != nil && (!strings.Contains(err.Error(), "run `boks proxy migrate` again") || !strings.Contains(err.Error(), "only if Caddy cannot serve")) {
+		t.Errorf("want migrate again first, kamal-proxy back only if Caddy cannot serve: %v", err)
 	}
 }
 

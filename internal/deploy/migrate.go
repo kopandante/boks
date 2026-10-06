@@ -57,8 +57,9 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 			// Caddy is in place, and may have served for days: kamal-proxy's routes are stale by now, so a
 			// failure here does not put it back on its own.
 			if err := proxy.Boot(ctx, r, log, image); err != nil {
-				return fmt.Errorf("Caddy did not come up: %w\nkamal-proxy waits stopped as %s; `docker rm -f %s; docker rename %s %s; docker start %s` puts it back",
-					err, asideName, proxy.Container, asideName, proxy.Container, proxy.Container)
+				return fmt.Errorf("Caddy did not come up: %w\nCaddy may still be serving: run `boks proxy migrate` again once the cause is fixed. "+
+					"kamal-proxy waits stopped as %s with routes that may be stale by now — put it back (`docker rm -f %s; docker rename %s %s; docker start %s`) "+
+					"only if Caddy cannot serve", err, asideName, proxy.Container, asideName, proxy.Container, proxy.Container)
 			}
 			best(ctx, r, log, "docker", "rm", asideName)
 			fmt.Fprintln(log, "Caddy serves the routes; the kamal-proxy an earlier migration left aside is removed")
