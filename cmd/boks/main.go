@@ -426,7 +426,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 				fmt.Fprintf(out, "  revision %d (highest applied %d): %d blocks, %d allows\n", p.Revision, p.Floor, len(p.Block), len(p.Allow))
 			}
 			if open != nil {
-				fmt.Fprintf(out, "  ! %s started %s and never finished; apply again\n", open.Action, open.StartedAt.Format(time.RFC3339))
+				fmt.Fprintf(out, "  ! %s started %s and never finished; run it again\n", open.Action, open.StartedAt.Format(time.RFC3339))
 			}
 			return nil
 		})

@@ -145,18 +145,31 @@ func TestSetPolicyPutsThePreviousBack(t *testing.T) {
 	}
 }
 
-// A first policy that fails leaves no policy behind.
+// A first policy that fails — refused, or taken with the answer lost — leaves no policy behind and
+// Caddy on the config without one.
 func TestSetPolicyRemovesAFirstPolicyThatFailed(t *testing.T) {
-	d := newDisk()
-	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
-		t.Fatal(err)
-	}
-	d.fail[reloadNext] = errors.New("refused")
-	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err == nil {
-		t.Fatal("want an error")
-	}
-	if _, ok := d.files[ServerDir+"/policy.json"]; ok {
-		t.Errorf("want no policy left")
+	for _, lost := range []bool{false, true} {
+		d := newDisk()
+		if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+			t.Fatal(err)
+		}
+		if lost {
+			d.lost[reloadNext] = errors.New("connection reset")
+		} else {
+			d.fail[reloadNext] = errors.New("refused")
+		}
+		if err := SetPolicy(context.Background(), d, io.Discard, habsida); err == nil {
+			t.Fatal("want an error")
+		}
+		if _, ok := d.files[ServerDir+"/policy.json"]; ok {
+			t.Errorf("lost %v: want no policy left", lost)
+		}
+		if d.caddy != configOf(Policy{}) || d.files[Dir+"/caddy.json"] != d.caddy {
+			t.Errorf("lost %v: want Caddy on the config without a policy, recorded", lost)
+		}
+		if _, ok := d.files[ServerDir+"/history/1.json"]; ok {
+			t.Errorf("lost %v: want no history", lost)
+		}
 	}
 }
 
@@ -261,8 +274,8 @@ func TestSetPolicyKeepsTheReplacedRevisionInTheHistory(t *testing.T) {
 }
 
 // A run cut once Caddy took its policy, before caddy.json recorded it, leaves the record behind Caddy;
-// a rollback to the policy before matches that record and must still take Caddy back. A repeat of
-// the policy Caddy runs reloads nothing.
+// a rollback to the policy before matches that record and must still take Caddy back, and so must a
+// repeat.
 func TestSetPolicyTakesCaddyBackAfterACutRun(t *testing.T) {
 	d := served(t, habsida)
 	cut := revision2()
@@ -279,9 +292,14 @@ func TestSetPolicyTakesCaddyBackAfterACutRun(t *testing.T) {
 	if d.caddy != configOf(habsida) {
 		t.Errorf("want Caddy back on revision 1, not on the cut run's policy")
 	}
-	d.calls = nil
-	if err := SetPolicy(context.Background(), d, io.Discard, back); err != nil || d.ran(reloadNext) {
-		t.Errorf("want a repeat of the policy Caddy runs to reload nothing: %v %v", err, d.calls)
+	// The retry of a rollback cut after it recorded its policy: the record and caddy.json both say
+	// revision 1, Caddy runs the first cut run's policy.
+	d.files[Dir+"/caddy.next.json"] = configOf(cut)
+	if _, err := d.Run(context.Background(), strings.Fields(reloadNext)...); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPolicy(context.Background(), d, io.Discard, back); err != nil || d.caddy != configOf(habsida) {
+		t.Errorf("want a repeat to take Caddy to the recorded policy: %v", err)
 	}
 }
 

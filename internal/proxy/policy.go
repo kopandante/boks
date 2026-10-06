@@ -143,9 +143,10 @@ func domainsPattern(domains []string) string {
 // recorded before the reload: a run cut after Caddy took the config would otherwise leave the old
 // policy on disk, and the next run of any app would assemble from it and drop the filter without a
 // word. Recorded first, a cut run leaves the policy the proxy is moving to, and the next converge of
-// any run takes it there. A failed write or reload puts the previous policy back and reloads it by
-// force — the answer may have been lost after the file was replaced or Caddy took the new config. The history is written last: it holds only
-// revisions that were applied. The caller holds the server's admission lock.
+// any run takes it there. The reload is forced. A failed write or reload puts the previous policy
+// back and reloads it by force too — the answer may have been lost after the file was replaced or
+// Caddy took the new config. The history is written last: it holds only revisions that were applied,
+// and the replaced one, kept before anything changes. The caller holds the server's admission lock.
 func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) error {
 	prevBody, prevPresent, err := readFile(ctx, r, policyPath())
 	if err != nil {
@@ -183,10 +184,11 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if err != nil {
 		err = fmt.Errorf("recording the server's policy: %w", err)
 	} else {
-		// A new policy reloads by force: a run cut after Caddy took its policy leaves caddy.json behind
-		// it, and a rollback to the policy before would match that file and leave Caddy where it is.
-		force := prevPresent && !SamePolicy(prev, p)
-		_, err = converge(ctx, r, log, fs, force, fmt.Sprintf("the server's policy, revision %d", p.Revision))
+		// By force, every time: caddy.json records what Caddy runs only until a run is cut after a reload,
+		// and a policy that matches the record — a rollback, a repeat, the retry of either — would
+		// otherwise leave Caddy on whatever the cut run gave it. A server's policy changes rarely, and
+		// a reload loses nothing.
+		_, err = converge(ctx, r, log, fs, true, fmt.Sprintf("the server's policy, revision %d", p.Revision))
 	}
 	if err != nil {
 		back := context.WithoutCancel(ctx)
