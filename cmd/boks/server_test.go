@@ -97,3 +97,31 @@ func TestServerInstallAsksDockerInANewLogin(t *testing.T) {
 		t.Errorf("usermod %v, docker in a new login %v, read shared %v; calls:\n%s", usermod, docker, read, b)
 	}
 }
+
+// Install asks every server before it changes any: b cannot take boks, so a is not touched either.
+func TestServerInstallAsksEveryServerFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	facts := "user=root\nuid=0\nos=ubuntu\nversion=24.04\nsystemd=yes\nmigratereq=yes\nflock=yes\ncrontab=yes\ncandidate=29.1.3\n"
+	a := &recorder{server: server{"sh -c S=": facts}}
+	b := &recorder{server: server{"sh -c S=": strings.Replace(facts, "os=ubuntu", "os=fedora", 1)}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "install", path}, io.Discard, &errw); code != 1 {
+		t.Fatalf("want a refusal, got %d", code)
+	}
+	if !strings.Contains(errw.String(), "b: fedora") {
+		t.Errorf("want b named: %s", errw.String())
+	}
+	// a's package index may be refreshed by its check — nothing boks answers for — but nothing else.
+	installed := false
+	for _, c := range a.calls {
+		installed = installed || strings.HasSuffix(c, " apt-get install -y -q --no-install-recommends docker.io")
+	}
+	if a.ran("ln -sn") || installed || len(a.stdin) > 0 {
+		t.Errorf("a was changed before b was asked: %v", a.calls)
+	}
+}

@@ -217,7 +217,9 @@ func planInstall(f hostFacts) (installPlan, error) {
 	if !f.migrateReq {
 		return p, fmt.Errorf("kernel %s has no net.ipv4.tcp_migrate_req (Linux 5.14+), without which every deploy's reload resets connections", f.kernel)
 	}
-	if f.swarm == "active" || f.swarm == "pending" {
+	// Any state but inactive is a node in a swarm: active, pending, locked (an autolocked manager after a
+	// restart), error.
+	if f.swarm != "" && f.swarm != "inactive" {
 		return p, fmt.Errorf("Docker runs in Swarm mode here (a Dokploy server?); boks runs plain containers and does not share a server with Swarm")
 	}
 	if f.rootless {
@@ -520,7 +522,7 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 	if p.daemon != nil {
 		body, _ := json.MarshalIndent(p.daemon, "", "  ")
 		fmt.Fprintln(log, "docker: writing /etc/docker/daemon.json (log rotation, address pool)")
-		if err := writeRoot(ctx, r, sudo, append(body, '\n'), "/etc/docker/daemon.json", f.dockerd); err != nil {
+		if err := writeRoot(ctx, r, sudo, append(body, '\n'), "/etc/docker/daemon.json", f.dockerd || f.dockerUp); err != nil {
 			return fail(err)
 		}
 	}

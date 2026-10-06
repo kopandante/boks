@@ -197,6 +197,7 @@ func TestPlanInstallRefuses(t *testing.T) {
 		"tcp_migrate_req":                     strings.Replace(emptyNoble, "migratereq=yes\n", "", 1),
 		"older than Docker 25":                strings.Replace(emptyNoble, "candidate=27.5.1-0ubuntu3~24.04.2", "candidate=24.0.7-0ubuntu4", 1),
 		"Swarm":                               strings.Replace(readyNoble, "swarm=inactive", "swarm=active", 1),
+		"Swarm mode":                          strings.Replace(readyNoble, "swarm=inactive", "swarm=locked", 1),
 		"rootless":                            readyNoble + "rootless=yes\n",
 		"Engine API 1.43":                     strings.Replace(readyNoble, "api=1.47", "api=1.43", 1),
 		"container dokploy-traefik publishes": strings.Replace(readyNoble, "ports=boks-proxy", "ports=dokploy-traefik", 1),
@@ -545,5 +546,22 @@ func TestInstallClosesAnInstallACutRunLeftOpen(t *testing.T) {
 	f.out["sh -c cat '.boks/_server/journal.jsonl'"] = `{"op":"1","action":"server apply","from":"3","to":"4","started_at":"2026-01-01T00:00:00Z"}`
 	if err := install(f, fresh); err != nil || f.appends[serverLog] != "" {
 		t.Errorf("got %v, journal %s", err, f.appends[serverLog])
+	}
+}
+
+// Where Docker answers, daemon.json is checked by dockerd before it replaces the old one — also when the
+// SSH user's PATH has no dockerd (Debian keeps it in /usr/sbin), since the check runs under sudo.
+func TestInstallValidatesDaemonJSONWhereDockerRuns(t *testing.T) {
+	idle := strings.NewReplacer("running=1\n", "running=0\n", "network=boks-web\n", "", "dockerd=yes\n", "").Replace(readyNoble)
+	f, fresh := installFake(idle), installFake("")
+	if err := install(f, fresh); err != nil {
+		t.Fatal(err)
+	}
+	validated := false
+	for cmd := range f.stdin {
+		validated = validated || strings.Contains(cmd, "/etc/docker/daemon.json") && strings.Contains(cmd, "dockerd --validate")
+	}
+	if !validated {
+		t.Errorf("daemon.json not validated: %v", f.stdin)
 	}
 }
