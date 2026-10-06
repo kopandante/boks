@@ -216,7 +216,7 @@ func Config(fragments []Fragment) ([]byte, error) {
 	if len(tlsHosts) > 0 {
 		s := servers["http"]
 		if s == nil {
-			s = &server{Listen: []string{":80"}}
+			s = &server{Listen: []string{":80"}, Logs: &struct{}{}}
 			servers["http"] = s
 		}
 		s.Routes = append(s.Routes, caddyRoute{Match: []match{{Host: tlsHosts}}, Handle: []handler{{Handler: "static_response",

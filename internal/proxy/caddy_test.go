@@ -204,6 +204,9 @@ func TestConfigOwnsPort80BesideTLS(t *testing.T) {
 	if want := `[{"handle":[{"handler":"static_response","headers":{"Location":["https://{http.request.host}{http.request.uri}"]},"status_code":308}],"match":[{"host":["a.example.com"]}],"terminal":true},{"handle":[{"handler":"static_response","status_code":404}],"terminal":true}]`; string(routes) != want {
 		t.Errorf("want 80 to redirect the TLS host and 404 the rest:\n got %s\nwant %s", routes, want)
 	}
+	if dig(m, "apps", "http", "servers", "http", "logs") == nil {
+		t.Errorf("want 80 logging its requests like 443")
+	}
 	if d := dig(m, "apps", "http", "servers", "https", "automatic_https", "disable_redirects"); d != true {
 		t.Errorf("want Caddy's own redirects off: %v", d)
 	}
