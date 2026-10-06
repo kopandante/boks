@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kopandante/boks/internal/config"
 )
@@ -39,7 +40,12 @@ esac
 	if setup != nil {
 		setup(home, bin)
 	}
-	cmd := exec.Command("sh", filepath.Join(home, runnerPath(app)), app, "tick")
+	// A runner that hangs fails the test instead of the whole run: its background reader would hold
+	// the output pipe open, so the wait on it is bounded too.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", filepath.Join(home, runnerPath(app)), app, "tick")
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+":/usr/bin:/bin")
 	for _, kv := range []string{"RUNNING", "FLOCK_RC"} {
 		if v, ok := os.LookupEnv("T_" + kv); ok {
@@ -367,5 +373,27 @@ func TestRunnerLeavesTheLogOfARunningJobAlone(t *testing.T) {
 	log, _ := os.ReadFile(filepath.Join(home, ".boks", "rjob8", "jobs", "tick.log"))
 	if _, err := os.Stat(filepath.Join(home, ".boks", "rjob8", "jobs", "tick.log.1")); !os.IsNotExist(err) || !bytes.Contains(log, []byte("skip: the previous run")) {
 		t.Errorf("want the skip appended and no rotation: %v %d", err, len(log))
+	}
+}
+
+// The command file can go between the check that it is there and the run — a deploy prunes the
+// release that served a moment ago — and the run then fails like any job and lets the next one in.
+// Opened before the pipe's writer, a missing file would leave the reader waiting for a writer that
+// never comes, holding the job's lock, and every later run would skip as still going.
+func TestRunnerFinishesWhenTheCommandCannotBeOpened(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file with no permissions, so the open does not fail")
+	}
+	var home string
+	out := runRunner(t, "rjob9", func(h, _ string) {
+		home = h
+		serve(h, "rjob9", "r-1", "c-1", "echo hi")
+		os.Chmod(filepath.Join(h, ".boks", "rjob9", "jobs", "r-1", "tick.sh"), 0)
+	})
+	if !strings.Contains(out, "end exit=") || strings.Contains(out, "end exit=0") {
+		t.Errorf("want the run finished with a failure logged:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".boks", "rjob9", "jobs", "tick.out")); !os.IsNotExist(err) {
+		t.Errorf("want the pipe removed: %v", err)
 	}
 }

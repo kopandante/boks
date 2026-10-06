@@ -38,7 +38,9 @@ const cronLock = ".boks/crontab.lock"
 // lock, so a run that fires while another is going never moves the log that one writes — and one
 // run keeps at most 1 MiB of its own output. The rest is read to the end and counted, not cut off:
 // a job whose output pipe closed would get SIGPIPE and stop, and the exit status logged is the
-// job's, not that of whatever cut the output.
+// job's, not that of whatever cut the output. The pipe's writer is opened before the command file:
+// a file pruned since the check then fails the run, where the other way round the reader would wait
+// for a writer forever, holding the job's lock.
 const runner = `#!/bin/sh
 # boks-job <app> <job> — written by boks; runs a scheduled job in the copy of <app> that serves now.
 app=$1 job=$2
@@ -62,7 +64,7 @@ trap 'rm -f "$out"' EXIT
 echo "$(ts) start release=$rel container=$c"
 { head -c 1048576; n=$(wc -c); if [ "$n" -gt 0 ]; then echo; echo "$(ts) output past 1 MiB dropped: about $n more bytes"; fi; } < "$out" &
 reader=$!
-docker exec -i "$c" sh -s < "$f" > "$out" 2>&1
+docker exec -i "$c" sh -s > "$out" 2>&1 < "$f"
 rc=$?
 wait "$reader"
 echo "$(ts) end exit=$rc"
