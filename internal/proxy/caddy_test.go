@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -792,13 +794,14 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 		h, _ := json.Marshal(routes[i].(map[string]any)["handle"])
 		return string(h)
 	}
-	// A dot segment, which only an escape gets past the matcher's cleaning, is refused before any
-	// rewrite: stripping would miss the prefix and the app would resolve the path outside the new one.
-	dotSegments := `{"group":"path","handle":[{"handler":"static_response","status_code":400}],` +
-		`"match":[{"vars_regexp":{"{http.request.uri.path}":{"pattern":"(^|/)\\.\\.?(/|$)"}}}],"terminal":false},`
+	// A path that cleaning would change — a dot segment or an empty one, which escapes get past the
+	// matcher's cleaning but not the strip's — is refused before any rewrite: stripping would miss
+	// the prefix and the app would resolve the path outside the new one.
+	unclean := `{"group":"path","handle":[{"handler":"static_response","status_code":400}],` +
+		`"match":[{"vars_regexp":{"{http.request.uri.path}":{"pattern":"(^|/)\\.\\.?(/|$)|//"}}}],"terminal":false},`
 	// The path itself is replaced whole; below it the prefix is stripped the way the matcher compares
 	// (no case, no escapes) and the new one put in front.
-	if h := handle(0); h != `[{"handler":"subroute","routes":[`+dotSegments+
+	if h := handle(0); h != `[{"handler":"subroute","routes":[`+unclean+
 		`{"group":"path","handle":[{"handler":"rewrite","uri":"/img"}],"match":[{"path":["/api/cn/images"]}],"terminal":false},`+
 		`{"group":"path","handle":[{"handler":"rewrite","path_regexp":[{"find":"^/","replace":"/img/"}],"strip_path_prefix":"/api/cn/images"}],"terminal":false}]},`+
 		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Gateway":["images"]}},"response":{"delete":["Set-Cookie"],`+
@@ -806,7 +809,7 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 		`"upstreams":[{"dial":"gw:8080"}]}]` {
 		t.Errorf("unexpected rewrite and headers: %s", h)
 	}
-	if h := handle(1); h != `[{"handler":"subroute","routes":[`+dotSegments+`{"group":"path","handle":[{"handler":"rewrite","strip_path_prefix":"/old"}],"terminal":false}]},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"]}},`+
+	if h := handle(1); h != `[{"handler":"subroute","routes":[`+unclean+`{"group":"path","handle":[{"handler":"rewrite","strip_path_prefix":"/old"}],"terminal":false}]},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"]}},`+
 		`"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},"upstreams":[{"dial":"gw:8081"}]}]` {
 		t.Errorf("unexpected strip: %s", h)
 	}
@@ -846,5 +849,21 @@ func TestConfigNamesAHostOnceInAMatcher(t *testing.T) {
 	redir, _ := json.Marshal(dig(m, "apps", "http", "servers", "http", "routes").([]any)[1].(map[string]any)["match"])
 	if string(redir) != `[{"host":["api.example.com"]}]` {
 		t.Errorf("want the TLS host redirected, named once: %s", redir)
+	}
+}
+
+// uncleanPath finds exactly what cleaning a decoded path would change.
+func TestUncleanPathIsWhatCleaningChanges(t *testing.T) {
+	re := regexp.MustCompile(uncleanPath)
+	for p, unclean := range map[string]bool{
+		"/api/images/x": false, "/api/images/": false, "/": false, "/a/.well-known/b": false, "/a/..b/c.": false,
+		"/x/../api": true, "/./api": true, "/api/..": true, "/api/.": true, "//api/x": true, "/api//images": true, "/api/images//": true,
+	} {
+		if re.MatchString(p) != unclean {
+			t.Errorf("%s: unclean %v, want %v", p, !unclean, unclean)
+		}
+		if clean := path.Clean(p); !unclean && clean != strings.TrimSuffix(p, "/") && p != "/" {
+			t.Errorf("%s is called clean, but cleaning makes it %s", p, clean)
+		}
 	}
 }

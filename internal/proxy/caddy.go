@@ -382,6 +382,10 @@ func addHost(hosts []string, h string) []string {
 	return append(hosts, h)
 }
 
+// uncleanPath finds, in a decoded path, what cleaning would change: a `.` or `..` segment, or an
+// empty one.
+const uncleanPath = `(^|/)\.\.?(/|$)|//`
+
 // routeMatch is the host and, for a route under a path, the path itself and everything below it —
 // not every path that merely starts with the same letters (`/img` must not take `/images`).
 func routeMatch(r Route) match {
@@ -396,12 +400,13 @@ func routeMatch(r Route) match {
 func routeHandle(r Route) []handler {
 	var hs []handler
 	if r.StripPath || r.PathRewrite != "" {
-		// The rewrite must take every request the path matcher let in. Caddy matches the decoded path
-		// without regard to case, cleaned of dot segments; strip_path_prefix compares the same way but
-		// cleans the escaped path, where `%2e%2e` is no dot segment: `/x/%2e%2e/api/y` matches `/api`,
-		// is not stripped, and the app resolves it outside the new prefix. No browser sends a dot
-		// segment, so such a request is refused (400) rather than passed on unrewritten.
-		routes := []caddyRoute{{Group: "path", Match: []match{{VarsRegexp: map[string]varRegexp{"{http.request.uri.path}": {Pattern: `(^|/)\.\.?(/|$)`}}}},
+		// The rewrite must take exactly the requests the path matcher lets in. Caddy matches the decoded
+		// path cleaned of dot and empty segments, without regard to case; strip_path_prefix compares the
+		// same way, but cleans the escaped path, where `%2e%2e` is no dot segment and `%2F/` no double
+		// slash. On a path that is already clean the two agree, letter for letter — so only such a
+		// path is rewritten, and any other is refused (400) rather than passed on with its prefix
+		// unstripped, where the app would resolve it outside the new one. Browsers send clean paths.
+		routes := []caddyRoute{{Group: "path", Match: []match{{VarsRegexp: map[string]varRegexp{"{http.request.uri.path}": {Pattern: uncleanPath}}}},
 			Handle: []handler{{Handler: "static_response", StatusCode: 400}}}}
 		if r.StripPath {
 			routes = append(routes, caddyRoute{Group: "path", Handle: []handler{{Handler: "rewrite", StripPathPrefix: r.Path}}})

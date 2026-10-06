@@ -579,12 +579,16 @@ func TestParsePortRouting(t *testing.T) {
 		return app + "ports: [{name: p, port: 1, host: h.example.com, " + extra + "}]\n"
 	}
 	rejects := map[string]string{
-		port("path: api"):        "absolute prefix",
-		port("path: /api/"):      "absolute prefix",
-		port("path: '/a b'"):     "absolute prefix",
-		port("path: /a%20b"):     "escape",
-		port("strip_path: true"): "need path",
-		port("path_rewrite: /x"): "need path",
+		port("path: api"):                       "absolute prefix",
+		port("path: /api/"):                     "absolute prefix",
+		port("path: '/a b'"):                    "absolute prefix",
+		port("path: /a%20b"):                    "escape",
+		port("path: /a/./b"):                    ". or .. segment",
+		port("path: /a/.."):                     ". or .. segment",
+		port("path: /a, path_rewrite: /x/../y"): ". or .. segment",
+		app + "tls: true\ncert: {domains: ['*.other.com'], dns: cloudflare, email: a@b.c}\nports: [{name: w, port: 1, host: '*.example.com'}]\n": "needs a cert",
+		port("strip_path: true"):                                                                        "need path",
+		port("path_rewrite: /x"):                                                                        "need path",
 		port("path: /a, strip_path: true, path_rewrite: /b"):                                            "give one",
 		port("path: /a, path_rewrite: b"):                                                               "path_rewrite",
 		port("headers: {request: {'Bad Name': x}}"):                                                     "not a header name",
@@ -603,6 +607,10 @@ func TestParsePortRouting(t *testing.T) {
 		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want error containing %q, got %v", in, want, err)
 		}
+	}
+	// A dot inside a segment is a name, not a dot segment.
+	if _, err := Parse([]byte(port("path: /.well-known/x..y, path_rewrite: /v1.0"))); err != nil {
+		t.Errorf("dots inside segments must parse: %v", err)
 	}
 	// One host on different paths is fine within an app.
 	if _, err := Parse([]byte(app + "ports: [{name: a, port: 1, host: h, path: /x}, {name: b, port: 2, host: h}]\n")); err != nil {

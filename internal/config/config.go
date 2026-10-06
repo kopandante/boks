@@ -450,12 +450,8 @@ func (c *Config) validate() error {
 	if err := c.Cert.validate(); err != nil {
 		return err
 	}
-	// HTTP-01, which serves every other TLS host, cannot issue a wildcard: one is served with the
-	// certificate of `cert:` over DNS-01, or not with TLS.
-	for _, p := range c.Ports {
-		if strings.HasPrefix(p.Host, "*.") && c.TLS && !c.Cert.Covers(p.Host) {
-			return fmt.Errorf("ports[%s]: %s needs a cert: block whose domains include it — a wildcard cannot be issued over HTTP-01", p.Name, p.Host)
-		}
+	if err := c.CheckWildcards(); err != nil {
+		return err
 	}
 	if err := c.validateRegistry(); err != nil {
 		return err
@@ -686,6 +682,18 @@ func (c *Config) validateLists() error {
 	return nil
 }
 
+// CheckWildcards refuses a wildcard host served with TLS outside the certificate of `cert:`: HTTP-01,
+// which serves every other TLS host, cannot issue a wildcard. A rollback asks it too, for it serves
+// the ports of the release with today's TLS and certificate.
+func (c *Config) CheckWildcards() error {
+	for _, p := range c.Ports {
+		if strings.HasPrefix(p.Host, "*.") && c.TLS && !c.Cert.Covers(p.Host) {
+			return fmt.Errorf("ports[%s]: %s needs a cert: block whose domains include it — a wildcard cannot be issued over HTTP-01", p.Name, p.Host)
+		}
+	}
+	return nil
+}
+
 func (p Port) validate() error {
 	if !nameRe.MatchString(p.Name) {
 		return fmt.Errorf("ports: name %q must match %s", p.Name, nameRe)
@@ -701,6 +709,13 @@ func (p Port) validate() error {
 	}
 	if p.Path != "" && !pathRe.MatchString(p.Path) {
 		return fmt.Errorf("ports[%s]: path %q must be an absolute prefix without a trailing slash, such as /api", p.Name, p.Path)
+	}
+	// Caddy cleans the request's path before matching it, not the pattern: a pattern with a dot
+	// segment matches nothing, and a rewrite to one lands where the app resolves it.
+	for _, v := range []string{p.Path, p.PathRewrite} {
+		if v != "" && (strings.Contains(v+"/", "/./") || strings.Contains(v+"/", "/../")) {
+			return fmt.Errorf("ports[%s]: %q cannot hold a . or .. segment", p.Name, v)
+		}
 	}
 	// With `%` in it Caddy compares the path escaped, segment by segment, and `/a%20b/*` no longer
 	// takes everything below the prefix — only one segment.
