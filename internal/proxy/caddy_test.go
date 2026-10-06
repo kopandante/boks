@@ -220,8 +220,8 @@ func TestConfigKeepsStreamsAcrossAReload(t *testing.T) {
 			t.Fatalf("%s: want one route, got %v", srv, routes)
 		}
 		h := dig(routes[0], "handle").([]any)[0]
-		if d := dig(h, "stream_close_delay"); d != streamCloseDelay {
-			t.Errorf("%s: want stream_close_delay %s, got %v", srv, streamCloseDelay, d)
+		if d := dig(h, "stream_close_delay"); d != "24h" {
+			t.Errorf("%s: want stream_close_delay 24h, got %v", srv, d)
 		}
 		// And a copy that takes a request and sends no headers gets a 504 at kamal-proxy's 30s, not never.
 		if d := dig(h, "transport", "response_header_timeout"); d != "30s" || dig(h, "transport", "protocol") != "http" {

@@ -82,8 +82,13 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 		fmt.Fprintln(log, "the proxy is Caddy already")
 		return proxy.Boot(ctx, r, log, image)
 	case state != "running":
-		return fmt.Errorf("%s is %s, and its routes are read from it: `docker start %s`, then migrate again; nothing was changed",
-			proxy.Container, state, proxy.Container)
+		// kamal-proxy stopped under its own name: a migration cut after stopping it and before moving it
+		// aside, or a stop by hand. Its routes are read from it, and it is what serves until Caddy
+		// does, so it is started first.
+		fmt.Fprintf(log, "kamal-proxy is %s (an earlier migration may have been cut after stopping it): starting it, then migrating\n", state)
+		if err := restoreKamal(context.WithoutCancel(ctx), r, log); err != nil {
+			return err
+		}
 	}
 	apps, err := recordedApps(ctx, r)
 	if err != nil {
@@ -173,6 +178,11 @@ func restoreKamal(ctx context.Context, r remote.Runner, log io.Writer) error {
 	}
 	if err == nil && state == "" {
 		_, err = r.Run(ctx, "docker", "rename", asideName, proxy.Container)
+	} else if err == nil {
+		// kamal-proxy under its own name, where a failed stop may still be finishing: `docker start` on
+		// a container still stopping does nothing, and the stop ends it after. Stopped first — at once
+		// when it already is — then started.
+		_, err = r.Run(ctx, "docker", "stop", proxy.Container)
 	}
 	if err == nil {
 		_, err = r.Run(ctx, "docker", "start", proxy.Container)

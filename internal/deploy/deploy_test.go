@@ -663,8 +663,6 @@ func (f *fake) at(prefix string) int {
 }
 
 const (
-	deployVia  = "docker exec boks-proxy kamal-proxy deploy "
-	removeVia  = "docker exec boks-proxy kamal-proxy remove "
 	legacyLeft = "docker volume ls --quiet --filter name=^demo-data$"
 	legacyUse  = "docker ps -a --filter volume=demo-data"
 )

@@ -146,11 +146,27 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := MigrateProxy(context.Background(), g, &log, "img", fixed); err != nil || g.has("docker create") || g.has("docker pull") {
 		t.Errorf("no proxy, nothing to move: %v %v", err, g.calls)
 	}
-	// A stopped kamal-proxy cannot say where its routes go.
-	h := kamalServer()
-	h.out[proxyState] = "exited\t"
-	if err := MigrateProxy(context.Background(), h, &log, "img", fixed); err == nil || h.has("docker rename") {
-		t.Errorf("want a refusal, got %v", err)
+}
+
+// kamal-proxy stopped under its own name — a migration cut after stopping it, before moving it aside —
+// is started again and migrated, not left down.
+func TestMigrateResumesAfterACutStop(t *testing.T) {
+	f := kamalServer()
+	f.out[proxyState] = "exited\t"
+	inner := f.onRun
+	f.onRun = func(cmd string) {
+		if cmd == "docker start boks-proxy" && f.out[proxyState] == "exited\t" {
+			f.out[proxyState] = "running\t"
+			return
+		}
+		inner(cmd)
+	}
+	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	started, read, created := f.at("docker start boks-proxy"), f.at(kamalList), f.at("docker create --name boks-proxy")
+	if started < 0 || read < started || created < read {
+		t.Errorf("want kamal-proxy started, its routes read, then Caddy: %d %d %d %v", started, read, created, f.calls)
 	}
 }
 
@@ -264,6 +280,10 @@ func TestMigratePutsKamalBackAfterALostRename(t *testing.T) {
 	if err := MigrateProxy(context.Background(), g, io.Discard, "img", fixed); err == nil || g.has("docker rename boks-proxy.kamal") || !g.has("docker start boks-proxy") {
 		t.Errorf("want kamal-proxy started where it is: %v %v", err, g.calls)
 	}
+	// A stop that may still be finishing is waited for: stopped again, then started.
+	if stop, start := g.lastAt("docker stop boks-proxy"), g.lastAt("docker start boks-proxy"); start < stop {
+		t.Errorf("want stop, then start: %v", g.calls)
+	}
 }
 
 // Fragments are exactly what kamal-proxy serves: what an earlier, cut migration left is removed before
@@ -340,6 +360,15 @@ func TestMigrateRefusesWhileAFirstDeployRuns(t *testing.T) {
 func TestMigrateStartsKamalAgainAfterAFailedStop(t *testing.T) {
 	f := kamalServer()
 	f.fail["docker stop boks-proxy"] = errors.New("connection lost")
+	inner, stops := f.onRun, 0
+	f.onRun = func(cmd string) {
+		inner(cmd)
+		if cmd == "docker stop boks-proxy" {
+			if stops++; stops > 1 {
+				delete(f.fail, "docker stop boks-proxy") // the connection is back for the next call
+			}
+		}
+	}
 	err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed)
 	if err == nil || !strings.Contains(err.Error(), "stopping kamal-proxy") || !f.has("docker start boks-proxy") || f.has("docker rename") {
 		t.Errorf("want kamal-proxy started where it is: %v %v", err, f.calls)
