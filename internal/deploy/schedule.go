@@ -28,7 +28,8 @@ const runnerPath = ".boks/bin/boks-job"
 // lock (the serving copy is about to change), when the release has no such job (cron still carries a
 // line of the release before), when the copy is not running, and while the previous run of the same
 // job is still going. The command reaches the container on stdin, so nothing in it is ever quoted by
-// a shell or by cron (whose `%` would otherwise end the line). Logs are capped by rotating at 1 MB.
+// a shell or by cron (whose `%` would otherwise end the line). A log past 1 MB is moved to `.log.1` when
+// the next run starts, so the log keeps at most two files; one run's own output is not cut short.
 const runner = `#!/bin/sh
 # boks-job <app> <job> — written by boks; runs a scheduled job in the copy of <app> that serves now.
 app=$1 job=$2
