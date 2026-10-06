@@ -15,8 +15,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kopandante/boks/internal/hostname"
+	"golang.org/x/net/idna"
 	"gopkg.in/yaml.v3"
 )
 
@@ -607,12 +609,20 @@ func (c *Cert) Covers(host string) bool {
 }
 
 // Slug names the certificate files. lego writes one SAN certificate for the whole domain list,
-// named after the first entry with `*` replaced by `_`.
+// named after the first entry as its SanitizedName (lego v5, cmd/internal/storage) does: `:` to `-`,
+// `*` to `_`, then idna.ToASCII — a domain in Unicode is a file in punycode — and only letters,
+// digits and `-_.@` kept.
 func (c *Cert) Slug() string {
 	if c == nil || len(c.Domains) == 0 {
 		return ""
 	}
-	return strings.ReplaceAll(c.Domains[0], "*", "_")
+	name := strings.NewReplacer(":", "-", "*", "_").Replace(c.Domains[0])
+	if ascii, err := idna.ToASCII(name); err == nil {
+		name = ascii
+	}
+	return strings.Join(strings.FieldsFunc(name, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '-' && r != '_' && r != '.' && r != '@'
+	}), "")
 }
 
 // LegoPath is the local lego state directory, resolved against the config's own directory.
