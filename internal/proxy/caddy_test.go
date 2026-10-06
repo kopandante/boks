@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // disk is a server as far as the proxy's state goes: files under Dir, the proxy container's state
@@ -154,14 +158,24 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 	}
 	m := decoded(t, b)
 	https, http := dig(m, "apps", "http", "servers", "https"), dig(m, "apps", "http", "servers", "http")
-	if l := dig(https, "listen").([]any); l[0] != ":443" || len(dig(https, "routes").([]any)) != 3 {
-		t.Errorf("want the three TLS hosts on 443: %v", https)
+	if l := dig(https, "listen").([]any); l[0] != ":443" || len(dig(https, "routes").([]any)) != 4 {
+		t.Errorf("want the three TLS hosts on 443, then the 404 for any other: %v", https)
+	}
+	if last, _ := json.Marshal(dig(https, "routes").([]any)[3]); string(last) != `{"handle":[{"handler":"static_response","status_code":404}],"terminal":true}` {
+		t.Errorf("want HTTPS for a host no route names answered 404: %s", last)
 	}
 	if p, _ := json.Marshal(dig(https, "protocols")); string(p) != `["h1","h2"]` {
 		t.Errorf("want no HTTP/3 on a port whose udp is not published: %s", p)
 	}
-	if l := dig(http, "listen").([]any); l[0] != ":80" || len(dig(http, "routes").([]any)) != 1 {
-		t.Errorf("want the plain host alone on 80: %v", http)
+	if l := dig(http, "listen").([]any); l[0] != ":80" || len(dig(http, "routes").([]any)) != 3 {
+		t.Errorf("want the plain host on 80, the TLS hosts' redirect, then the 404: %v", http)
+	}
+	// Caddy adds redirects of its own before the 404 only while it manages some certificate; with
+	// every TLS host under `cert:` it would not, so boks's redirect is what keeps plain HTTP for
+	// them from answering 404.
+	redir, _ := json.Marshal(dig(http, "routes").([]any)[1])
+	if want := `{"handle":[{"handler":"static_response","headers":{"Location":["https://{http.request.host}{http.request.uri}"]},"status_code":308}],"match":[{"host":["auto.example.com","w1.example.com","w2.example.com"],"not":[{"host":["plain.example.com"]}]}],"terminal":true}`; string(redir) != want {
+		t.Errorf("want plain HTTP for the TLS hosts redirected:\n got %s\nwant %s", redir, want)
 	}
 	if s, _ := json.Marshal(dig(https, "automatic_https", "skip_certificates")); string(s) != `["w1.example.com","w2.example.com"]` {
 		t.Errorf("want the hosts under the certificate kept out of ACME: %s", s)
@@ -180,6 +194,30 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 	plain, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "p.example.com", Dial: "a:1"}}}})
 	if pm := decoded(t, plain); dig(pm, "apps", "http", "servers", "https") != nil || dig(pm, "apps", "tls") != nil {
 		t.Errorf("want plain HTTP only: %s", plain)
+	}
+}
+
+// With TLS hosts alone, 80 is still boks's own server — the redirect, then the 404 — and Caddy's
+// redirects are off: its server of its own on 80 would redirect every host, known or not, and
+// nothing boks puts ahead of routes would run there.
+func TestConfigOwnsPort80BesideTLS(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decoded(t, b)
+	routes, _ := json.Marshal(dig(m, "apps", "http", "servers", "http", "routes"))
+	if want := `[{"handle":[{"handler":"static_response","headers":{"Location":["https://{http.request.host}{http.request.uri}"]},"status_code":308}],"match":[{"host":["a.example.com"]}],"terminal":true},{"handle":[{"handler":"static_response","status_code":404}],"terminal":true}]`; string(routes) != want {
+		t.Errorf("want 80 to redirect the TLS host and 404 the rest:\n got %s\nwant %s", routes, want)
+	}
+	if l, _ := json.Marshal(dig(m, "apps", "http", "servers", "http", "listen")); string(l) != `[":80"]` {
+		t.Errorf("want boks's own server on 80: %s", l)
+	}
+	if dig(m, "apps", "http", "servers", "http", "logs") == nil {
+		t.Errorf("want 80 logging its requests like 443")
+	}
+	if d := dig(m, "apps", "http", "servers", "https", "automatic_https", "disable_redirects"); d != true {
+		t.Errorf("want Caddy's own redirects off: %v", d)
 	}
 }
 
@@ -217,8 +255,9 @@ func TestConfigKeepsStreamsAcrossAReload(t *testing.T) {
 	}
 	for _, srv := range []string{"http", "https"} {
 		routes, _ := dig(decoded(t, b), "apps", "http", "servers", srv, "routes").([]any)
-		if len(routes) != 1 {
-			t.Fatalf("%s: want one route, got %v", srv, routes)
+		// The app's route comes first; what follows is boks's own (the 404 for any other host).
+		if len(routes) == 0 {
+			t.Fatalf("%s: want the app's route, got none", srv)
 		}
 		h := dig(routes[0], "handle").([]any)[0]
 		if d := dig(h, "stream_close_delay"); d != "24h" {
@@ -300,6 +339,38 @@ func TestSetRoutesCatchesUpALaggingFragment(t *testing.T) {
 	reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
 	if err != nil || reloaded || d.ran("docker exec") || d.files[Dir+"/routes/demo.json"] == "" {
 		t.Errorf("want the fragment written and no reload: %v %v %v", reloaded, err, d.calls)
+	}
+}
+
+// A lagging fragment that differs from the new routes only in what C2–C4 added — the path, the
+// rewrite, a header — is still caught up: it is what the next run of any app assembles from.
+func TestSetRoutesCatchesUpAFragmentThatDiffersOnlyInRouting(t *testing.T) {
+	nosniff := &Headers{Response: map[string]string{"X-Content-Type-Options": "nosniff"}}
+	stripped := []Route{{Host: "demo.example.com", Path: "/api", StripPath: true, Dial: "demo:3000", Headers: nosniff}}
+	rewritten := []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/img", Dial: "demo:3000",
+		Headers: &Headers{Request: map[string]string{"Cookie": ""}, Response: map[string]string{"X-Content-Type-Options": "nosniff"}}}}
+	for name, c := range map[string]struct{ routed, old []Route }{
+		"path":    {stripped, []Route{{Host: "demo.example.com", Path: "/v1", StripPath: true, Dial: "demo:3000", Headers: nosniff}}},
+		"strip":   {stripped, []Route{{Host: "demo.example.com", Path: "/api", Dial: "demo:3000", Headers: nosniff}}},
+		"headers": {stripped, []Route{{Host: "demo.example.com", Path: "/api", StripPath: true, Dial: "demo:3000"}}},
+		"rewrite": {rewritten, []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/old", Dial: "demo:3000", Headers: rewritten[0].Headers}}},
+		"request header value": {rewritten, []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/img", Dial: "demo:3000",
+			Headers: &Headers{Request: map[string]string{"Cookie": "x"}, Response: rewritten[0].Headers.Response}}}},
+		"response header value": {rewritten, []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/img", Dial: "demo:3000",
+			Headers: &Headers{Request: rewritten[0].Headers.Request, Response: map[string]string{"X-Content-Type-Options": ""}}}}},
+	} {
+		d := newDisk()
+		body, _ := Config([]Fragment{{App: "demo", Routes: c.routed}})
+		d.files[Dir+"/caddy.json"] = string(body)
+		frag, _ := json.MarshalIndent(Fragment{App: "demo", Routes: c.old}, "", "  ")
+		d.files[Dir+"/routes/demo.json"] = string(frag) + "\n"
+		if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", c.routed); err != nil {
+			t.Fatal(err)
+		}
+		fs, _ := Fragments(context.Background(), d)
+		if !reflect.DeepEqual(Of(fs, "demo"), c.routed) {
+			t.Errorf("%s: want the fragment caught up, got %+v", name, Of(fs, "demo"))
+		}
 	}
 }
 
@@ -443,6 +514,9 @@ func TestConfigPutsAWildcardAfterTheExactHosts(t *testing.T) {
 	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
 	var hosts []any
 	for _, rt := range routes {
+		if dig(rt, "match") == nil {
+			continue // the 404 for any other host
+		}
 		hosts = append(hosts, dig(rt, "match").([]any)[0].(map[string]any)["host"].([]any)[0])
 	}
 	if len(hosts) != 3 || hosts[0] != "api.example.com" || hosts[1] != "zz.example.com" || hosts[2] != "*.example.com" {
@@ -463,10 +537,10 @@ func TestConfigWildcardWithoutTLSLeavesTheTLSHostsItCovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
-	last := dig(routes[len(routes)-1], "match").([]any)[0].(map[string]any)
+	last := matchFor(routes, "*.example.com")
 	not, _ := last["not"].([]any)
-	if last["host"].([]any)[0] != "*.example.com" || len(not) != 1 {
-		t.Fatalf("want the wildcard last, with one negated set: %v", last)
+	if last == nil || len(not) != 1 {
+		t.Fatalf("want the wildcard with one negated set: %v", routes)
 	}
 	got := fmt.Sprint(not[0].(map[string]any)["host"])
 	if got != "[API.example.com b.example.com]" {
@@ -505,11 +579,24 @@ func TestConfigWildcardWithTLSLeavesThePlainHostsItCovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)
-	last := dig(routes[len(routes)-1], "match").([]any)[0].(map[string]any)
+	last := matchFor(routes, "*.example.com")
 	not, _ := last["not"].([]any)
-	if last["host"].([]any)[0] != "*.example.com" || len(not) != 1 || fmt.Sprint(not[0].(map[string]any)["host"]) != "[api.example.com]" {
+	if last == nil || len(not) != 1 || fmt.Sprint(not[0].(map[string]any)["host"]) != "[api.example.com]" {
 		t.Errorf("want the TLS wildcard to leave out the plain exact host only: %v", last)
 	}
+}
+
+// matchFor is the matcher set of the route for host among routes — not the last route: boks's own
+// (the redirect, the 404 for any other host) come after the apps'.
+func matchFor(routes []any, host string) map[string]any {
+	for _, rt := range routes {
+		if m, ok := dig(rt, "match").([]any); ok {
+			if set := m[0].(map[string]any); set["host"] != nil && set["host"].([]any)[0] == host {
+				return set
+			}
+		}
+	}
+	return nil
 }
 
 // peek is a disk that keeps what the config Validate asked about said when Caddy was asked.
@@ -623,4 +710,216 @@ func index(calls []string, prefix string) int {
 		}
 	}
 	return -1
+}
+
+// Caddy takes the first route that matches: exact hosts come before wildcards, on one host the longer
+// path before the shorter and the bare host last, and whatever no route names gets 404 — which is
+// what kamal-proxy answered and not Caddy's own empty 200.
+func TestConfigOrdersRoutesSoTheMostSpecificWins(t *testing.T) {
+	b, err := Config([]Fragment{
+		{App: "site", Routes: []Route{{Host: "cars.example.com", Dial: "site:3000"}, {Host: "*.example.com", Dial: "site:3001"}}},
+		{App: "gw", Routes: []Route{{Host: "cars.example.com", Path: "/api/cn/images", Dial: "gw:8080"}}},
+		{App: "api", Routes: []Route{{Host: "api.example.com", Dial: "api:1"}, {Host: "cars.example.com", Path: "/api", Dial: "api:2"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any) {
+		m, _ := json.Marshal(r.(map[string]any)["match"])
+		got = append(got, string(m))
+	}
+	want := []string{
+		`[{"host":["api.example.com"]}]`,
+		`[{"host":["cars.example.com"],"path":["/api/cn/images","/api/cn/images/*"]}]`,
+		`[{"host":["cars.example.com"],"path":["/api","/api/*"]}]`,
+		`[{"host":["cars.example.com"]}]`,
+		`[{"host":["*.example.com"]}]`,
+		`null`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("routes in this order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// Without a TLS host the last route on 80 is still the 404 for a host no route names.
+	routes := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
+	if last, _ := json.Marshal(routes[len(routes)-1]); string(last) != `{"handle":[{"handler":"static_response","status_code":404}],"terminal":true}` {
+		t.Errorf("want the 404 last on a plain-only server: %s", last)
+	}
+	// Host and path are unique together, across apps.
+	if _, err := Config([]Fragment{
+		{App: "a", Routes: []Route{{Host: "h.example.com", Path: "/x", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "H.example.com", Path: "/x", Dial: "b:1"}}},
+	}); err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
+		t.Errorf("want a refusal of one host and path routed twice, got %v", err)
+	}
+	// Caddy matches paths without regard to case: the same path in capitals is the same route.
+	if _, err := Config([]Fragment{
+		{App: "a", Routes: []Route{{Host: "h.example.com", Path: "/img", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "h.example.com", Path: "/Img", Dial: "b:1"}}},
+	}); err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
+		t.Errorf("want a refusal of one path in two cases, got %v", err)
+	}
+	// A bare host in capitals still goes after a path of the same host; by spelling it would sort
+	// first and take the path's requests.
+	b, err = Config([]Fragment{
+		{App: "a", Routes: []Route{{Host: "API.example.com", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "api.example.com", Path: "/images", Dial: "b:1"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := json.Marshal(dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)[0].(map[string]any)["match"])
+	if string(first) != `[{"host":["api.example.com"],"path":["/images","/images/*"]}]` {
+		t.Errorf("want the path before the bare host whatever the case: %s", first)
+	}
+}
+
+// Routes of one host from different apps share its TLS mode: a path without TLS on a TLS host would
+// be served on 80 alone, and HTTPS for it would go to the host's other routes.
+func TestConfigRefusesAHostWithAndWithoutTLS(t *testing.T) {
+	for _, fs := range [][]Fragment{
+		{{App: "a", Routes: []Route{{Host: "h.example.com", Dial: "a:1", TLS: true}}}, {App: "b", Routes: []Route{{Host: "h.example.com", Path: "/b", Dial: "b:1"}}}},
+		{{App: "b", Routes: []Route{{Host: "h.example.com", Path: "/b", Dial: "b:1"}}}, {App: "a", Routes: []Route{{Host: "H.example.com", Dial: "a:1", TLS: true}}}},
+	} {
+		if _, err := Config(fs); err == nil || !strings.Contains(err.Error(), "with TLS by a and without it by b") {
+			t.Errorf("want the mixed host refused, got %v", err)
+		}
+	}
+}
+
+// A route rewrites the path when it asks — strip the prefix, or put another in its place, measured on
+// boks-lab to keep the query — and changes headers on the request and the response; "" removes one.
+func TestConfigRewritesPathsAndHeaders(t *testing.T) {
+	b, err := Config([]Fragment{{App: "gw", Routes: []Route{
+		{Host: "cars.example.com", Path: "/api/cn/images", PathRewrite: "/img", Dial: "gw:8080",
+			Headers: &Headers{Request: map[string]string{"Cookie": "", "X-Gateway": "images"}, Response: map[string]string{"Set-Cookie": "", "X-Content-Type-Options": "nosniff"}}},
+		{Host: "cars.example.com", Path: "/old", StripPath: true, Dial: "gw:8081"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
+	handle := func(i int) string {
+		h, _ := json.Marshal(routes[i].(map[string]any)["handle"])
+		return string(h)
+	}
+	// A path that cleaning would change — a dot segment or an empty one, which escapes get past the
+	// matcher's cleaning but not the strip's — is refused before any rewrite: stripping would miss
+	// the prefix and the app would resolve the path outside the new one.
+	unclean := `{"group":"path","handle":[{"handler":"static_response","status_code":400}],` +
+		`"match":[{"vars_regexp":{"{http.request.uri.path}":{"pattern":"(^|/)\\.\\.?(/|$)|//|[\\x{130}\\x{212A}]"}}}],"terminal":false},`
+	// The path itself is replaced whole; below it the prefix is stripped the way the matcher compares
+	// (no case, no escapes) and the new one put in front.
+	if h := handle(0); h != `[{"handler":"subroute","routes":[`+unclean+
+		`{"group":"path","handle":[{"handler":"rewrite","uri":"/img"}],"match":[{"path":["/api/cn/images"]}],"terminal":false},`+
+		`{"group":"path","handle":[{"handler":"rewrite","path_regexp":[{"find":"^/","replace":"/img/"}],"strip_path_prefix":"/api/cn/images"}],"terminal":false}]},`+
+		// The response's changes in a headers handler applied as the response is written, so the 101 of
+		// a WebSocket handshake gets them too; reverse_proxy's own skip it.
+		`{"handler":"headers","response":{"deferred":true,"delete":["Set-Cookie"],"set":{"X-Content-Type-Options":["nosniff"]}}},`+
+		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Gateway":["images"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
+		`"upstreams":[{"dial":"gw:8080"}]}]` {
+		t.Errorf("unexpected rewrite and headers: %s", h)
+	}
+	if h := handle(1); h != `[{"handler":"subroute","routes":[`+unclean+`{"group":"path","handle":[{"handler":"rewrite","strip_path_prefix":"/old"}],"terminal":false}]},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"]}},`+
+		`"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},"upstreams":[{"dial":"gw:8081"}]}]` {
+		t.Errorf("unexpected strip: %s", h)
+	}
+	// `$` in the new prefix is a character of the path, not a regexp group.
+	q, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "h", Path: "/v1.0", PathRewrite: "/v$1", Dial: "a:1"}}}})
+	if !strings.Contains(string(q), `"replace": "/v$$1/"`) || !strings.Contains(string(q), `"uri": "/v$1"`) {
+		t.Errorf("want $ literal in the rewrite: %s", q)
+	}
+}
+
+// A host routed on several paths, or spelled in two cases, is one host to Caddy, which refuses a host
+// matcher that names one twice: the wildcard's exclusions, the redirect on 80 and the ACME skip list
+// name it once.
+func TestConfigNamesAHostOnceInAMatcher(t *testing.T) {
+	cert := &CertFiles{Certificate: "/certs/boks/x.crt", Key: "/certs/boks/x.key"}
+	b, err := Config([]Fragment{
+		{App: "plain", Routes: []Route{{Host: "*.example.com", Dial: "p:1"}}},
+		{App: "tls", Routes: []Route{
+			{Host: "api.example.com", Path: "/one", Dial: "t:1", TLS: true, Cert: cert},
+			{Host: "API.example.com", Path: "/two", Dial: "t:2", TLS: true, Cert: cert},
+			{Host: "api.example.com", Dial: "t:3", TLS: true, Cert: cert},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decoded(t, b)
+	all, _ := json.Marshal(m)
+	for _, want := range []string{
+		`"not":[{"host":["api.example.com"]}]`, // the plain wildcard leaves the TLS host out, once
+		`"skip_certificates":["api.example.com"]`,
+	} {
+		if !strings.Contains(string(all), want) {
+			t.Errorf("want %s in %s", want, all)
+		}
+	}
+	redir, _ := json.Marshal(dig(m, "apps", "http", "servers", "http", "routes").([]any)[1].(map[string]any)["match"])
+	if string(redir) != `[{"host":["api.example.com"]}]` {
+		t.Errorf("want the TLS host redirected, named once: %s", redir)
+	}
+}
+
+// uncleanPath finds exactly what cleaning a decoded path would change.
+func TestUncleanPathIsWhatCleaningChanges(t *testing.T) {
+	re := regexp.MustCompile(uncleanPath)
+	for p, unclean := range map[string]bool{
+		"/api/images/x": false, "/api/images/": false, "/": false, "/a/.well-known/b": false, "/a/..b/c.": false,
+		"/x/../api": true, "/./api": true, "/api/..": true, "/api/.": true, "//api/x": true, "/api//images": true, "/api/images//": true,
+		"/\u212Aey/x": true, "/ap\u0130/x": true, "/фото/Ä.jpg": false,
+	} {
+		if re.MatchString(p) != unclean {
+			t.Errorf("%s: unclean %v, want %v", p, !unclean, unclean)
+		}
+		if clean := path.Clean(p); !unclean && clean != strings.TrimSuffix(p, "/") && p != "/" {
+			t.Errorf("%s is called clean, but cleaning makes it %s", p, clean)
+		}
+	}
+}
+
+// The matcher lowercases the whole decoded path the way Go does; the strip folds ASCII byte by byte.
+// They disagree exactly on the characters that lowercase into ASCII, and uncleanPath refuses them all.
+func TestUncleanPathFoldsLikeTheMatcher(t *testing.T) {
+	re := regexp.MustCompile(uncleanPath)
+	for r := rune(0x80); r <= unicode.MaxRune; r++ {
+		if l := strings.ToLower(string(r)); l != string(r) && strings.IndexFunc(l, func(c rune) bool { return c < 0x80 }) >= 0 && !re.MatchString("/"+string(r)) {
+			t.Errorf("%U lowercases to %q, which the strip would not fold, and is let through", r, l)
+		}
+	}
+}
+
+// A fragment file opens with its format, which the boks of C1 cannot read as routes and stops at —
+// rather than reload the proxy without the paths and header rules it does not know. Files written
+// before the format are read as they are; a newer format is refused.
+func TestFragmentsCarryTheirFormat(t *testing.T) {
+	d := newDisk()
+	routed := []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/img", Dial: "demo:3000"}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", routed); err != nil {
+		t.Fatal(err)
+	}
+	written := d.files[Dir+"/routes/demo.json"]
+	if !strings.HasPrefix(written, fmt.Sprintf("%d\n{", FragmentFormat)) {
+		t.Fatalf("want the format first: %q", written)
+	}
+	// What C1 does with it: decode the stream as fragments.
+	type c1Fragment struct {
+		App    string            `json:"app"`
+		Routes []json.RawMessage `json:"routes"`
+	}
+	var f c1Fragment
+	if err := json.NewDecoder(strings.NewReader(written)).Decode(&f); err == nil {
+		t.Errorf("an older boks must stop at the format, read %+v", f)
+	}
+	d.files[Dir+"/routes/old.json"] = `{"app": "old", "routes": [{"host": "old.example.com", "dial": "old:1", "tls": false}]}` + "\n"
+	fs, err := Fragments(context.Background(), d)
+	if err != nil || len(fs) != 2 || fs[0].App != "demo" || !reflect.DeepEqual(fs[0].Routes, routed) || fs[1].App != "old" {
+		t.Fatalf("want both fragments, with and without a format: %+v %v", fs, err)
+	}
+	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", FragmentFormat+1)
+	if _, err := Fragments(context.Background(), d); err == nil || !strings.Contains(err.Error(), "newer than this boks") {
+		t.Errorf("want a newer format refused, got %v", err)
+	}
 }

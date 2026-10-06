@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -52,10 +53,26 @@ const (
 // server is the record of what the proxy serves.
 type Route struct {
 	Host string `json:"host"`
-	Dial string `json:"dial"`
-	TLS  bool   `json:"tls"`
+	// Path narrows the route to requests under a prefix — the path itself and anything below it; empty
+	// is the whole host. Routes of one host, from one app or several, differ by path.
+	Path string `json:"path,omitempty"`
+	// StripPath removes Path before the request reaches the app; PathRewrite puts another prefix in
+	// its place. At most one of them is set.
+	StripPath   bool   `json:"strip_path,omitempty"`
+	PathRewrite string `json:"path_rewrite,omitempty"`
+	Dial        string `json:"dial"`
+	TLS         bool   `json:"tls"`
 	// Cert is the certificate file pair of a host under `cert:`; nil leaves a TLS host to Caddy's ACME.
 	Cert *CertFiles `json:"cert,omitempty"`
+	// Headers are set on the request to the app and the response to the visitor; "" removes one.
+	Headers *Headers `json:"headers,omitempty"`
+}
+
+// Headers changes headers on the way to the app (Request) and back to the visitor (Response); an
+// empty value removes the header.
+type Headers struct {
+	Request  map[string]string `json:"request,omitempty"`
+	Response map[string]string `json:"response,omitempty"`
 }
 
 // CertFiles are the paths of a certificate and its key as the proxy sees them.
@@ -69,6 +86,12 @@ type Fragment struct {
 	App    string  `json:"app"`
 	Routes []Route `json:"routes"`
 }
+
+// FragmentFormat opens every fragment file boks writes, a number on its own line before the routes. The
+// boks of C1 reads the fragments as one stream of route objects and stops at the number with an error:
+// it would otherwise drop the paths, rewrites and header rules it does not know and reload the proxy
+// without them. A boks that finds a format newer than its own refuses the same way.
+const FragmentFormat = 2
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -86,8 +109,9 @@ func nextPath() string { return path.Join(Dir, "caddy.next.json") }
 // silently drop the second.
 //
 // Hosts with TLS go to a server on 443, where Caddy's automatic HTTPS obtains their certificates by
-// HTTP-01 and redirects their plain HTTP; a host under `cert:` is served with its file instead and
-// left out of ACME. Hosts without TLS go to a server on 80 alone, as kamal-proxy served them.
+// HTTP-01; a host under `cert:` is served with its file instead and left out of ACME. Hosts without
+// TLS go to a server on 80, as kamal-proxy served them, where boks's own route redirects plain HTTP
+// for the TLS hosts (Caddy's redirects are off) and a 404 answers any host no route names.
 //
 // There is no trusted_proxies: nothing trusted stands in front of boks, so Caddy sets X-Forwarded-For
 // to the address of the connection and drops what the visitor sent (#48) — its default.
@@ -97,37 +121,64 @@ func Config(fragments []Fragment) ([]byte, error) {
 		r   Route
 	}
 	var all []entry
+	// Caddy matches hosts and paths without regard to case, so the same host and path in other letters
+	// is the same route.
 	owner := map[string]string{}
+	// A host is served with TLS or without it, whichever app names it: a path without TLS on a host
+	// whose other paths have it would be routed on 80 only, and its HTTPS requests would go to the
+	// host's other routes.
+	type mode struct {
+		app string
+		tls bool
+	}
+	modes := map[string]mode{}
 	for _, f := range fragments {
 		for _, r := range f.Routes {
 			host := strings.ToLower(r.Host)
-			if o, ok := owner[host]; ok {
-				return nil, fmt.Errorf("host %s is routed by both %s and %s", r.Host, o, f.App)
+			key := host + " " + strings.ToLower(r.Path)
+			if o, ok := owner[key]; ok {
+				return nil, fmt.Errorf("host %s%s is routed by both %s and %s", r.Host, r.Path, o, f.App)
 			}
-			owner[host] = f.App
+			owner[key] = f.App
+			if m, ok := modes[host]; ok && m.tls != r.TLS {
+				with, without := m.app, f.App
+				if r.TLS {
+					with, without = f.App, m.app
+				}
+				return nil, fmt.Errorf("host %s is served with TLS by %s and without it by %s: one host is one or the other", r.Host, with, without)
+			}
+			modes[host] = mode{f.App, r.TLS}
 			all = append(all, entry{f.App, r})
 		}
 	}
-	// Hosts are unique, so ordering by host alone is total, whatever order the fragments came in. A
-	// wildcard goes after every exact host: Caddy takes the first route that matches, and kamal-proxy
-	// served an exact host before a wildcard that also covers it.
+	// Caddy takes the first route that matches, so the order is the routing rule: exact hosts before
+	// wildcards (`*` sorts before letters, and `*.example.com` would otherwise take `api.example.com`
+	// from the app that names it), and on one host the longer path before the shorter, the bare host
+	// last. Host and path are unique together, so the order is total whatever order the fragments came in.
 	sort.Slice(all, func(i, j int) bool {
-		wi, wj := strings.HasPrefix(all[i].r.Host, "*"), strings.HasPrefix(all[j].r.Host, "*")
-		if wi != wj {
-			return wj
+		a, b := all[i].r, all[j].r
+		if wa, wb := strings.HasPrefix(a.Host, "*."), strings.HasPrefix(b.Host, "*."); wa != wb {
+			return wb
 		}
-		return all[i].r.Host < all[j].r.Host
+		// In one case, or a bare host in capitals would sort before, and take, a path of the same host.
+		if ha, hb := strings.ToLower(a.Host), strings.ToLower(b.Host); ha != hb {
+			return ha < hb
+		}
+		if len(a.Path) != len(b.Path) {
+			return len(a.Path) > len(b.Path)
+		}
+		return a.Path < b.Path
 	})
 
 	// A wildcard and an exact host it covers can sit on different servers, one with TLS and one
 	// without, where the exact host comes before the wildcard no more: the wildcard would take plain
-	// HTTP for an exact host with TLS (Caddy redirects on :80 only after its own routes), or HTTPS for
+	// HTTP for an exact host with TLS (the redirect on :80 comes after the routes), or HTTPS for
 	// an exact host without it. kamal-proxy gave an exact host to its own app in either case; so does
 	// this, by keeping the exact hosts of the other mode out of the wildcard's match.
 	exact := map[bool][]string{}
 	for _, e := range all {
 		if !strings.HasPrefix(e.r.Host, "*") {
-			exact[e.r.TLS] = append(exact[e.r.TLS], e.r.Host)
+			exact[e.r.TLS] = addHost(exact[e.r.TLS], e.r.Host)
 		}
 	}
 
@@ -151,7 +202,7 @@ func Config(fragments []Fragment) ([]byte, error) {
 			}
 			servers[name] = s
 		}
-		m := match{Host: []string{e.r.Host}}
+		m := routeMatch(e.r)
 		if suffix, ok := strings.CutPrefix(strings.ToLower(e.r.Host), "*"); ok {
 			var covered []string
 			for _, h := range exact[!e.r.TLS] {
@@ -164,15 +215,8 @@ func Config(fragments []Fragment) ([]byte, error) {
 				m.Not = []match{{Host: covered}}
 			}
 		}
-		s.Routes = append(s.Routes, caddyRoute{
-			Match: []match{m},
-			Handle: []handler{{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: e.r.Dial}}, StreamCloseDelay: streamCloseDelay,
-				Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
-				// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on.
-				Headers: &proxyHeaders{Request: &headerOps{Delete: []string{"Forwarded"}}}}},
-			Terminal: true,
-		})
-		if e.r.TLS && e.r.Cert != nil {
+		s.Routes = append(s.Routes, caddyRoute{Match: []match{m}, Handle: routeHandle(e.r), Terminal: true})
+		if e.r.TLS && e.r.Cert != nil && !hasHost(skip, e.r.Host) {
 			// Left out of ACME by name rather than by Caddy noticing the loaded certificate covers it:
 			// what Caddy counts as covered is its rule, and an attempt at HTTP-01 for a host behind a
 			// wildcard is a failure in the log every few minutes, or a rate limit spent.
@@ -183,8 +227,45 @@ func Config(fragments []Fragment) ([]byte, error) {
 			}
 		}
 	}
-	if s := servers["https"]; s != nil && len(skip) > 0 {
-		s.AutoHTTPS = &autoHTTPS{SkipCertificates: skip}
+	// Plain HTTP for a TLS host is redirected to HTTPS, as kamal-proxy did, by boks's own route on 80
+	// rather than Caddy's: Caddy inserts its redirects where its own rules put them — only while it
+	// manages some certificate, or into a server of its own on 80 that knows nothing of the routes
+	// before it — and a 404 or a filter ahead of them would change what they do. So Caddy's are off,
+	// and 80 always exists beside 443: the TLS hosts' redirect, then the 404. ACME's HTTP-01
+	// challenges are answered before any route (server.go, HandleHTTPChallenge).
+	var tlsHosts []string
+	for _, e := range all {
+		if e.r.TLS {
+			tlsHosts = addHost(tlsHosts, e.r.Host)
+		}
+	}
+	if len(tlsHosts) > 0 {
+		s := servers["http"]
+		if s == nil {
+			s = &server{Listen: []string{":80"}, Logs: &struct{}{}}
+			servers["http"] = s
+		}
+		// A host without TLS under a TLS wildcard keeps its own 404 for paths it does not route: it is
+		// not served over HTTPS, where the wildcard leaves it out.
+		redirect := match{Host: tlsHosts}
+		if len(exact[false]) > 0 {
+			redirect.Not = []match{{Host: exact[false]}}
+		}
+		s.Routes = append(s.Routes, caddyRoute{Match: []match{redirect}, Handle: []handler{{Handler: "static_response",
+			StatusCode: 308, Headers: map[string][]string{"Location": {"https://{http.request.host}{http.request.uri}"}}}}, Terminal: true})
+		https := servers["https"]
+		if https.AutoHTTPS == nil {
+			https.AutoHTTPS = &autoHTTPS{}
+		}
+		https.AutoHTTPS.DisableRedirects = true
+	}
+	if len(skip) > 0 {
+		servers["https"].AutoHTTPS.SkipCertificates = skip
+	}
+	// A host no route names gets 404, as it did from kamal-proxy: Caddy alone answers it with an
+	// empty 200, which reads as a working site that lost its content.
+	for _, s := range servers {
+		s.Routes = append(s.Routes, caddyRoute{Handle: []handler{{Handler: "static_response", StatusCode: 404}}, Terminal: true})
 	}
 	c := caddyConfig{Admin: admin{Listen: "localhost:2019"}, Apps: apps{HTTP: httpApp{Servers: servers}}}
 	if len(files) > 0 {
@@ -227,32 +308,64 @@ type (
 	}
 	autoHTTPS struct {
 		SkipCertificates []string `json:"skip_certificates,omitempty"`
+		DisableRedirects bool     `json:"disable_redirects,omitempty"`
 	}
 	caddyRoute struct {
-		Match    []match   `json:"match"`
+		// Group: of the routes of one group in a subroute, only the first that matches runs.
+		Group    string    `json:"group,omitempty"`
+		Match    []match   `json:"match,omitempty"`
 		Handle   []handler `json:"handle"`
 		Terminal bool      `json:"terminal"`
 	}
 	match struct {
-		Host []string `json:"host,omitempty"`
-		Not  []match  `json:"not,omitempty"`
+		Host       []string             `json:"host,omitempty"`
+		Path       []string             `json:"path,omitempty"`
+		VarsRegexp map[string]varRegexp `json:"vars_regexp,omitempty"`
+		Not        []match              `json:"not,omitempty"`
+	}
+	varRegexp struct {
+		Pattern string `json:"pattern"`
 	}
 	handler struct {
-		Handler          string        `json:"handler"`
-		Upstreams        []upstream    `json:"upstreams"`
-		StreamCloseDelay string        `json:"stream_close_delay,omitempty"`
-		Transport        *transport    `json:"transport,omitempty"`
-		Headers          *proxyHeaders `json:"headers,omitempty"`
+		Handler string `json:"handler"`
+		// reverse_proxy
+		Upstreams        []upstream `json:"upstreams,omitempty"`
+		StreamCloseDelay string     `json:"stream_close_delay,omitempty"`
+		Transport        *transport `json:"transport,omitempty"`
+		// Headers is *proxyHeaders for reverse_proxy and the response's headers for static_response:
+		// Caddy names both "headers".
+		Headers any `json:"headers,omitempty"`
+		// rewrite
+		URI             string          `json:"uri,omitempty"`
+		StripPathPrefix string          `json:"strip_path_prefix,omitempty"`
+		PathRegexp      []regexpReplace `json:"path_regexp,omitempty"`
+		// static_response
+		StatusCode int `json:"status_code,omitempty"`
+		// headers
+		Response *responseOps `json:"response,omitempty"`
+		// subroute
+		Routes []caddyRoute `json:"routes,omitempty"`
 	}
 	proxyHeaders struct {
 		Request *headerOps `json:"request,omitempty"`
 	}
+	// responseOps are a headers handler's changes to the response; Deferred applies them as it is
+	// written, to whatever the handlers after it answer.
+	responseOps struct {
+		headerOps
+		Deferred bool `json:"deferred,omitempty"`
+	}
 	headerOps struct {
-		Delete []string `json:"delete,omitempty"`
+		Set    map[string][]string `json:"set,omitempty"`
+		Delete []string            `json:"delete,omitempty"`
 	}
 	transport struct {
 		Protocol              string `json:"protocol"`
 		ResponseHeaderTimeout string `json:"response_header_timeout,omitempty"`
+	}
+	regexpReplace struct {
+		Find    string `json:"find"`
+		Replace string `json:"replace"`
 	}
 	upstream struct {
 		Dial string `json:"dial"`
@@ -269,6 +382,107 @@ type (
 	}
 )
 
+// hasHost tells whether hosts names h in any case: Caddy matches hosts without regard to case, and
+// refuses a host matcher that names one twice.
+func hasHost(hosts []string, h string) bool {
+	return slices.ContainsFunc(hosts, func(x string) bool { return strings.EqualFold(x, h) })
+}
+
+// addHost adds h to hosts unless they name it already: a host routed on several paths is one host.
+func addHost(hosts []string, h string) []string {
+	if hasHost(hosts, h) {
+		return hosts
+	}
+	return append(hosts, h)
+}
+
+// uncleanPath finds, in a decoded path, what makes the matcher and the strip disagree: what cleaning
+// would change — a `.` or `..` segment, or an empty one — and the two characters that Go's lowercasing,
+// which the matcher applies to the whole path, turns into ASCII letters (İ → i, Kelvin K → k), while
+// the strip folds case byte by byte. TestUncleanPathFoldsLikeTheMatcher holds the list complete.
+const uncleanPath = `(^|/)\.\.?(/|$)|//|[\x{130}\x{212A}]`
+
+// routeMatch is the host and, for a route under a path, the path itself and everything below it —
+// not every path that merely starts with the same letters (`/img` must not take `/images`).
+func routeMatch(r Route) match {
+	m := match{Host: []string{r.Host}}
+	if r.Path != "" {
+		m.Path = []string{r.Path, r.Path + "/*"}
+	}
+	return m
+}
+
+// routeHandle rewrites the path if the route asks, then proxies with its header changes.
+func routeHandle(r Route) []handler {
+	var hs []handler
+	if r.StripPath || r.PathRewrite != "" {
+		// The rewrite must take exactly the requests the path matcher lets in. Caddy matches the decoded
+		// path cleaned of dot and empty segments, lowercased; strip_path_prefix compares the same way,
+		// but cleans the escaped path, where `%2e%2e` is no dot segment and `%2F/` no double slash, and
+		// folds case byte by byte. On a clean path without the two characters lowercasing turns into
+		// ASCII they agree letter for letter — so only such a path is rewritten, and any other is
+		// refused (400) rather than passed on with its prefix unstripped, where the app would resolve
+		// it outside the new one. Browsers send clean paths.
+		routes := []caddyRoute{{Group: "path", Match: []match{{VarsRegexp: map[string]varRegexp{"{http.request.uri.path}": {Pattern: uncleanPath}}}},
+			Handle: []handler{{Handler: "static_response", StatusCode: 400}}}}
+		if r.StripPath {
+			routes = append(routes, caddyRoute{Group: "path", Handle: []handler{{Handler: "rewrite", StripPathPrefix: r.Path}}})
+		} else {
+			// The path itself is replaced whole, so `/api` becomes `/img`, not `/img/`; below it the
+			// prefix is stripped (`/API/x` and `/%61pi/x` too, as the matcher takes them) and the new
+			// one put in front. In the replacement `$` is literal, not a regexp group.
+			routes = append(routes,
+				caddyRoute{Group: "path", Match: []match{{Path: []string{r.Path}}}, Handle: []handler{{Handler: "rewrite", URI: r.PathRewrite}}},
+				caddyRoute{Group: "path", Handle: []handler{{Handler: "rewrite", StripPathPrefix: r.Path,
+					PathRegexp: []regexpReplace{{Find: "^/", Replace: strings.ReplaceAll(r.PathRewrite, "$", "$$") + "/"}}}}})
+		}
+		hs = append(hs, handler{Handler: "subroute", Routes: routes})
+	}
+	// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on; the
+	// port's own header changes come after.
+	req := &headerOps{}
+	if r.Headers != nil {
+		if o := ops(r.Headers.Request); o != nil {
+			req = o
+		}
+		// The response's changes go to a headers handler, applied when the response is written:
+		// reverse_proxy's own skips the 101 of a WebSocket handshake, which would keep a Set-Cookie
+		// the port removes (boks-lab2).
+		if o := ops(r.Headers.Response); o != nil {
+			hs = append(hs, handler{Handler: "headers", Response: &responseOps{headerOps: *o, Deferred: true}})
+		}
+	}
+	req.Delete = append([]string{"Forwarded"}, req.Delete...)
+	rp := handler{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: r.Dial}}, StreamCloseDelay: streamCloseDelay,
+		Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
+		Headers:   &proxyHeaders{Request: req}}
+	return append(hs, rp)
+}
+
+// ops turns name→value into Caddy's set and delete lists, in a stable order: "" deletes.
+func ops(h map[string]string) *headerOps {
+	if len(h) == 0 {
+		return nil
+	}
+	o := &headerOps{}
+	names := make([]string, 0, len(h))
+	for n := range h {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if h[n] == "" {
+			o.Delete = append(o.Delete, n)
+			continue
+		}
+		if o.Set == nil {
+			o.Set = map[string][]string{}
+		}
+		o.Set[n] = []string{h[n]}
+	}
+	return o
+}
+
 // Fragments reads the routes of every app from the server, sorted by app. A server without any has
 // none, which is an answer; a failed read is an error, not an empty proxy.
 func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
@@ -280,10 +494,23 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 	var fs []Fragment
 	d := json.NewDecoder(strings.NewReader(out))
 	for {
-		var f Fragment
-		if err := d.Decode(&f); errors.Is(err, io.EOF) {
+		var v json.RawMessage
+		if err := d.Decode(&v); errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
+			return nil, fmt.Errorf("reading the proxy's routes: %w", err)
+		}
+		// The format a fragment opens with; one written before it was introduced has none.
+		var format int
+		if json.Unmarshal(v, &format) == nil {
+			if format > FragmentFormat {
+				return nil, fmt.Errorf("reading the proxy's routes: a route file has format %d, newer than this boks (%d) knows; "+
+					"update boks before changing this server", format, FragmentFormat)
+			}
+			continue
+		}
+		var f Fragment
+		if err := json.Unmarshal(v, &f); err != nil {
 			return nil, fmt.Errorf("reading the proxy's routes: %w", err)
 		}
 		fs = append(fs, f)
@@ -372,7 +599,7 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 		} else {
 			var frag []byte
 			if frag, err = json.MarshalIndent(Fragment{App: app, Routes: routes}, "", "  "); err == nil {
-				err = remote.UploadAtomic(ctx, r, append(frag, '\n'), fragmentPath(app))
+				err = remote.UploadAtomic(ctx, r, append(fmt.Appendf(nil, "%d\n", FragmentFormat), append(frag, '\n')...), fragmentPath(app))
 			}
 		}
 		if err != nil {
@@ -493,12 +720,14 @@ func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment
 	return true, nil
 }
 
-// sameRoutes compares two route lists; nil and empty are the same: no routes.
+// sameRoutes compares two route lists field by field; nil and empty are the same: no routes. Every
+// field counts: a fragment that differs only in a path or a header would otherwise stay behind the
+// applied config, and the next run of any app would assemble the old routes from it.
 func sameRoutes(a, b []Route) bool {
-	return slices.EqualFunc(a, b, func(x, y Route) bool {
-		return x.Host == y.Host && x.Dial == y.Dial && x.TLS == y.TLS &&
-			(x.Cert == nil) == (y.Cert == nil) && (x.Cert == nil || *x.Cert == *y.Cert)
-	})
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // Reload makes the proxy load its config again although it has not changed — what a certificate

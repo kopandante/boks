@@ -188,6 +188,11 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 				"raise deploy_timeout to roll back to it", id, h.Interval, cfg.DeployTimeout)
 		}
 	}
+	// The release's ports with today's TLS and certificate: a wildcard it served without TLS has no
+	// certificate to be served with now.
+	if err := restored(cfg, snapshot).CheckWildcards(); err != nil {
+		return "", nil, fmt.Errorf("release %s cannot be served with today's TLS: %w", id, err)
+	}
 	// A connection that drops is not a missing file: only an answer from the server says it is gone.
 	if snapshot.EnvPath != "" {
 		out, err := r.Run(ctx, "sh", "-c", "test -f "+remote.Quote(snapshot.EnvPath)+" && echo present || true")

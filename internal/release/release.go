@@ -39,7 +39,9 @@ import (
 // Version 7 added the command and the stop signal: without them a release of a stock image (redis
 // started with a password) would come back running the image's own CMD. Version 8 added the
 // schedules: a boks that drops them would leave cron running the jobs of the release rolled back from.
-const FormatVersion = 8
+// Version 9 lets a port carry a path, a path rewrite and header changes: a boks that drops them
+// would route a rolled-back release's paths to the whole host, without its header rules.
+const FormatVersion = 9
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough

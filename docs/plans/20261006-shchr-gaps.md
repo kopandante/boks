@@ -62,9 +62,9 @@ health check контейнера — `HEALTHCHECK` образа или блок
 | # | Что | Кого блокирует | Статус |
 |---|---|---|---|
 | G4 | Переопределение command/args | 8 Redis (`redis-server --requirepass …`, AOF у mail-redis) | **сделано** (feat/run-options): `command:` exec-форма, снимок v7; boks-lab: redis с паролем из env через `sh -c`, откат по digest с записанной командой |
-| G5 | `--path-prefix` в `ports:` (kamal-proxy умеет, boks не выставляет) | pakim `/api/cn/images` → шлюз (перезапись пути и заголовки — в коде шлюза) | в boks |
+| G5 | `--path-prefix` в `ports:` (kamal-proxy умеет, boks не выставляет) | pakim `/api/cn/images` → шлюз (перезапись пути и заголовки — в коде шлюза) | **сделано** поверх Caddy (C2–C3, feat/caddy-routes): `path`, `strip_path`/`path_rewrite`, `headers`, снимок v9 |
 | G6 | Расписания | auctions (`warm_namsuwon_catalog` каждые 4 мин) | **сделано** (feat/schedules): cron хоста + `boks-job`, снимок v8 (разбор codex: не контейнер-планировщик) |
-| G7 | Wildcard-хост `*.домен` | onestar (`cars-*.buying-korea.com`) | проверить kamal-proxy |
+| G7 | Wildcard-хост `*.домен` | onestar (`cars-*.buying-korea.com`) | **сделано** поверх Caddy (C4): `*.домен` на одну метку, точные хосты раньше; `cars-*` внутри метки Caddy не матчит — onestar берёт `*.buying-korea.com`, чужие поддомены — точными хостами |
 | G8 | `stop_signal` | Convex-стеки (Dokploy шлёт SIGINT) | **сделано** (feat/run-options): `stop_signal:` → `--stop-signal`, в снимке v7 |
 | G9 | Фильтр по User-Agent на весь сервер | bot-policy Habsida | решение автора: форк kamal-proxy / приложения / внешний прокси |
 

@@ -390,6 +390,25 @@ func TestRollbackRefusesAHealthcheckTheDeployTimeoutCannotWaitFor(t *testing.T) 
 	}
 }
 
+// A rollback serves the release's ports with today's TLS and certificate: a wildcard the release
+// served without TLS cannot be served with TLS and no certificate for it — HTTP-01 does not issue one.
+func TestRollbackRefusesAWildcardTodaysTLSCannotServe(t *testing.T) {
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":9,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[{"name":"web","port":80,"host":"*.example.com","health_path":"","health_port":0}],
+		"volumes":["data:/data"],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env"}`
+	cfg := parse(t, noPorts+"tls: true\nports: [{name: web, port: 80, host: bot.example.com}]\n")
+	if _, err := CheckRollback(context.Background(), f, cfg, ""); err == nil || !strings.Contains(err.Error(), "needs a cert") {
+		t.Errorf("the check must refuse, got %v", err)
+	}
+	if err := Rollback(context.Background(), f, io.Discard, cfg, "", quick()); err == nil || !strings.Contains(err.Error(), "needs a cert") {
+		t.Fatalf("want a refusal naming the certificate, got %v", err)
+	}
+	if f.has("docker stop") || f.has("docker run") || f.has("docker create") {
+		t.Errorf("nothing may be stopped or started: %v", f.calls)
+	}
+}
+
 // A rollback mounts the files its release ran with, from that release's own directory, and refuses
 // before anything changes when they are gone.
 func TestRollbackMountsTheFilesOfTheRelease(t *testing.T) {

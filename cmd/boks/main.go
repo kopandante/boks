@@ -226,7 +226,15 @@ func printRoutes(out io.Writer, fs []proxy.Fragment) {
 			case rt.TLS:
 				tls = "tls acme"
 			}
-			fmt.Fprintf(out, "%s\t%s → %s\t%s\n", f.App, rt.Host, rt.Dial, tls)
+			// The path and what reaches the app in its place: two routes of one host differ only there.
+			where := rt.Host + rt.Path
+			switch {
+			case rt.StripPath:
+				where += " (stripped)"
+			case rt.PathRewrite != "":
+				where += " (as " + rt.PathRewrite + ")"
+			}
+			fmt.Fprintf(out, "%s\t%s → %s\t%s\n", f.App, where, rt.Dial, tls)
 		}
 	}
 }

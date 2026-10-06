@@ -1851,3 +1851,27 @@ func TestDeployWithSchedulesRefusesAServerWithoutCron(t *testing.T) {
 		t.Errorf("nothing may change on a server that cannot run the jobs: %v", f.calls)
 	}
 }
+
+// A port becomes a route the same way for a deploy and a migration: its path, rewrite and headers go
+// to the proxy, and a wildcard host under the certificate is served with the certificate's files.
+func TestRouteOfCarriesThePortsRouting(t *testing.T) {
+	c := &config.Cert{Domains: []string{"*.example.com"}, DNS: "cloudflare", Email: "a@b.c"}
+	p := config.Port{Name: "img", Port: 8080, Host: "*.example.com", Path: "/api", PathRewrite: "/img",
+		Headers: &config.Headers{Request: map[string]string{"Cookie": ""}, Response: map[string]string{"X-Content-Type-Options": "nosniff"}}}
+	rt := routeOf(p, "gw-v1:8080", true, c)
+	if rt.Host != "*.example.com" || rt.Path != "/api" || rt.PathRewrite != "/img" || rt.Dial != "gw-v1:8080" || !rt.TLS {
+		t.Errorf("unexpected route: %+v", rt)
+	}
+	if rt.Cert == nil || rt.Headers == nil || !reflect.DeepEqual(rt.Headers.Request, map[string]string{"Cookie": ""}) ||
+		rt.Headers.Response["X-Content-Type-Options"] != "nosniff" {
+		t.Errorf("want the certificate files and the header rule: %+v", rt)
+	}
+	if plain := routeOf(config.Port{Host: "a.example.org", StripPath: true, Path: "/x"}, "a:1", false, nil); plain.Cert != nil || !plain.StripPath || plain.Headers != nil {
+		t.Errorf("a host outside the certificate keeps automatic HTTPS and only its own rules: %+v", plain)
+	}
+	// A deploy routes its ports through routeOf: nothing of the port's routing is lost on the way.
+	cfg := &config.Config{TLS: true, Cert: c, Ports: []config.Port{p}}
+	if got := routesTo(cfg, "gw-v1"); len(got) != 1 || !reflect.DeepEqual(got[0], rt) {
+		t.Errorf("want the deploy's route to be the port's: %+v", got)
+	}
+}

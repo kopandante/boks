@@ -217,9 +217,10 @@ func TestProxyBootTakesTheAdmissionLock(t *testing.T) {
 }
 
 // `boks proxy list` shows every app's routes from the fragments on the server: host, the copy it
-// dials, how TLS is served.
+// dials, how TLS is served, and for a route under a path the path and what the app sees.
 func TestProxyListShowsTheRoutesOfEveryApp(t *testing.T) {
-	a := &recorder{server: server{"sh -c for f in": `{"app":"bot","routes":[{"host":"b.example.com","dial":"bot-v1-1:80"}]}` + "\n" +
+	a := &recorder{server: server{"sh -c for f in": `{"app":"bot","routes":[{"host":"b.example.com","dial":"bot-v1-1:80"},` +
+		`{"host":"b.example.com","path":"/api/images","path_rewrite":"/img","dial":"bot-v1-1:81"},{"host":"b.example.com","path":"/s","strip_path":true,"dial":"bot-v1-1:82"}]}` + "\n" +
 		`{"app":"demo","routes":[{"host":"a.example.com","dial":"demo-v2-2:3000","tls":true},` +
 		`{"host":"w.example.com","dial":"demo-v2-2:3001","tls":true,"cert":{"certificate":"/certs/boks/_.example.com.crt","key":"k"}}]}`}}
 	fleet(t, map[string]*recorder{"a": a}, time.Now)
@@ -227,7 +228,8 @@ func TestProxyListShowsTheRoutesOfEveryApp(t *testing.T) {
 	if err := dispatch(context.Background(), parseConfig(t, "app: bot\nimage: x\nservers: [a]\n"), []string{"proxy", "list"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	want := "== a\nbot\tb.example.com → bot-v1-1:80\thttp\ndemo\ta.example.com → demo-v2-2:3000\ttls acme\n" +
+	want := "== a\nbot\tb.example.com → bot-v1-1:80\thttp\nbot\tb.example.com/api/images (as /img) → bot-v1-1:81\thttp\n" +
+		"bot\tb.example.com/s (stripped) → bot-v1-1:82\thttp\ndemo\ta.example.com → demo-v2-2:3000\ttls acme\n" +
 		"demo\tw.example.com → demo-v2-2:3001\ttls /certs/boks/_.example.com.crt\n"
 	if out.String() != want {
 		t.Errorf("got\n%s\nwant\n%s", out.String(), want)

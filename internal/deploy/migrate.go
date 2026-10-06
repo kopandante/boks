@@ -339,8 +339,8 @@ func migratedRoutes(ctx context.Context, r remote.Runner, log io.Writer, apps []
 			}
 			// TLS and its certificate as kamal-proxy serves the host now, not as the release recorded
 			// them: a rollback keeps today's tls and cert and points current at a release recorded with
-			// others.
-			rt := proxy.Route{Host: p.Host, Dial: target.dial, TLS: target.tls}
+			// others. The rest of the route — path, rewrite, headers — is the release's.
+			rt := routeOf(p, target.dial, target.tls, nil)
 			if rt.TLS {
 				rt.Cert = target.cert
 			}
