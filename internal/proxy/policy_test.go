@@ -11,7 +11,10 @@ import (
 )
 
 var habsida = Policy{Revision: 1, Floor: 1,
-	Allow: []BotAllow{{Host: "img.dev.habsidev.com", Paths: []string{"/pics", "/pics_i"}, UserAgent: "(?i)telegrambot"}},
+	Allow: []BotAllow{
+		{Host: "img.dev.habsidev.com", Paths: []string{"/pics", "/pics_i"}, UserAgent: "(?i)telegrambot"},
+		{UserAgent: "(?i)googlebot"},
+	},
 	Block: []BotBlock{
 		{Name: "infra", Domains: []string{"habsidev.com"}, UserAgent: "(?i)(bot|crawler)"},
 		{Name: "crawlers", UserAgent: "(?i)(bingbot|gptbot)"},
@@ -40,8 +43,8 @@ func TestConfigPutsTheBotFilterFirst(t *testing.T) {
 				t.Errorf("%s route %d: a host matcher on a block: %v", name, i, set)
 			}
 			not, _ := json.Marshal(set["not"])
-			if want := `[{"path":["/.well-known/acme-challenge/*"]},{"header_regexp":{"User-Agent":{"pattern":"(?i)telegrambot"}},"host":["img.dev.habsidev.com"],"path":["/pics","/pics/*","/pics_i","/pics_i/*"]}]`; string(not) != want {
-				t.Errorf("%s route %d: want ACME and the allow exempt:\n got %s\nwant %s", name, i, not, want)
+			if want := `[{"path":["/.well-known/acme-challenge/*"]},{"header_regexp":{"User-Agent":{"pattern":"(?i)telegrambot"}},"host":["img.dev.habsidev.com"],"path":["/pics","/pics/*","/pics_i","/pics_i/*"]},{"header_regexp":{"User-Agent":{"pattern":"(?i)googlebot"}}}]`; string(not) != want {
+				t.Errorf("%s route %d: want ACME and every allow exempt:\n got %s\nwant %s", name, i, not, want)
 			}
 		}
 		if h := routes[2].(map[string]any)["handle"].([]any)[0].(map[string]any); h["status_code"] == float64(403) {
