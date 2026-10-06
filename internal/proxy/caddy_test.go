@@ -805,8 +805,10 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 	if h := handle(0); h != `[{"handler":"subroute","routes":[`+unclean+
 		`{"group":"path","handle":[{"handler":"rewrite","uri":"/img"}],"match":[{"path":["/api/cn/images"]}],"terminal":false},`+
 		`{"group":"path","handle":[{"handler":"rewrite","path_regexp":[{"find":"^/","replace":"/img/"}],"strip_path_prefix":"/api/cn/images"}],"terminal":false}]},`+
-		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Gateway":["images"]}},"response":{"delete":["Set-Cookie"],`+
-		`"set":{"X-Content-Type-Options":["nosniff"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
+		// The response's changes in a headers handler applied as the response is written, so the 101 of
+		// a WebSocket handshake gets them too; reverse_proxy's own skip it.
+		`{"handler":"headers","response":{"deferred":true,"delete":["Set-Cookie"],"set":{"X-Content-Type-Options":["nosniff"]}}},`+
+		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Gateway":["images"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
 		`"upstreams":[{"dial":"gw:8080"}]}]` {
 		t.Errorf("unexpected rewrite and headers: %s", h)
 	}

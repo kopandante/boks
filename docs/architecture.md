@@ -377,7 +377,8 @@ checkpointer/autovacuum, шумный сосед виден всем; лимит
 ## TLS
 
 - Обычные домены: автоматический HTTPS Caddy (ACME HTTP-01), хранилище в томе `boks-proxy-data`;
-  http→https редирект (308) Caddy ставит сам. TLS-хосты — на сервере :443 с HTTP/1.1 и HTTP/2
+  редиректы Caddy выключены: http→https (308) для TLS-хостов ставит свой маршрут boks на :80, после
+  маршрутов хостов без TLS, затем 404. TLS-хосты — на сервере :443 с HTTP/1.1 и HTTP/2
   (443/udp не опубликован, HTTP/3 выключен), хосты без `tls` — на :80.
 - Wildcard (нужен уже сейчас — Shchr, preview): `lego` DNS-01 → сертификат на сервер в том
   `boks-certs` прокси (файлы от root, 0640: Caddy работает от root) → `load_files` в конфиге, хост

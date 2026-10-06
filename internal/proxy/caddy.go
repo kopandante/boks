@@ -103,8 +103,9 @@ func nextPath() string { return path.Join(Dir, "caddy.next.json") }
 // silently drop the second.
 //
 // Hosts with TLS go to a server on 443, where Caddy's automatic HTTPS obtains their certificates by
-// HTTP-01 and redirects their plain HTTP; a host under `cert:` is served with its file instead and
-// left out of ACME. Hosts without TLS go to a server on 80 alone, as kamal-proxy served them.
+// HTTP-01; a host under `cert:` is served with its file instead and left out of ACME. Hosts without
+// TLS go to a server on 80, as kamal-proxy served them, where boks's own route redirects plain HTTP
+// for the TLS hosts (Caddy's redirects are off) and a 404 answers any host no route names.
 //
 // There is no trusted_proxies: nothing trusted stands in front of boks, so Caddy sets X-Forwarded-For
 // to the address of the connection and drops what the visitor sent (#48) — its default.
@@ -165,7 +166,7 @@ func Config(fragments []Fragment) ([]byte, error) {
 
 	// A wildcard and an exact host it covers can sit on different servers, one with TLS and one
 	// without, where the exact host comes before the wildcard no more: the wildcard would take plain
-	// HTTP for an exact host with TLS (Caddy redirects on :80 only after its own routes), or HTTPS for
+	// HTTP for an exact host with TLS (the redirect on :80 comes after the routes), or HTTPS for
 	// an exact host without it. kamal-proxy gave an exact host to its own app in either case; so does
 	// this, by keeping the exact hosts of the other mode out of the wildcard's match.
 	exact := map[bool][]string{}
@@ -334,12 +335,19 @@ type (
 		PathRegexp      []regexpReplace `json:"path_regexp,omitempty"`
 		// static_response
 		StatusCode int `json:"status_code,omitempty"`
+		// headers
+		Response *responseOps `json:"response,omitempty"`
 		// subroute
 		Routes []caddyRoute `json:"routes,omitempty"`
 	}
 	proxyHeaders struct {
-		Request  *headerOps `json:"request,omitempty"`
-		Response *headerOps `json:"response,omitempty"`
+		Request *headerOps `json:"request,omitempty"`
+	}
+	// responseOps are a headers handler's changes to the response; Deferred applies them as it is
+	// written, to whatever the handlers after it answer.
+	responseOps struct {
+		headerOps
+		Deferred bool `json:"deferred,omitempty"`
 	}
 	headerOps struct {
 		Set    map[string][]string `json:"set,omitempty"`
@@ -426,17 +434,22 @@ func routeHandle(r Route) []handler {
 	}
 	// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on; the
 	// port's own header changes come after.
-	req, resp := &headerOps{}, (*headerOps)(nil)
+	req := &headerOps{}
 	if r.Headers != nil {
 		if o := ops(r.Headers.Request); o != nil {
 			req = o
 		}
-		resp = ops(r.Headers.Response)
+		// The response's changes go to a headers handler, applied when the response is written:
+		// reverse_proxy's own skips the 101 of a WebSocket handshake, which would keep a Set-Cookie
+		// the port removes (boks-lab2).
+		if o := ops(r.Headers.Response); o != nil {
+			hs = append(hs, handler{Handler: "headers", Response: &responseOps{headerOps: *o, Deferred: true}})
+		}
 	}
 	req.Delete = append([]string{"Forwarded"}, req.Delete...)
 	rp := handler{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: r.Dial}}, StreamCloseDelay: streamCloseDelay,
 		Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
-		Headers:   &proxyHeaders{Request: req, Response: resp}}
+		Headers:   &proxyHeaders{Request: req}}
 	return append(hs, rp)
 }
 
