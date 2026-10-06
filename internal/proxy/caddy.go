@@ -33,6 +33,14 @@ const (
 	// keeps the inode it was given, and an atomic write replaces the inode, so the proxy would go on
 	// reading the old file.
 	mountDir = "/etc/boks"
+
+	// streamCloseDelay keeps WebSockets and other streams open when a reload unloads the config they
+	// came through. Caddy closes them at once by default, and every deploy reloads the config of every
+	// app: each deploy would cut the WebSockets of all the other apps on the server, which kamal-proxy,
+	// changing one service at a time, never touched (measured, boks-lab2, 2.11.7: a reload that changed
+	// only another host closed the stream at once, and with the delay kept it). The streams of the copy
+	// a deploy replaces end anyway when it is retired after the drain.
+	streamCloseDelay = "24h"
 )
 
 // Route is one host the proxy serves for an app: requests for Host go to Dial, the `container:port`
@@ -119,7 +127,7 @@ func Config(fragments []Fragment) ([]byte, error) {
 		}
 		s.Routes = append(s.Routes, caddyRoute{
 			Match:    []match{{Host: []string{e.r.Host}}},
-			Handle:   []handler{{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: e.r.Dial}}}},
+			Handle:   []handler{{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: e.r.Dial}}, StreamCloseDelay: streamCloseDelay}},
 			Terminal: true,
 		})
 		if e.r.TLS && e.r.Cert != nil {
@@ -186,8 +194,9 @@ type (
 		Host []string `json:"host"`
 	}
 	handler struct {
-		Handler   string     `json:"handler"`
-		Upstreams []upstream `json:"upstreams"`
+		Handler          string     `json:"handler"`
+		Upstreams        []upstream `json:"upstreams"`
+		StreamCloseDelay string     `json:"stream_close_delay,omitempty"`
 	}
 	upstream struct {
 		Dial string `json:"dial"`
@@ -259,13 +268,21 @@ func withRoutes(fragments []Fragment, app string, routes []Route) []Fragment {
 }
 
 // SetRoutes makes app's routes those given — none removes them — and reports whether the proxy may
-// now run them: true after a reload, and after a reload that failed too, since its answer can be lost
-// after Caddy acted (RestoreRoutes puts the previous routes back for certain). The proxy reloads only when the assembled config differs from the one it runs; the
-// fragment alone is rewritten when only it lags (a run cut after the reload). The fragment is written
-// after Caddy took the config, so a config Caddy refused leaves no fragment behind that would make
-// every later run, of any app, assemble the refused config again. The caller holds the server's
-// admission lock: the config is every app's, and two runs assembling it at once would each apply a
-// config without the other's change.
+// now run them, or will once it loads its files: true after a reload, and after any failure from the
+// moment the fragment is written, since a failed call's answer can be lost after the server or Caddy
+// acted (RestoreRoutes puts the previous routes back for certain). The proxy reloads only when the
+// assembled config differs from the one it runs; the fragment alone is rewritten when only it lags.
+//
+// The fragment is written before the reload, and the applied config after it. A run cut anywhere in
+// between leaves a fragment that the applied config does not match yet, and the next run of any app
+// assembles the config again and reloads with it: the routes this run moved stay moved. Written after
+// the reload, a fragment cut off by the run would match the applied config it never replaced, and the
+// next run of another app would quietly reload this app's routes back onto the copies it left — a
+// stopped one, in stop-first. A config Caddy refuses leaves the fragment until the caller puts the
+// routes back, which it does for any failure here.
+//
+// The caller holds the server's admission lock: the config is every app's, and two runs assembling it
+// at once would each apply a config without the other's change.
 //
 // A proxy that is not running is not reloaded: the files are what it loads when it starts.
 func SetRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, routes []Route) (bool, error) {
@@ -308,9 +325,24 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 		return false, err
 	}
 	reload := stale && running
+	if len(routes) == 0 {
+		_, err = r.Run(ctx, "rm", "-f", fragmentPath(app))
+	} else {
+		var frag []byte
+		if frag, err = json.MarshalIndent(Fragment{App: app, Routes: routes}, "", "  "); err == nil {
+			err = remote.UploadAtomic(ctx, r, append(frag, '\n'), fragmentPath(app))
+		}
+	}
+	if err != nil {
+		// The write may have gone through with its answer lost: the routes are put back either way.
+		return true, fmt.Errorf("recording the routes of %s: %w", app, err)
+	}
+	if !stale {
+		return false, nil
+	}
 	if reload {
 		if err := remote.UploadAtomic(ctx, r, body, nextPath()); err != nil {
-			return false, err
+			return true, err
 		}
 		fmt.Fprintf(log, "proxy: reloading with the routes of %s\n", app)
 		reloadArgs := []string{"docker", "exec", Container, "caddy", "reload", "--config", inProxy(nextPath())}
@@ -323,28 +355,12 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 			// proxy serving what it served.
 			return true, fmt.Errorf("the proxy refused the new routes and keeps the ones it had: %w", err)
 		}
-	}
-	if len(routes) == 0 {
-		_, err = r.Run(ctx, "rm", "-f", fragmentPath(app))
-	} else {
-		var frag []byte
-		if frag, err = json.MarshalIndent(Fragment{App: app, Routes: routes}, "", "  "); err == nil {
-			err = remote.UploadAtomic(ctx, r, append(frag, '\n'), fragmentPath(app))
-		}
-	}
-	if err != nil {
-		return reload, fmt.Errorf("recording the routes of %s: %w", app, err)
-	}
-	if !stale {
-		return false, nil
-	}
-	if reload {
 		_, err = r.Run(ctx, "mv", nextPath(), appliedPath())
 	} else {
 		err = remote.UploadAtomic(ctx, r, body, appliedPath())
 	}
 	if err != nil {
-		return reload, fmt.Errorf("recording the proxy's config: %w", err)
+		return true, fmt.Errorf("recording the proxy's config: %w", err)
 	}
 	return reload, nil
 }

@@ -196,8 +196,27 @@ func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 	}
 }
 
-// A first route reloads the running proxy with the new config, and only once Caddy took it are the
-// fragment and the applied config written.
+// A reload must not cut the WebSockets of the apps it does not change: every route keeps its streams
+// open past the unload of the config they came through.
+func TestConfigKeepsStreamsAcrossAReload(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:80"}, {Host: "s.example.com", Dial: "a:81", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, srv := range []string{"http", "https"} {
+		routes, _ := dig(decoded(t, b), "apps", "http", "servers", srv, "routes").([]any)
+		if len(routes) != 1 {
+			t.Fatalf("%s: want one route, got %v", srv, routes)
+		}
+		h := dig(routes[0], "handle").([]any)[0]
+		if d := dig(h, "stream_close_delay"); d != streamCloseDelay {
+			t.Errorf("%s: want stream_close_delay %s, got %v", srv, streamCloseDelay, d)
+		}
+	}
+}
+
+// A first route reloads the running proxy with the new config: the fragment is written before the
+// reload, the applied config only once Caddy took it.
 func TestSetRoutesReloadsAndThenRecords(t *testing.T) {
 	d := newDisk()
 	reloaded, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
@@ -212,8 +231,34 @@ func TestSetRoutesReloadsAndThenRecords(t *testing.T) {
 		t.Errorf("want the applied config in place and no next left: %v", d.files)
 	}
 	reload, frag := index(d.calls, reloadNext), index(d.calls, "upload "+Dir+"/routes/demo.json")
-	if reload < 0 || frag < reload {
-		t.Errorf("want the reload before the fragment: %v", d.calls)
+	applied := index(d.calls, "mv "+Dir+"/caddy.next.json")
+	if frag < 0 || reload < frag || applied < reload {
+		t.Errorf("want the fragment, then the reload, then the applied config: %v", d.calls)
+	}
+}
+
+// A run cut after Caddy took the config, before it was recorded as applied, leaves a fragment the
+// applied config does not match: the next run, of another app, reloads with this app's new routes
+// rather than putting them back on the copy it left (stopped, in stop-first).
+func TestSetRoutesKeepsTheRoutesOfARunCutAfterItsReload(t *testing.T) {
+	d := newDisk()
+	old := []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	d.fail["mv "+Dir+"/caddy.next.json"] = errors.New("connection lost")
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err == nil {
+		t.Fatal("want the cut run's error")
+	}
+	delete(d.fail, "mv "+Dir+"/caddy.next.json")
+	other := []Route{{Host: "o.example.com", Dial: "other:80"}}
+	d.calls = nil
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", other); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := Config([]Fragment{{App: "demo", Routes: web}, {App: "other", Routes: other}})
+	if d.files[Dir+"/caddy.json"] != string(want) || !d.ran(reloadNext) {
+		t.Errorf("want the other app's reload to keep demo on its new copy: %s", d.files[Dir+"/caddy.json"])
 	}
 }
 
@@ -242,10 +287,16 @@ func TestSetRoutesCatchesUpALaggingFragment(t *testing.T) {
 	}
 }
 
-// A config Caddy refuses leaves everything as it was: Caddy keeps serving the old one, and no fragment
-// or applied config claims the refused one — or every later run would assemble it again.
+// A config Caddy refuses: Caddy keeps serving the old one, the applied config does not claim the
+// refused one, and the caller is told to put the routes back — after which no fragment claims it
+// either, or every later run would assemble it again.
 func TestSetRoutesRecordsNothingCaddyRefused(t *testing.T) {
 	d := newDisk()
+	old := []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	before := d.files[Dir+"/caddy.json"]
 	d.fail[reloadNext] = errors.New("loading new config: open /certs/boks/x.crt: no such file")
 	touched, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
 	if err == nil || !strings.Contains(err.Error(), "keeps the ones it had") {
@@ -255,11 +306,28 @@ func TestSetRoutesRecordsNothingCaddyRefused(t *testing.T) {
 	if !touched {
 		t.Error("a failed reload may have gone through")
 	}
-	if _, ok := d.files[Dir+"/routes/demo.json"]; ok {
-		t.Errorf("no fragment for a refused config: %v", d.files)
-	}
-	if _, ok := d.files[Dir+"/caddy.json"]; ok {
+	if d.files[Dir+"/caddy.json"] != before {
 		t.Errorf("no applied config for a refused one: %v", d.files)
+	}
+	delete(d.fail, reloadNext)
+	if err := RestoreRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.files[Dir+"/routes/demo.json"], "demo-old:3000") || d.files[Dir+"/caddy.json"] != before {
+		t.Errorf("want the previous routes recorded again: %v", d.files)
+	}
+}
+
+// Any failure once the fragment may have been written tells the caller to put the routes back: the
+// fragment is what the next run of any app reloads with.
+func TestSetRoutesReportsTouchedOnceTheFragmentMayBeWritten(t *testing.T) {
+	for _, fail := range []string{"upload " + "sh -c umask 077 && mkdir -p '" + Dir + "/routes'", "upload sh -c umask 077 && mkdir -p '" + Dir + "' && cat > '" + Dir + "/caddy.next.json"} {
+		d := newDisk()
+		d.fail[fail] = errors.New("connection lost")
+		touched, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
+		if err == nil || !touched {
+			t.Errorf("%s: want an error and touched, got %v %v", fail, touched, err)
+		}
 	}
 }
 
