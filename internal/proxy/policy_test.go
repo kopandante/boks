@@ -234,3 +234,23 @@ func TestSetPolicyMarksTheRoutesForOlderBoks(t *testing.T) {
 		t.Errorf("want this boks to read past the marker: %+v %v", fs, err)
 	}
 }
+
+// A run cut after recording the policy and before the reload leaves the proxy behind it: Lags says so,
+// so the next run of any app catches the filter up, and says no more once it is applied.
+func TestLagsCountsThePolicy(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	fs, _ := Fragments(context.Background(), d)
+	d.files[ServerDir+"/policy.json"] = string(marshal(habsida))
+	if lag, err := Lags(context.Background(), d, fs); err != nil || !lag {
+		t.Errorf("want a policy recorded but not applied to lag: %v %v", lag, err)
+	}
+	if _, err := converge(context.Background(), d, io.Discard, fs, false, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if lag, err := Lags(context.Background(), d, fs); err != nil || lag {
+		t.Errorf("want no lag once the filter is applied: %v %v", lag, err)
+	}
+}

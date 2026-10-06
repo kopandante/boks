@@ -349,27 +349,34 @@ func Parse(data []byte) (*Config, error) {
 			return nil, errors.New("healthcheck: the block is empty; give cmd, or remove the key to keep the image's HEALTHCHECK")
 		}
 	}
-	// Anything past the first document would be read by nobody, so refuse the file rather than
-	// apply half of it. An empty document holds nothing that could go unread: a trailing `---`
-	// (with or without a comment after it) parsed on earlier versions and still does.
-	for {
-		var doc yaml.Node
-		err := dec.Decode(&doc)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("YAML document after the first: %w", err)
-		}
-		if !isEmptyDocument(&doc) {
-			return nil, errors.New("more than one YAML document: boks reads one app per file")
-		}
+	if err := restIsEmpty(dec, "boks reads one app per file"); err != nil {
+		return nil, err
 	}
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// restIsEmpty refuses a file with a document after the first that holds anything: it would be read by
+// nobody, so the file is refused rather than half of it applied. An empty document holds nothing that
+// could go unread: a trailing `---` (with or without a comment after it) parsed on earlier versions and
+// still does. Every document is looked at to the end of the file — an empty one hides none after it.
+func restIsEmpty(dec *yaml.Decoder, why string) error {
+	for {
+		var doc yaml.Node
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("YAML document after the first: %w", err)
+		}
+		if !isEmptyDocument(&doc) {
+			return errors.New("more than one YAML document: " + why)
+		}
+	}
 }
 
 // isEmptyDocument reports whether a decoded YAML document carries no value: nothing at all, or

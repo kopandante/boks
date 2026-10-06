@@ -76,11 +76,8 @@ func ParseServer(data []byte) (*Server, error) {
 		}
 		return nil, err
 	}
-	var rest yaml.Node
-	if err := dec.Decode(&rest); err == nil && !isEmptyDocument(&rest) {
-		return nil, errors.New("more than one YAML document: server.yml is read as one")
-	} else if err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("YAML document after the first: %w", err)
+	if err := restIsEmpty(dec, "server.yml is read as one"); err != nil {
+		return nil, err
 	}
 	if err := s.validate(); err != nil {
 		return nil, err
