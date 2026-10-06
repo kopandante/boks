@@ -317,3 +317,13 @@ func TestCheckApplyRefusesAnEgressTheProxyCannotRun(t *testing.T) {
 		t.Errorf("want the stock image refused: %v", err)
 	}
 }
+
+// Status reports the policy even when the running proxy cannot be compared with it.
+func TestServerStatusSaysWhatItCannotCompare(t *testing.T) {
+	f := serverFake(t, proxy.Policy{Revision: 2, Floor: 2, Egress: &proxy.Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}}})
+	f.fail["docker inspect -f {{range"] = errors.New("Cannot connect to the Docker daemon")
+	p, _, drift, err := ServerStatus(context.Background(), f)
+	if err != nil || p.Revision != 2 || len(drift) != 1 || !strings.Contains(drift[0], "could not compare") {
+		t.Errorf("policy %+v, drift %v, err %v", p, drift, err)
+	}
+}

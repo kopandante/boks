@@ -182,6 +182,11 @@ func ServerStatus(ctx context.Context, r remote.Runner) (proxy.Policy, *release.
 	if err != nil {
 		return p, nil, nil, err
 	}
+	// The policy is the answer; a proxy that cannot be compared with it — docker down, a hosts file gone
+	// — is a line of the report, not the end of it.
 	drift, err := proxy.Drift(ctx, r, p)
-	return p, open, drift, err
+	if err != nil {
+		drift = append(drift, fmt.Sprintf("could not compare the running proxy with the policy: %v", err))
+	}
+	return p, open, drift, nil
 }
