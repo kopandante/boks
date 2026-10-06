@@ -747,12 +747,13 @@ func reconverge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragme
 		// proxy serving what it served. A failed call is not a refusal, though: its answer can be lost
 		// after Caddy took the config. So Caddy is asked which config it runs: this one, and the reload
 		// went through — a routes switch or a put-back goes on as if the answer had come; the one it
-		// had, and it did not. Asking can fail too; then the message claims neither.
+		// had, and it did not — unless that one is this one too, as for Reload, and then the config
+		// tells nothing. Asking can fail too; then the message claims neither.
 		live, liveErr := runningConfig(ctx, r)
 		switch {
 		case confirm && liveErr == nil && sameJSON(live, body):
 			fmt.Fprintf(log, "proxy: the reload's answer was lost, but Caddy runs %s\n", what)
-		case liveErr == nil && present && sameJSON(live, []byte(applied)):
+		case liveErr == nil && present && !sameJSON(live, body) && sameJSON(live, []byte(applied)):
 			return false, fmt.Errorf("reloading the proxy with %s failed, and Caddy still runs the config it had: %w", what, err)
 		default:
 			return false, fmt.Errorf("reloading the proxy with %s failed: if Caddy refused the config it still runs the one it had, "+

@@ -94,7 +94,7 @@ func TestUnconfirmedReloadsSayNeither(t *testing.T) {
 	c := lostServer(t)
 	c.live = c.files[Dir+"/caddy.json"]
 	c.reloadErr = errors.New("connection reset")
-	if err := Reload(context.Background(), c); err == nil {
-		t.Error("a certificate reload must not be confirmed by an unchanged config")
+	if err := Reload(context.Background(), c); err == nil || !strings.Contains(err.Error(), "may have been lost") {
+		t.Errorf("a certificate reload must be neither confirmed nor denied by an unchanged config, got %v", err)
 	}
 }
