@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -47,7 +48,7 @@ command -v flock >/dev/null && echo flock=yes
 id -nG "$(id -un)" | tr ' ' '\n' | grep -qx docker && echo indocker=yes
 echo "dockerenabled=$(systemctl is-enabled docker 2>/dev/null)"
 echo "cronactive=$(systemctl is-active cron 2>/dev/null)"
-if ! command -v dockerd >/dev/null; then echo "candidate=$(` + candidateScript + `)"; fi
+if ! command -v dockerd >/dev/null; then echo "candidate=$(apt-cache policy docker.io 2>/dev/null | awk '/Candidate:/{print $2}')"; fi
 if $S docker info >/dev/null 2>&1; then
   echo dockerup=yes
   echo "api=$($S docker version --format '{{.Server.APIVersion}}' 2>/dev/null)"
@@ -69,8 +70,20 @@ fi
 ip -4 route show table all 2>/dev/null | awk '{print "route=" $1 " " $2}'
 `
 
-// candidateScript reads the version apt would install of docker.io, empty when it has none.
-const candidateScript = `apt-cache policy docker.io 2>/dev/null | awk '/Candidate:/{print $2}'`
+// aptScript runs apt-get with its arguments, waiting up to 5 minutes in all for another apt to finish —
+// on a fresh server apt-daily and unattended-upgrades run for a while. One wait for every lock:
+// DPkg::Lock::Timeout covers dpkg's but not the package lists' that apt-get update takes, so a run that
+// could not get a lock is tried again until the deadline; any other failure ends it at once.
+const aptScript = `end=$(($(date +%s) + 300))
+while ! out=$(LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get "$@" 2>&1); do
+  case $out in *"Could not get lock"*) if [ "$(date +%s)" -lt "$end" ]; then sleep 5; continue; fi ;; esac
+  printf '%s\n' "$out" >&2; exit 1
+done`
+
+// errNoCandidate: apt knows no docker.io — a fresh image ships without a package index, so the index
+// is refreshed before this is a refusal.
+var errNoCandidate = errors.New("apt knows no docker.io package here; install Docker Engine from Docker's own repository " +
+	"(docs.docker.com/engine/install), then install again")
 
 // hostFacts is what factsScript found.
 type hostFacts struct {
@@ -183,23 +196,11 @@ type installPlan struct {
 	enableCron    bool
 	addToDocker   bool
 	bootProxy     bool
-	// candidateUnknown: apt has no index of docker.io yet (a fresh image may ship none), so its version
-	// is checked after apt-get update, still before any change.
-	candidateUnknown bool
-	notes            []string
+	notes         []string
 }
 
 func (p installPlan) empty() bool {
 	return len(p.packages) == 0 && p.daemon == nil && !p.restartDocker && !p.enableDocker && !p.enableCron && !p.addToDocker && !p.bootProxy
-}
-
-// checkCandidate refuses a docker.io package older than Docker 25, or none at all.
-func checkCandidate(candidate string) error {
-	if major, _, _ := strings.Cut(candidate, "."); atoi(major) < 25 {
-		return fmt.Errorf("this system's docker.io package is %q, older than Docker 25 that boks needs; install Docker Engine from "+
-			"Docker's own repository (docs.docker.com/engine/install), then install again", candidate)
-	}
-	return nil
 }
 
 // planInstall decides from the facts, changing nothing; an error is a refusal, with what to do.
@@ -245,9 +246,11 @@ func planInstall(f hostFacts) (installPlan, error) {
 		}
 	} else if !f.dockerd {
 		if f.candidate == "" {
-			p.candidateUnknown = true
-		} else if err := checkCandidate(f.candidate); err != nil {
-			return p, err
+			return p, errNoCandidate
+		}
+		if major, _, _ := strings.Cut(f.candidate, "."); atoi(major) < 25 {
+			return p, fmt.Errorf("this system's docker.io package is %q, older than Docker 25 that boks needs; install Docker Engine from "+
+				"Docker's own repository (docs.docker.com/engine/install), then install again", f.candidate)
 		}
 		p.packages = append(p.packages, "docker.io")
 	} else {
@@ -428,15 +431,52 @@ func flagValue(cmd, name string) string {
 // CheckInstall reads the server and says what an install would do there, or why it would refuse:
 // asked of every server before any changes.
 func CheckInstall(ctx context.Context, r remote.Runner) (installPlan, error) {
-	out, err := r.Run(ctx, "sh", "-c", factsScript)
-	if err != nil {
-		return installPlan{}, fmt.Errorf("reading the server: %w", err)
+	_, p, err := prepare(ctx, r)
+	return p, err
+}
+
+// prepare reads the server and plans its install. A plan that installs packages, or that cannot tell
+// the version of docker.io because apt has no package index yet, gets the index refreshed and the
+// server read and planned again: the version checked is the one apt will install, and is checked before
+// any change. Every other refusal comes first, without apt. The refresh is the one write a check makes,
+// and nothing boks is responsible for.
+func prepare(ctx context.Context, r remote.Runner) (hostFacts, installPlan, error) {
+	read := func() (hostFacts, installPlan, error) {
+		out, err := r.Run(ctx, "sh", "-c", factsScript)
+		if err != nil {
+			return hostFacts{}, installPlan{}, fmt.Errorf("reading the server: %w", err)
+		}
+		f, err := parseFacts(out)
+		if err != nil {
+			return f, installPlan{}, err
+		}
+		p, err := planInstall(f)
+		return f, p, err
 	}
-	f, err := parseFacts(out)
-	if err != nil {
-		return installPlan{}, err
+	f, p, err := read()
+	if !errors.Is(err, errNoCandidate) && (err != nil || len(p.packages) == 0) {
+		return f, p, err
 	}
-	return planInstall(f)
+	if err := aptGet(ctx, r, sudoFor(f), "update", "-q"); err != nil {
+		return f, p, err
+	}
+	return read()
+}
+
+// sudoFor is what root's commands are prefixed with for the SSH user of f.
+func sudoFor(f hostFacts) []string {
+	if f.uid == 0 {
+		return nil
+	}
+	return []string{"sudo", "-n"}
+}
+
+// aptGet runs apt-get through aptScript.
+func aptGet(ctx context.Context, r remote.Runner, sudo []string, args ...string) error {
+	if _, err := r.Run(ctx, append(append(slices.Clone(sudo), "sh", "-c", aptScript, "apt-get"), args...)...); err != nil {
+		return fmt.Errorf("apt-get %s: %w", args[0], err)
+	}
+	return nil
 }
 
 const installAction = "server install"
@@ -453,46 +493,15 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 		return err
 	}
 	defer adm.release(ctx)
-	out, err := r.Run(ctx, "sh", "-c", factsScript)
-	if err != nil {
-		return fmt.Errorf("reading the server: %w", err)
-	}
-	f, err := parseFacts(out)
-	if err != nil {
-		return err
-	}
-	p, err := planInstall(f)
+	f, p, err := prepare(ctx, r)
 	if err != nil {
 		return err
 	}
 	for _, n := range p.notes {
 		fmt.Fprintf(log, "note: %s\n", n)
 	}
-	sudo := []string{}
-	if f.uid != 0 {
-		sudo = []string{"sudo", "-n"}
-	}
+	sudo := sudoFor(f)
 	as := func(args ...string) []string { return append(slices.Clone(sudo), args...) }
-	apt := func(args ...string) []string {
-		return as(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-o", "DPkg::Lock::Timeout=300"}, args...)...)
-	}
-	// The package index is read before the journal opens: refreshing it changes nothing boks is
-	// responsible for, and a docker.io too old for boks, seen only once it is fresh, is still a refusal
-	// before any change.
-	if len(p.packages) > 0 {
-		if _, err := r.Run(ctx, apt("update", "-q")...); err != nil {
-			return fmt.Errorf("apt-get update: %w", err)
-		}
-		if p.candidateUnknown {
-			out, err := r.Run(ctx, "sh", "-c", candidateScript)
-			if err != nil {
-				return fmt.Errorf("reading the docker.io package: %w", err)
-			}
-			if err := checkCandidate(strings.TrimSpace(out)); err != nil {
-				return err
-			}
-		}
-	}
 	op := ""
 	if !p.empty() {
 		if op, err = beginServer(ctx, r, log, o, installAction, "", strings.Join(p.packages, " ")); err != nil {
@@ -522,8 +531,8 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 	}
 	if len(p.packages) > 0 {
 		fmt.Fprintf(log, "apt: installing %s\n", strings.Join(p.packages, " "))
-		if _, err := r.Run(ctx, apt(append([]string{"install", "-y", "-q", "--no-install-recommends"}, p.packages...)...)...); err != nil {
-			return fail(fmt.Errorf("apt-get install: %w", err))
+		if err := aptGet(ctx, r, sudo, append([]string{"install", "-y", "-q", "--no-install-recommends"}, p.packages...)...); err != nil {
+			return fail(err)
 		}
 	}
 	if p.enableDocker || slices.Contains(p.packages, "docker.io") {

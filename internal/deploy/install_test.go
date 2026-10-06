@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -215,6 +219,9 @@ func TestPlanInstallRefuses(t *testing.T) {
 
 const factsCall = "sh -c " + factsScript
 
+// aptCall is how apt-get is run, before its arguments.
+const aptCall = "sh -c " + aptScript + " apt-get "
+
 // installFake is a server answering facts, with the proxy already running.
 func installFake(facts string) *fake {
 	f := newFake()
@@ -234,10 +241,14 @@ func TestInstallOnAnEmptyServer(t *testing.T) {
 	}
 	lock, facts := f.callAt(admitTake("_proxy")), f.callAt(factsCall)
 	daemon := f.writeAt("/etc/docker/daemon.json", `"max-file": "3"`)
-	apt := f.callAt("env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q --no-install-recommends docker.io cron")
+	apt := f.callAt(aptCall + "install -y -q --no-install-recommends docker.io cron")
 	enable, cron := f.callAt("systemctl enable --now docker"), f.callAt("systemctl enable --now cron")
 	unlock := f.callAt(admitGive("_proxy"))
 	// daemon.json is there before the package starts dockerd; the facts are read again under the lock.
+	// The package index is fresh before the plan is final: the docker.io checked is the one installed.
+	if update := f.callAt(aptCall + "update"); update < facts || daemon < update {
+		t.Errorf("want apt-get update between the facts and daemon.json: %v", f.calls)
+	}
 	if lock < 0 || facts < lock || daemon < facts || apt < daemon || enable < apt || cron < enable || unlock < cron {
 		t.Errorf("order: lock %d facts %d daemon.json %d apt %d enable %d cron %d unlock %d\n%v", lock, facts, daemon, apt, enable, cron, unlock, f.calls)
 	}
@@ -269,14 +280,14 @@ func TestInstallAsASudoUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range f.calls {
-		for _, root := range []string{"env DEBIAN", "systemctl", "usermod"} {
+		for _, root := range []string{aptCall, "systemctl", "usermod"} {
 			if strings.HasPrefix(c, root) {
 				t.Errorf("a root step without sudo -n: %s", c)
 			}
 		}
 	}
 	usermod := f.callAt("sudo -n usermod -aG docker deploy")
-	if usermod < 0 || !f.has("sudo -n env DEBIAN_FRONTEND=noninteractive apt-get") || !f.has("sudo -n systemctl enable --now docker") {
+	if usermod < 0 || !f.has("sudo -n "+aptCall) || !f.has("sudo -n systemctl enable --now docker") {
 		t.Errorf("want root's steps through sudo -n: %v", f.calls)
 	}
 	var wrote string
@@ -335,32 +346,98 @@ func TestInstallJournalsAProxyBootAlone(t *testing.T) {
 	if j := f.appends[serverLog]; !strings.Contains(j, `"action":"server install"`) || !strings.Contains(j, `"result":"ok"`) || strings.Contains(log.String(), "nothing to change") {
 		t.Errorf("journal %s, log %s", j, log.String())
 	}
-	if f.has("apt-get") || f.has("sudo -n env") {
+	if f.has("sudo -n " + aptCall) {
 		t.Errorf("a prepared server ran apt: %v", f.calls)
 	}
 }
 
-// A fresh image may ship no package index: the docker.io version is read after apt-get update, and an
-// old one is still refused before any change.
-func TestInstallReadsAnUnknownCandidateAfterUpdate(t *testing.T) {
-	facts := strings.Replace(emptyNoble, "candidate=27.5.1-0ubuntu3~24.04.2", "candidate=", 1)
-	if _, err := plan(t, facts); err != nil {
-		t.Fatalf("an empty index refused before apt-get update: %v", err)
-	}
-	for candidate, ok := range map[string]bool{"29.1.3-0ubuntu3~24.04.2": true, "24.0.7-0ubuntu4": false, "": false} {
-		f, fresh := installFake(facts), installFake("")
-		f.out["sh -c "+candidateScript] = candidate
-		err := install(f, fresh)
-		update, read, daemon := f.callAt("env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update"), f.callAt("sh -c "+candidateScript), f.writeAt("/etc/docker/daemon.json", "")
-		if ok {
-			if err != nil || update < 0 || read < update || daemon < read {
-				t.Errorf("%q: got %v; update %d read %d daemon.json %d", candidate, err, update, read, daemon)
+// A fresh image may ship no package index: the check refreshes it and reads the server again, so an
+// old docker.io is refused by the check of every server, before any of them changes.
+func TestInstallReadsAFreshImagesCandidateAfterUpdate(t *testing.T) {
+	noIndex := strings.Replace(emptyNoble, "candidate=27.5.1-0ubuntu3~24.04.2", "candidate=", 1)
+	server := func(candidate string) *fake {
+		f := installFake(noIndex)
+		f.onRun = func(cmd string) {
+			if strings.HasPrefix(cmd, aptCall+"update") {
+				f.out[factsCall] = strings.Replace(noIndex, "candidate=", "candidate="+candidate, 1)
 			}
-			continue
 		}
-		if err == nil || !strings.Contains(err.Error(), "older than Docker 25") || len(f.uploads) > 0 || len(f.appends) > 0 || f.has("env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install") || !f.has(admitGive("_proxy")) {
-			t.Errorf("%q: want a refusal with nothing changed and the lock given back, got %v; %v", candidate, err, f.calls)
+		return f
+	}
+	for _, candidate := range []string{"24.0.7-0ubuntu4", "(none)"} {
+		f := server(candidate)
+		if _, err := CheckInstall(context.Background(), f); err == nil || !strings.Contains(err.Error(), "older than Docker 25") {
+			t.Errorf("%s: want the check to refuse, got %v", candidate, err)
 		}
+		if len(f.uploads) > 0 || len(f.appends) > 0 || f.has(aptCall+"install") {
+			t.Errorf("%s: the check changed the server: %v", candidate, f.calls)
+		}
+	}
+	f, fresh := server("29.1.3-0ubuntu3~24.04.2"), installFake("")
+	if err := install(f, fresh); err != nil {
+		t.Fatal(err)
+	}
+	update, daemon := f.callAt(aptCall+"update"), f.writeAt("/etc/docker/daemon.json", "")
+	if update < 0 || daemon < update || !f.has(aptCall+"install -y -q --no-install-recommends docker.io") {
+		t.Errorf("update %d daemon.json %d: %v", update, daemon, f.calls)
+	}
+}
+
+// aptScript, run by sh against a stand-in apt-get: a lock held by another apt is waited for until the
+// deadline, anything else fails at once with apt's words. date and sleep are stand-ins too, so the
+// five minutes pass in no time.
+func TestAptScriptWaitsForALockAndNothingElse(t *testing.T) {
+	run := func(t *testing.T, answers ...string) (string, int, error) {
+		t.Helper()
+		dir := t.TempDir()
+		stub := func(name, body string) {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Each call of apt-get gives the next answer: "ok" succeeds, anything else is printed and fails.
+		var script strings.Builder
+		script.WriteString("n=$(cat " + dir + "/n 2>/dev/null || echo 0); echo $((n+1)) > " + dir + "/n\ncase $n in\n")
+		for i, a := range answers {
+			if a == "ok" {
+				fmt.Fprintf(&script, "%d) exit 0 ;;\n", i)
+			} else {
+				fmt.Fprintf(&script, "%d) echo %q; exit 100 ;;\n", i, a)
+			}
+		}
+		script.WriteString("*) echo 'E: Could not get lock /var/lib/apt/lists/lock'; exit 100 ;;\nesac\n")
+		stub("apt-get", script.String())
+		stub("sleep", "")
+		// Every call of date is a minute later than the one before.
+		stub("date", "t=$(cat "+dir+"/t 2>/dev/null || echo 0); echo $((t+60)) > "+dir+"/t; echo $t\n")
+		cmd := exec.Command("sh", "-c", aptScript, "apt-get", "update", "-q")
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+		out, err := cmd.CombinedOutput()
+		n, _ := os.ReadFile(filepath.Join(dir, "n"))
+		calls, _ := strconv.Atoi(strings.TrimSpace(string(n)))
+		return string(out), calls, err
+	}
+	lock := "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 812 (apt-get)"
+	if out, calls, err := run(t, lock, lock, "ok"); err != nil || calls != 3 {
+		t.Errorf("a lock let go of: want success on the third try, got %v after %d: %s", err, calls, out)
+	}
+	if out, calls, err := run(t, "E: Unable to locate package docker.io"); err == nil || calls != 1 || !strings.Contains(out, "Unable to locate") {
+		t.Errorf("another failure: want it at once with apt's words, got %v after %d: %s", err, calls, out)
+	}
+	if out, calls, err := run(t); err == nil || calls < 3 || calls > 7 || !strings.Contains(out, "Could not get lock") {
+		t.Errorf("a lock never let go of: want a failure after about five minutes, got %v after %d: %s", err, calls, out)
+	}
+}
+
+// A failed refresh of the package index stops the install before anything is written.
+func TestInstallStopsOnAFailedUpdateBeforeAnyChange(t *testing.T) {
+	f, fresh := installFake(emptyNoble), installFake("")
+	f.fail[aptCall+"update"] = errors.New("E: Could not get lock")
+	if err := install(f, fresh); err == nil || !strings.Contains(err.Error(), "apt-get update") {
+		t.Fatalf("got %v", err)
+	}
+	if len(f.uploads) > 0 || len(f.appends) > 0 || f.has(aptCall+"install") || !f.has(admitGive("_proxy")) {
+		t.Errorf("want nothing written and the lock given back: %v %v", f.uploads, f.calls)
 	}
 }
 
@@ -369,12 +446,12 @@ func TestInstallReadsAnUnknownCandidateAfterUpdate(t *testing.T) {
 func TestInstallRestartsDockerRightAfterTheWrite(t *testing.T) {
 	idle := strings.NewReplacer("running=1\n", "running=0\n", "network=boks-web\n", "", "crontab=yes\n", "").Replace(readyNoble)
 	f, fresh := installFake(idle), installFake("")
-	f.fail["sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install"] = errors.New("E: broken")
+	f.fail["sudo -n "+aptCall+"install"] = errors.New("E: broken")
 	if err := install(f, fresh); err == nil {
 		t.Fatal("want the apt failure")
 	}
 	restart := f.callAt("sudo -n systemctl restart docker")
-	if restart < 0 || f.callAt("sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install") < restart {
+	if restart < 0 || f.callAt("sudo -n "+aptCall+"install") < restart {
 		t.Errorf("want dockerd restarted before apt: %v", f.calls)
 	}
 }
@@ -403,14 +480,14 @@ func TestInstallRefusesUnderTheLockBeforeAnyChange(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "nginx") {
 		t.Fatalf("want a refusal naming nginx, got %v", err)
 	}
-	if len(f.uploads) > 0 || len(f.appends) > 0 || f.has("env DEBIAN") || len(fresh.calls) > 0 || !f.has(admitGive("_proxy")) {
+	if len(f.uploads) > 0 || len(f.appends) > 0 || f.has(aptCall) || len(fresh.calls) > 0 || !f.has(admitGive("_proxy")) {
 		t.Errorf("want nothing changed and the lock given back: %v", f.calls)
 	}
 }
 
 func TestInstallJournalsAFailedStep(t *testing.T) {
 	f, fresh := installFake(emptyNoble), installFake("")
-	f.fail["env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install"] = errors.New("E: Unable to locate package")
+	f.fail[aptCall+"install"] = errors.New("E: Unable to locate package")
 	err := install(f, fresh)
 	if err == nil || !strings.Contains(err.Error(), "apt-get install") {
 		t.Fatalf("got %v", err)
