@@ -129,11 +129,7 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	if err != nil {
 		return err
 	}
-	if open, err := release.Unfinished(ctx, r, serverJournal); err == nil && open != nil {
-		fmt.Fprintf(log, "warning: %s started %s and never finished; this run replaces it\n", open.Action, open.StartedAt.Format(time.RFC3339))
-		finish(ctx, r, log, serverJournal, open.Op, "abandoned", o.Now())
-	}
-	op, err := release.Begin(ctx, r, serverJournal, action, strconv.Itoa(cur.Revision), strconv.Itoa(next.Revision), o.Now())
+	op, err := beginServer(ctx, r, log, o, action, strconv.Itoa(cur.Revision), strconv.Itoa(next.Revision))
 	if err != nil {
 		return err
 	}
@@ -147,6 +143,16 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 		fmt.Fprintf(log, "  %s is not running on this server: nothing is filtered until it starts and loads this policy\n", proxy.Container)
 	}
 	return nil
+}
+
+// beginServer opens an entry in the server's journal, and closes as abandoned the one a cut run left
+// open: `boks server status` names the newest open entry, and one left open would be named forever.
+func beginServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, action, from, to string) (string, error) {
+	if open, err := release.Unfinished(ctx, r, serverJournal); err == nil && open != nil {
+		fmt.Fprintf(log, "warning: %s started %s and never finished; this run replaces it\n", open.Action, open.StartedAt.Format(time.RFC3339))
+		finish(ctx, r, log, serverJournal, open.Op, "abandoned", o.Now())
+	}
+	return release.Begin(ctx, r, serverJournal, action, from, to, o.Now())
 }
 
 // ServerStatus is what a server applies, and the run that changed it and never finished, if any.

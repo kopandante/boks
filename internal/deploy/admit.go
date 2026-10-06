@@ -11,6 +11,7 @@ import (
 
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -58,6 +59,37 @@ func BootProxy(ctx context.Context, r remote.Runner, log io.Writer, image string
 	}
 	return then()
 }
+
+// UpgradeProxy replaces the running proxy with one from image (proxy.Upgrade), under the server's
+// admission lock and in the server's journal from the moment its checks have passed: a run cut in
+// the middle of the swap is the one the next `boks server status` names.
+func UpgradeProxy(ctx context.Context, r remote.Runner, log io.Writer, image string, o Options) error {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	adm, err := admit(ctx, r, log, proxyHolder, o)
+	if err != nil {
+		return err
+	}
+	defer adm.release(ctx)
+	op := ""
+	err = proxy.Upgrade(ctx, r, log, image, func(from string) error {
+		var err error
+		op, err = beginServer(ctx, r, log, o, upgradeAction, from, image)
+		return err
+	})
+	finish(ctx, r, log, serverJournal, op, map[bool]string{true: "ok", false: "failed"}[err == nil], o.Now())
+	if err == nil && op == "" {
+		// Nothing to swap: the proxy runs image. An upgrade to it that a cut run left open got that far,
+		// and is closed; any other open entry is left for its own command to name.
+		if open, oerr := release.Unfinished(ctx, r, serverJournal); oerr == nil && open != nil && open.Action == upgradeAction && open.To == image {
+			finish(ctx, r, log, serverJournal, open.Op, "ok", o.Now())
+		}
+	}
+	return err
+}
+
+const upgradeAction = "proxy upgrade"
 
 func bootProxy(ctx context.Context, r remote.Runner, log io.Writer, holder, image string, o Options) error {
 	adm, err := admit(ctx, r, log, holder, o)

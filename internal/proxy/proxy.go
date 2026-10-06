@@ -76,6 +76,13 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 		if err := checkMigrateReq(ctx, r); err != nil {
 			return err
 		}
+		// A running proxy is left alone, whatever image the config names: replacing it is an outage,
+		// and that is `boks proxy upgrade`, asked for — but not in silence.
+		if current, err := Image(ctx, r); err != nil {
+			return err
+		} else if current != image {
+			fmt.Fprintf(log, "warning: the proxy runs %s, and the config names %s; `boks proxy upgrade` replaces it (80 and 443 are down meanwhile)\n", current, image)
+		}
 		if err := reattach(ctx, r, log, fs); err != nil {
 			return err
 		}
@@ -134,16 +141,25 @@ func checkMigrateReq(ctx context.Context, r remote.Runner) error {
 
 // create makes the proxy container without starting it; the applied config it loads is in place.
 func create(ctx context.Context, r remote.Runner, image string) error {
-	// Docker takes a bind source only as an absolute path, and Dir lives under the SSH user's home.
-	abs, err := r.Run(ctx, "sh", "-c", "cd "+remote.Quote(Dir)+" && pwd -P")
+	abs, err := stateDir(ctx, r)
 	if err != nil {
-		return fmt.Errorf("resolving %s on the server: %w", Dir, err)
-	}
-	if !strings.HasPrefix(abs, "/") || strings.Contains(abs, ":") {
-		return fmt.Errorf("%s resolves to %q, which docker cannot mount", Dir, abs)
+		return err
 	}
 	_, err = r.Run(ctx, CreateArgs(image, abs)...)
 	return err
+}
+
+// stateDir is Dir as an absolute path: docker takes nothing else as a bind source, and Dir lives
+// under the SSH user's home.
+func stateDir(ctx context.Context, r remote.Runner) (string, error) {
+	abs, err := r.Run(ctx, "sh", "-c", "cd "+remote.Quote(Dir)+" && pwd -P")
+	if err != nil {
+		return "", fmt.Errorf("resolving %s on the server: %w", Dir, err)
+	}
+	if !strings.HasPrefix(abs, "/") || strings.Contains(abs, ":") {
+		return "", fmt.Errorf("%s resolves to %q, which docker cannot mount", Dir, abs)
+	}
+	return abs, nil
 }
 
 // reattach puts the proxy on the networks of the containers its routes dial that it is not on. The

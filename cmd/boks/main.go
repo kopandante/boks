@@ -32,6 +32,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   proxy list       routes the proxy serves, for every app on each server
   proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
                    every app on the server (once per server)
+  proxy upgrade    replace the running proxy with proxy_image (a boot leaves a running one alone);
+                   80 and 443 are down for the swap, and a failed one puts the old proxy back
   unlock           clear a stale deploy lock, and the server's admission lock if this app or a
                    proxy boot left it
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
@@ -358,7 +360,7 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 
 func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
 	if len(args) != 1 {
-		return fmt.Errorf("proxy needs one of: boot, list, migrate")
+		return fmt.Errorf("proxy needs one of: boot, list, migrate, upgrade")
 	}
 	switch args[0] {
 	case "boot":
@@ -374,6 +376,10 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 	case "migrate":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return deploy.MigrateProxy(ctx, r, out, cfg.ProxyImage, deploy.Options{})
+		})
+	case "upgrade":
+		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+			return deploy.UpgradeProxy(ctx, r, out, cfg.ProxyImage, deploy.Options{Now: now})
 		})
 	}
 	return fmt.Errorf("unknown proxy command %q", args[0])

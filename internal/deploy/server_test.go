@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -203,5 +204,82 @@ func TestCheckServerRollback(t *testing.T) {
 	f.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(old)
 	if err := CheckServerRollback(context.Background(), f, 3); err != nil {
 		t.Errorf("want revision 3 taken: %v", err)
+	}
+}
+
+// upgradeFake is a server whose Caddy runs caddy:old with no routes.
+func upgradeFake() *fake {
+	f := newFake()
+	f.out[proxyState] = caddyUp
+	f.out[proxyImage] = "caddy:old"
+	return f
+}
+
+// An upgrade journals the swap alone, under the admission lock: what refuses before the stop opens
+// nothing, a swap that fails closes failed, and an entry a cut run left open is closed as abandoned
+// rather than named by `boks server status` forever.
+func TestUpgradeProxyJournalsTheSwapAlone(t *testing.T) {
+	f := upgradeFake()
+	if err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if j := f.appends[serverLog]; !strings.Contains(j, `"action":"proxy upgrade","from":"caddy:old","to":"caddy:new"`) || !strings.Contains(j, `"result":"ok"`) {
+		t.Errorf("want the swap journaled and closed: %s", j)
+	}
+	lock, stop, unlock := f.at(admitTake(proxyHolder)), f.at("docker stop boks-proxy"), f.at(admitGive(proxyHolder))
+	if lock < 0 || stop < lock || unlock < stop {
+		t.Errorf("want the swap under the admission lock: %v", f.calls)
+	}
+
+	for name, setup := range map[string]func(*fake){
+		"refuses the proxy's config": func(f *fake) { f.fail["docker run --rm"] = errors.New("unknown field") },
+		// A swap cut after the new proxy was made: its image is the one asked for, and still the cut
+		// swap is named rather than "already runs".
+		"left from an upgrade": func(f *fake) {
+			f.out[proxyImage] = "caddy:new"
+			f.out[`docker ps -a --filter name=^boks-proxy\.old$`] = "boks-proxy.old"
+		},
+	} {
+		f := upgradeFake()
+		setup(f)
+		err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed)
+		if err == nil || !strings.Contains(err.Error(), name) || f.appends[serverLog] != "" || f.has("docker stop") {
+			t.Errorf("%s: want a refusal with nothing journaled or stopped, got %v %q", name, err, f.appends[serverLog])
+		}
+		if !f.has(admitGive(proxyHolder)) {
+			t.Errorf("%s: the admission lock was kept", name)
+		}
+	}
+
+	f = upgradeFake()
+	f.fail["docker create --name boks-proxy"] = errors.New("no space left")
+	if err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed); err == nil || !strings.Contains(f.appends[serverLog], `"result":"failed"`) {
+		t.Errorf("a failed swap: want it journaled failed, got %v %s", err, f.appends[serverLog])
+	}
+
+	// A run cut after the new proxy answered, before its entry closed: the retry finds the image in
+	// place and closes that upgrade, and only that one.
+	for open, want := range map[string]bool{
+		`{"op":"1","action":"proxy upgrade","from":"caddy:old","to":"caddy:new","started_at":"2026-01-01T00:00:00Z"}`: true,
+		`{"op":"1","action":"proxy upgrade","from":"caddy:new","to":"caddy:old","started_at":"2026-01-01T00:00:00Z"}`: false,
+		`{"op":"1","action":"server apply","from":"3","to":"4","started_at":"2026-01-01T00:00:00Z"}`:                  false,
+	} {
+		f = upgradeFake()
+		f.out[proxyImage] = "caddy:new"
+		f.out["sh -c cat '.boks/_server/journal.jsonl'"] = open
+		err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed)
+		j := f.appends[serverLog]
+		closed := strings.Contains(j, `{"op":"1","finished_at":`) && strings.HasSuffix(strings.TrimSpace(j), `"result":"ok"}`)
+		if err != nil || closed != want || strings.Contains(j, `{"op":"1"`) != want || f.has("docker stop") ||
+			strings.Contains(f.appends[serverLog], `"started_at"`) {
+			t.Errorf("already runs, open %s: want closed=%v and nothing begun, got %v %s", open, want, err, f.appends[serverLog])
+		}
+	}
+
+	f = upgradeFake()
+	f.out["sh -c cat '.boks/_server/journal.jsonl'"] = `{"op":"1","action":"proxy upgrade","from":"a","to":"b","started_at":"2026-01-01T00:00:00Z"}`
+	if err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed); err != nil || !strings.Contains(f.appends[serverLog], `{"op":"1","finished_at":`) ||
+		!strings.Contains(f.appends[serverLog], `"result":"abandoned"`) {
+		t.Errorf("want the open entry closed as abandoned: %v %s", err, f.appends[serverLog])
 	}
 }
