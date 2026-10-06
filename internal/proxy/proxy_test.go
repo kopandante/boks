@@ -143,7 +143,7 @@ func TestBootCatchesARunningProxyUp(t *testing.T) {
 	// repairs a certificate file a cut run left broken.
 	h := &fake{state: "running\tcaddy", fail: map[string]error{"docker exec boks-proxy caddy reload": errors.New("loading new config: tls: failed to find any PEM data in key input")}}
 	var log strings.Builder
-	if err := Boot(context.Background(), h, &log, "img"); err != nil || !strings.Contains(log.String(), "warning: the proxy runs an older config") {
+	if err := Boot(context.Background(), h, &log, "img"); err != nil || !strings.Contains(log.String(), "warning: the proxy may run an older config") {
 		t.Errorf("want a warning and a boot: %v %q", err, log.String())
 	}
 }
@@ -307,6 +307,8 @@ func (l late) Run(_ context.Context, args ...string) (string, error) {
 		return "exited\tcaddy", nil
 	case cmd == answer:
 		time.Sleep(l.delay)
+	case strings.HasPrefix(cmd, "docker exec boks-proxy cat /proc/sys/"):
+		return "1", nil // the sysctl is right: only the late answer can fail the boot
 	}
 	return "", nil
 }
@@ -317,9 +319,16 @@ func (l late) Pipe(ctx context.Context, _ []byte, args ...string) (string, error
 
 // The wait is bounded as a whole: an answer that comes after the bound is not one.
 func TestBootRejectsAnAnswerAfterTheBound(t *testing.T) {
+	w0, p0 := answerWait, answerPoll
+	t.Cleanup(func() { answerWait, answerPoll = w0, p0 })
 	answerWait, answerPoll = 5*time.Millisecond, time.Millisecond
-	if err := Boot(context.Background(), late{delay: 50 * time.Millisecond}, io.Discard, "img"); err == nil {
-		t.Fatal("an answer after the bound must fail Boot")
+	if err := Boot(context.Background(), late{delay: 50 * time.Millisecond}, io.Discard, "img"); err == nil || !strings.Contains(err.Error(), "did not answer") {
+		t.Fatalf("an answer after the bound must fail Boot as no answer, got %v", err)
+	}
+	// The same proxy answering within the bound boots: the failure above is the bound's.
+	answerWait = time.Second
+	if err := Boot(context.Background(), late{delay: 5 * time.Millisecond}, io.Discard, "img"); err != nil {
+		t.Fatalf("an answer within the bound boots, got %v", err)
 	}
 }
 

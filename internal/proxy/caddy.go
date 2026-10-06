@@ -119,6 +119,17 @@ func Config(fragments []Fragment) ([]byte, error) {
 		return all[i].r.Host < all[j].r.Host
 	})
 
+	// Hosts with TLS are on another server than a wildcard without TLS, and on :80 Caddy redirects them
+	// to HTTPS only after every route of its own: a wildcard there would take plain HTTP for an exact
+	// host with TLS that it covers. kamal-proxy took the exact host first and redirected; so does this,
+	// by keeping those hosts out of the wildcard's match.
+	var secure []string
+	for _, e := range all {
+		if e.r.TLS && !strings.HasPrefix(e.r.Host, "*") {
+			secure = append(secure, e.r.Host)
+		}
+	}
+
 	servers := map[string]*server{}
 	var files []loadFile
 	var skip []string
@@ -139,8 +150,21 @@ func Config(fragments []Fragment) ([]byte, error) {
 			}
 			servers[name] = s
 		}
+		m := match{Host: []string{e.r.Host}}
+		if suffix, ok := strings.CutPrefix(strings.ToLower(e.r.Host), "*"); ok && !e.r.TLS {
+			var covered []string
+			for _, h := range secure {
+				// Caddy's wildcard stands for one label.
+				if label, ok := strings.CutSuffix(strings.ToLower(h), suffix); ok && label != "" && !strings.Contains(label, ".") {
+					covered = append(covered, h)
+				}
+			}
+			if len(covered) > 0 {
+				m.Not = []match{{Host: covered}}
+			}
+		}
 		s.Routes = append(s.Routes, caddyRoute{
-			Match: []match{{Host: []string{e.r.Host}}},
+			Match: []match{m},
 			Handle: []handler{{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: e.r.Dial}}, StreamCloseDelay: streamCloseDelay,
 				Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
 				// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on.
@@ -209,7 +233,8 @@ type (
 		Terminal bool      `json:"terminal"`
 	}
 	match struct {
-		Host []string `json:"host"`
+		Host []string `json:"host,omitempty"`
+		Not  []match  `json:"not,omitempty"`
 	}
 	handler struct {
 		Handler          string        `json:"handler"`
@@ -456,8 +481,10 @@ func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment
 	}
 	if _, err := r.Run(ctx, reloadArgs...); err != nil {
 		// Caddy checks a config before it lets go of the running one, so a refused reload leaves the
-		// proxy serving what it served.
-		return false, fmt.Errorf("the proxy refused the new routes and keeps the ones it had: %w", err)
+		// proxy serving what it served. A failed call is not a refusal, though: its answer can be lost
+		// after Caddy took the config, so the message claims neither.
+		return false, fmt.Errorf("reloading the proxy with %s failed: if Caddy refused the config it still runs the one it had, "+
+			"but the answer may have been lost after it took the new one: %w", what, err)
 	}
 	if _, err := r.Run(ctx, "mv", nextPath(), appliedPath()); err != nil {
 		return true, fmt.Errorf("recording the proxy's config: %w", err)

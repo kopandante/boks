@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -314,8 +315,10 @@ func TestSetRoutesRecordsNothingCaddyRefused(t *testing.T) {
 	before := d.files[Dir+"/caddy.json"]
 	d.fail[reloadNext] = errors.New("loading new config: open /certs/boks/x.crt: no such file")
 	touched, err := SetRoutes(context.Background(), d, io.Discard, "demo", web)
-	if err == nil || !strings.Contains(err.Error(), "keeps the ones it had") {
-		t.Fatalf("want the refusal, got %v", err)
+	// A failed call is not known to be a refusal: the message names the reload and claims neither.
+	if err == nil || !strings.Contains(err.Error(), "reloading the proxy with the routes of demo failed") ||
+		!strings.Contains(err.Error(), "may have been lost") {
+		t.Fatalf("want the failed reload, neither refusal nor success claimed, got %v", err)
 	}
 	// Whether Caddy acted is not known from a failed call, so the caller is told to put routes back.
 	if !touched {
@@ -444,6 +447,35 @@ func TestConfigPutsAWildcardAfterTheExactHosts(t *testing.T) {
 	}
 	if len(hosts) != 3 || hosts[0] != "api.example.com" || hosts[1] != "zz.example.com" || hosts[2] != "*.example.com" {
 		t.Errorf("want the exact hosts first, then the wildcard: %v", hosts)
+	}
+}
+
+// An exact host with TLS covered by a wildcard without TLS lives on the other server, and on :80 Caddy
+// redirects only after its own routes: the wildcard leaves out the hosts with TLS it covers, so their
+// plain HTTP gets Caddy's redirect, as kamal-proxy redirected it. Hosts it does not cover, a wildcard
+// with TLS, and a host two labels deeper stay out of it.
+func TestConfigWildcardWithoutTLSLeavesTheTLSHostsItCovers(t *testing.T) {
+	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}},
+		{App: "b", Routes: []Route{{Host: "API.example.com", Dial: "b:80", TLS: true}, {Host: "b.example.com", Dial: "b:81", TLS: true},
+			{Host: "plain.example.com", Dial: "b:82"}, {Host: "x.y.example.com", Dial: "b:83", TLS: true},
+			{Host: "other.org", Dial: "b:84", TLS: true}, {Host: "*.tls.example.com", Dial: "b:85", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, _ := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
+	last := dig(routes[len(routes)-1], "match").([]any)[0].(map[string]any)
+	not, _ := last["not"].([]any)
+	if last["host"].([]any)[0] != "*.example.com" || len(not) != 1 {
+		t.Fatalf("want the wildcard last, with one negated set: %v", last)
+	}
+	got := fmt.Sprint(not[0].(map[string]any)["host"])
+	if got != "[API.example.com b.example.com]" {
+		t.Errorf("want only the exact TLS hosts it covers left out, got %s", got)
+	}
+	// No TLS host under it: the match is the host alone, the bytes as before.
+	c, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "*.example.com", Dial: "a:80"}}}})
+	if strings.Contains(string(c), `"not"`) {
+		t.Errorf("no negation without a TLS host to leave out:\n%s", c)
 	}
 }
 

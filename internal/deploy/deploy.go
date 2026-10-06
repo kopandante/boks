@@ -294,7 +294,7 @@ func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 	if touched {
 		if rerr := restoreRoutes(context.WithoutCancel(ctx), r, log, cfg, o, nil, was); rerr != nil {
 			return fmt.Errorf("%w\nputting the routes back failed too (%v), so %s may be serving and is left running; "+
-				"run `%s` again or check `boks proxy list` — the operation stays open in the journal", err, rerr, name, l.again)
+				"run `%s` again (until then the proxy may run other routes than `boks proxy list` shows) — the operation stays open in the journal", err, rerr, name, l.again)
 		}
 	}
 	if !discard(context.WithoutCancel(ctx), r, log, cfg.App, name) {
@@ -356,7 +356,7 @@ func replaceStopFirst(ctx context.Context, r remote.Runner, log io.Writer, cfg *
 	if touched {
 		if rerr := restoreRoutes(cleanup, r, log, cfg, o, adm, was); rerr != nil {
 			return fmt.Errorf("%w\nputting the routes back failed too (%v), so %s is left running and %v stopped rather than risk two copies at once; "+
-				"run `%s` again or check `boks proxy list` — the operation stays open in the journal", err, rerr, name, stopped, l.again)
+				"run `%s` again (until then the proxy may run other routes than `boks proxy list` shows) — the operation stays open in the journal", err, rerr, name, stopped, l.again)
 		}
 	}
 	// A failed `docker run` may still have created the container, and a failed stop may have left it

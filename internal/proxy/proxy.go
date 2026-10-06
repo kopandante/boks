@@ -87,7 +87,7 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 			return err
 		}
 		if _, err := converge(ctx, r, log, fs, false, "the routes on the server"); err != nil {
-			fmt.Fprintf(log, "warning: the proxy runs an older config than the routes on the server say: %v\n", err)
+			fmt.Fprintf(log, "warning: the proxy may run an older config than the routes on the server say: %v\n", err)
 		}
 		return nil
 	}
