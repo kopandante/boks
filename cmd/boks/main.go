@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kopandante/boks/internal/cert"
@@ -35,6 +37,13 @@ const usage = `usage: boks [-f boks.yml] <command>
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
   cert renew       same, but lego skips the run unless the certificate is due (safe in a cron)
   cert status      subject and expiry of the certificate each server currently serves
+  server apply <server.yml>
+                   apply the server's policy (the bot filter) to the servers it lists; the
+                   file's revision must be the one after the highest each server applied
+  server rollback <server.yml> <revision>
+                   put back the policy of an earlier revision on those servers
+  server status <server.yml>
+                   the revision each server applies, and a run that never finished
   cert pull        copy the certificate and its lego metadata back from the first server, so a
                    renewal elsewhere can tell whether anything is due without holding the key
 
@@ -60,6 +69,14 @@ func run(args []string, out, errw io.Writer) int {
 	if fs.NArg() == 0 {
 		fmt.Fprint(errw, usage)
 		return 2
+	}
+	// server.yml belongs to the server, not to an app: no boks.yml is read for it.
+	if fs.Arg(0) == "server" {
+		if err := serverCmd(context.Background(), fs.Args()[1:], out); err != nil {
+			fmt.Fprintln(errw, "error:", err)
+			return 1
+		}
+		return 0
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -351,4 +368,80 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		})
 	}
 	return fmt.Errorf("unknown proxy command %q", args[0])
+}
+
+func serverCmd(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) < 2 {
+		return fmt.Errorf("server needs one of: apply <server.yml>, rollback <server.yml> <revision>, status <server.yml>")
+	}
+	sc, err := config.LoadServer(args[1])
+	if err != nil {
+		return err
+	}
+	on := func(fn action) error {
+		for _, s := range sc.Servers {
+			fmt.Fprintf(out, "== %s\n", s)
+			if err := fn(ctx, connect(s)); err != nil {
+				return fmt.Errorf("%s: %w", s, err)
+			}
+		}
+		return nil
+	}
+	// Every server is asked before any changes: a refusal halfway down the list would leave the fleet
+	// on two policies.
+	askAll := func(ask action) error {
+		for _, s := range sc.Servers {
+			if err := ask(ctx, connect(s)); err != nil {
+				return fmt.Errorf("%s: %w", s, err)
+			}
+		}
+		return nil
+	}
+	o := deploy.Options{Now: now}
+	switch {
+	case args[0] == "apply" && len(args) == 2:
+		next := policyOf(sc)
+		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next) }); err != nil {
+			return err
+		}
+		return on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) })
+	case args[0] == "rollback" && len(args) == 3:
+		rev, err := strconv.Atoi(args[2])
+		if err != nil || rev < 1 {
+			return fmt.Errorf("rollback needs a revision, a whole number from 1; `boks server status` shows the current one")
+		}
+		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckServerRollback(ctx, r, rev) }); err != nil {
+			return err
+		}
+		return on(func(ctx context.Context, r remote.Runner) error { return deploy.RollbackServer(ctx, r, out, rev, o) })
+	case args[0] == "status" && len(args) == 2:
+		return on(func(ctx context.Context, r remote.Runner) error {
+			p, open, err := deploy.ServerStatus(ctx, r)
+			if err != nil {
+				return err
+			}
+			if p.Revision == 0 {
+				fmt.Fprintln(out, "  no policy applied")
+			} else {
+				fmt.Fprintf(out, "  revision %d (highest applied %d): %d blocks, %d allows\n", p.Revision, p.Floor, len(p.Block), len(p.Allow))
+			}
+			if open != nil {
+				fmt.Fprintf(out, "  ! %s started %s and never finished; run it again\n", open.Action, open.StartedAt.Format(time.RFC3339))
+			}
+			return nil
+		})
+	}
+	return fmt.Errorf("unknown server command %q", strings.Join(args, " "))
+}
+
+// policyOf is a server.yml's policy as the proxy applies it.
+func policyOf(sc *config.Server) proxy.Policy {
+	p := proxy.Policy{Revision: sc.Revision}
+	for _, b := range sc.Bots.Block {
+		p.Block = append(p.Block, proxy.BotBlock{Name: b.Name, Domains: b.Domains, UserAgent: b.UserAgent})
+	}
+	for _, a := range sc.Bots.Allow {
+		p.Allow = append(p.Allow, proxy.BotAllow{Host: a.Host, Paths: a.Paths, UserAgent: a.UserAgent})
+	}
+	return p
 }

@@ -66,7 +66,7 @@ health check контейнера — `HEALTHCHECK` образа или блок
 | G6 | Расписания | auctions (`warm_namsuwon_catalog` каждые 4 мин) | **сделано** (feat/schedules): cron хоста + `boks-job`, снимок v8 (разбор codex: не контейнер-планировщик) |
 | G7 | Wildcard-хост `*.домен` | onestar (`cars-*.buying-korea.com`) | **сделано** поверх Caddy (C4): `*.домен` на одну метку, точные хосты раньше; `cars-*` внутри метки Caddy не матчит — onestar берёт `*.buying-korea.com`, чужие поддомены — точными хостами |
 | G8 | `stop_signal` | Convex-стеки (Dokploy шлёт SIGINT) | **сделано** (feat/run-options): `stop_signal:` → `--stop-signal`, в снимке v7 |
-| G9 | Фильтр по User-Agent на весь сервер | bot-policy Habsida | решение автора: форк kamal-proxy / приложения / внешний прокси |
+| G9 | Фильтр по User-Agent на весь сервер | bot-policy Habsida | **сделано** поверх Caddy (C5, feat/server-policy): `server.yml` + `boks server apply/rollback/status`, `bots.allow`/`bots.block` |
 
 Телеметрия (решение автора 2026-10-06): центр (Grafana, Prometheus, Loki) — на отдельном сервере, это
 обычные приложения boks. Сборщики на каждом сервере — вне boks (systemd), privileged/docker.sock в

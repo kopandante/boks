@@ -364,10 +364,10 @@ func TestALeftoverProxyBootLockIsNamed(t *testing.T) {
 	o.Poll, o.AdmitWait = time.Millisecond, 5*time.Millisecond
 	var log strings.Builder
 	err := Run(context.Background(), f, &log, parse(t, onePort), "v2", o)
-	if err == nil || !strings.Contains(err.Error(), "`boks proxy boot` or `boks cert` run has held") {
+	if err == nil || !strings.Contains(err.Error(), "`boks proxy boot`, `boks cert` or `boks server` run has held") {
 		t.Fatalf("want the proxy boot named, got %v", err)
 	}
-	if !strings.Contains(log.String(), "waiting for a `boks proxy boot` or `boks cert` run") {
+	if !strings.Contains(log.String(), "waiting for a `boks proxy boot`, `boks cert` or `boks server` run") {
 		t.Errorf("the wait names it too: %q", log.String())
 	}
 }
