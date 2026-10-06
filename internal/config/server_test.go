@@ -48,8 +48,8 @@ func TestParseServerRejects(t *testing.T) {
 		"more than one YAML document": "servers: [lab]\nrevision: 1\n---\nservers: [x]\n",
 		// An empty document hides nothing after it.
 		"read as one": "servers: [lab]\nrevision: 1\n---\n---\nbots:\n  block:\n    - {name: a, user_agent: gptbot}\n",
-		"name":                        block(`{name: Infra, user_agent: bot}`),
-		"used twice":                  "servers: [lab]\nrevision: 1\nbots:\n  block:\n    - {name: a, user_agent: x}\n    - {name: a, user_agent: y}\n",
+		"name":        block(`{name: Infra, user_agent: bot}`),
+		"used twice":  "servers: [lab]\nrevision: 1\nbots:\n  block:\n    - {name: a, user_agent: x}\n    - {name: a, user_agent: y}\n",
 		// A domain covers every host under it; a wildcard would say something else.
 		"lowercase domain":       block(`{name: a, domains: ["*.habsidev.com"], user_agent: bot}`),
 		"user_agent is required": block(`{name: a, domains: [habsidev.com]}`),
