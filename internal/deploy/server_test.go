@@ -268,7 +268,9 @@ func TestUpgradeProxyJournalsTheSwapAlone(t *testing.T) {
 		f.out[proxyImage] = "caddy:new"
 		f.out["sh -c cat '.boks/_server/journal.jsonl'"] = open
 		err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed)
-		if closed := strings.Contains(f.appends[serverLog], `{"op":"1","finished_at":`); err != nil || closed != want || f.has("docker stop") ||
+		j := f.appends[serverLog]
+		closed := strings.Contains(j, `{"op":"1","finished_at":`) && strings.HasSuffix(strings.TrimSpace(j), `"result":"ok"}`)
+		if err != nil || closed != want || strings.Contains(j, `{"op":"1"`) != want || f.has("docker stop") ||
 			strings.Contains(f.appends[serverLog], `"started_at"`) {
 			t.Errorf("already runs, open %s: want closed=%v and nothing begun, got %v %s", open, want, err, f.appends[serverLog])
 		}
