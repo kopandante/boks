@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Runner executes commands on one server.
@@ -64,7 +68,68 @@ func Append(ctx context.Context, r Runner, content []byte, remotePath string) er
 // ProxyJump apply without any configuration of our own.
 type SSH struct {
 	Host string
+	// ControlDir, when set, holds the socket of one SSH connection per server that every call of
+	// this run shares (see Mux); empty opens a connection per call.
+	ControlDir string
 }
+
+// Mux shares one SSH connection per server across a run. Each call used to open its own, and to a
+// distant server that is seconds per call — in a stop-first deploy, seconds the app is down between
+// stopping the old copy and starting the new one. The sockets live in a directory of this run
+// alone, so runs side by side never close each other's connections, and Close ends the ones this
+// run opened. A nil Mux shares nothing.
+type Mux struct {
+	dir  string
+	mu   sync.Mutex
+	used map[string]bool
+}
+
+// NewMux makes the run's socket directory, under /tmp: a socket path is capped at about 100 bytes,
+// and a macOS $TMPDIR alone takes half of that. BOKS_SSH_MUX=0 turns sharing off.
+func NewMux() (*Mux, error) {
+	if os.Getenv("BOKS_SSH_MUX") == "0" {
+		return nil, nil
+	}
+	dir, err := os.MkdirTemp("/tmp", "boks-")
+	if err != nil {
+		return nil, fmt.Errorf("making the ssh socket directory: %w", err)
+	}
+	return &Mux{dir: dir, used: map[string]bool{}}, nil
+}
+
+// SSH is the runner for host, sharing this run's connection to it.
+func (m *Mux) SSH(host string) SSH {
+	if m == nil {
+		return SSH{Host: host}
+	}
+	m.mu.Lock()
+	m.used[host] = true
+	m.mu.Unlock()
+	return SSH{Host: host, ControlDir: m.dir}
+}
+
+// Close ends the connections this run opened and removes their directory. A connection left by a
+// run that died ends by itself once idle for ControlPersist.
+func (m *Mux) Close() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	hosts := make([]string, 0, len(m.used))
+	for h := range m.used {
+		hosts = append(hosts, h)
+	}
+	m.mu.Unlock()
+	sort.Strings(hosts)
+	for _, h := range hosts {
+		_ = exec.Command("ssh", "-o", "ControlPath="+controlPath(m.dir), "-O", "exit", h).Run()
+	}
+	_ = os.RemoveAll(m.dir)
+}
+
+// controlPath is the socket of one connection in dir: %C is ssh's hash of the user, host, port and
+// jump host, so two servers never share one.
+func controlPath(dir string) string { return filepath.Join(dir, "%C") }
 
 func (s SSH) Run(ctx context.Context, args ...string) (string, error) {
 	return s.exec(ctx, nil, args[0], Shell(args...))
@@ -77,7 +142,13 @@ func (s SSH) Pipe(ctx context.Context, content []byte, args ...string) (string, 
 // exec runs script on the host; label names the command in errors (the server itself is
 // named by the caller, which iterates servers).
 func (s SSH) exec(ctx context.Context, stdin []byte, label, script string) (string, error) {
-	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", s.Host, script)
+	args := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=15"}
+	if s.ControlDir != "" {
+		// Options on the command line win over ~/.ssh/config, so a ControlMaster of the user's own
+		// does not take these connections into a socket another process may close.
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+controlPath(s.ControlDir), "-o", "ControlPersist=60s")
+	}
+	cmd := exec.CommandContext(ctx, "ssh", append(args, s.Host, script)...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

@@ -70,6 +70,12 @@ func run(args []string, out, errw io.Writer) int {
 		fmt.Fprint(errw, usage)
 		return 2
 	}
+	if m, err := remote.NewMux(); err != nil {
+		fmt.Fprintf(errw, "warning: %v; every remote call opens its own connection\n", err)
+	} else {
+		sshMux = m
+		defer func() { sshMux.Close(); sshMux = nil }()
+	}
 	// server.yml belongs to the server, not to an app: no boks.yml is read for it.
 	if fs.Arg(0) == "server" {
 		if err := serverCmd(context.Background(), fs.Args()[1:], out); err != nil {
@@ -155,11 +161,12 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 }
 
 // connect, now and lookupEnv are what a command reaches the servers, the clock and its environment
-// through.
+// through. sshMux is the run's shared SSH connections; nil opens one per call.
 var (
-	connect   = func(host string) remote.Runner { return remote.SSH{Host: host} }
+	connect   = func(host string) remote.Runner { return sshMux.SSH(host) }
 	now       = time.Now
 	lookupEnv = os.LookupEnv
+	sshMux    *remote.Mux
 )
 
 // sameRollback asks every server, before any of them changes, where a rollback would take it, and
@@ -318,7 +325,7 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 		// One server is enough: they all hold the same certificate, and lego only needs to read
 		// it to decide whether a renewal is due.
 		fmt.Fprintf(out, "== %s\n", cfg.Servers[0])
-		return cert.Pull(ctx, remote.SSH{Host: cfg.Servers[0]}, out, cfg)
+		return cert.Pull(ctx, connect(cfg.Servers[0]), out, cfg)
 	}
 	if args[0] != "issue" && args[0] != "renew" {
 		return fmt.Errorf("unknown cert command %q", args[0])
