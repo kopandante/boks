@@ -427,9 +427,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		}
 		for _, s := range sc.Servers {
 			fmt.Fprintf(out, "== %s\n", s)
-			// A user just added to group docker has it only in a new login, not on a shared connection.
-			fresh := func() remote.Runner { return remote.SSH{Host: s, Alone: true} }
-			if err := deploy.Install(ctx, connect(s), fresh, out, config.DefaultProxyImage, o); err != nil {
+			if err := installOn(ctx, s, out, o); err != nil {
 				return fmt.Errorf("%s: %w", s, err)
 			}
 		}
@@ -470,6 +468,24 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		})
 	}
 	return fmt.Errorf("unknown server command %q", strings.Join(args, " "))
+}
+
+// installOn installs on server s. A user just added to group docker has it only in a new login, so
+// what follows the install runs on a connection of its own, opened after it: one, shared by those
+// calls — a connection per call would trip an SSH rate limit such as ufw's `limit` (6 in 30 s).
+func installOn(ctx context.Context, s string, out io.Writer, o deploy.Options) error {
+	login, err := remote.NewMux("/tmp")
+	if err != nil {
+		return err
+	}
+	defer login.Close()
+	fresh := func() remote.Runner {
+		if login == nil { // BOKS_SSH_MUX=0
+			return remote.SSH{Host: s, Alone: true}
+		}
+		return login.SSH(s)
+	}
+	return deploy.Install(ctx, connect(s), fresh, out, config.DefaultProxyImage, o)
 }
 
 // policyOf is a server.yml's policy as the proxy applies it.

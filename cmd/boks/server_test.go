@@ -60,41 +60,58 @@ func TestServerRollbackAsksEveryServerFirst(t *testing.T) {
 
 // The docker check after usermod and the proxy boot go through a login of their own — past the run's
 // shared connection and past a ControlMaster in ~/.ssh/config — since only a new login has the group
-// usermod just added; the server is read over the shared one.
+// usermod just added; the server is read over the shared one. The new login is one connection shared
+// by every call after it, not one per call, which an SSH rate limit (ufw's `limit`) would cut off.
 func TestServerInstallAsksDockerInANewLogin(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	facts := "user=deploy\nuid=1000\nsudo=yes\nos=ubuntu\nversion=24.04\nsystemd=yes\nmigratereq=yes\ndockerd=yes\ncrontab=yes\n" +
-		"flock=yes\ndockerenabled=enabled\ncronactive=active\ndockerup=yes\napi=1.47\nswarm=inactive\nrunning=1\n"
-	log := filepath.Join(dir, "calls")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" | tr '\\n' ' ' >> " + log + "\necho >> " + log + "\n" +
-		"case \"$*\" in *'id -un'*) cat " + filepath.Join(dir, "facts") + " ;; esac\nexit 0\n"
-	for name, body := range map[string]string{"facts": facts, "ssh": script, "server.yml": "servers: [h]\n"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BOKS_SSH_MUX", "")
-	run([]string{"server", "install", "server.yml"}, io.Discard, io.Discard)
-	b, _ := os.ReadFile(log)
-	var usermod, docker, read bool
-	for _, c := range strings.Split(string(b), "\n") {
-		alone := strings.Contains(c, "-o ControlMaster=no -o ControlPath=none h ")
-		switch {
-		case strings.Contains(c, " h 'sudo' '-n' 'usermod' '-aG' 'docker' 'deploy'"):
-			usermod = !alone
-		case strings.Contains(c, " h 'docker' 'info'"):
-			docker = alone
-			if !alone {
-				t.Errorf("docker asked over a shared connection: %s", c)
+	for _, mux := range []string{"", "0"} {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		facts := "user=deploy\nuid=1000\nsudo=yes\nos=ubuntu\nversion=24.04\nsystemd=yes\nmigratereq=yes\ndockerd=yes\ncrontab=yes\n" +
+			"flock=yes\ndockerenabled=enabled\ncronactive=active\ndockerup=yes\napi=1.47\nswarm=inactive\nrunning=1\n"
+		log := filepath.Join(dir, "calls")
+		script := "#!/bin/sh\nprintf '%s\\n' \"$*\" | tr '\\n' ' ' >> " + log + "\necho >> " + log + "\n" +
+			"case \"$*\" in *'id -un'*) cat " + filepath.Join(dir, "facts") + " ;; esac\nexit 0\n"
+		for name, body := range map[string]string{"facts": facts, "ssh": script, "server.yml": "servers: [h]\n"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+				t.Fatal(err)
 			}
-		case strings.Contains(c, "id -un"):
-			read = !alone && strings.Contains(c, "ControlMaster=auto")
 		}
-	}
-	if !usermod || !docker || !read {
-		t.Errorf("usermod %v, docker in a new login %v, read shared %v; calls:\n%s", usermod, docker, read, b)
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		t.Setenv("BOKS_SSH_MUX", mux)
+		run([]string{"server", "install", "server.yml"}, io.Discard, io.Discard)
+		b, _ := os.ReadFile(log)
+		socket := func(c string) string {
+			_, rest, ok := strings.Cut(c, "-o ControlPath=")
+			if !ok {
+				return ""
+			}
+			path, _, _ := strings.Cut(rest, " ")
+			return path
+		}
+		var run, login string
+		logins := map[string]bool{}
+		after := false
+		for _, c := range strings.Split(string(b), "\n") {
+			switch {
+			case strings.Contains(c, " h 'sudo' '-n' 'usermod' '-aG' 'docker' 'deploy'"):
+				run, after = socket(c), true
+			case strings.Contains(c, " h 'docker' 'info'"):
+				login = socket(c)
+				fallthrough
+			case after && strings.Contains(c, " h 'docker' "):
+				logins[socket(c)] = true
+			}
+		}
+		if mux == "0" {
+			// Nothing shared: each call is a login of its own, past ~/.ssh/config's ControlMaster too.
+			if login != "none" || len(logins) != 1 || !logins["none"] {
+				t.Errorf("BOKS_SSH_MUX=0: docker over %q, logins %v; calls:\n%s", login, logins, b)
+			}
+			continue
+		}
+		if run == "" || run == "none" || login == "" || login == "none" || login == run || len(logins) != 1 {
+			t.Errorf("usermod over %q, docker over %q, calls after it over %v; calls:\n%s", run, login, logins, b)
+		}
 	}
 }
 
