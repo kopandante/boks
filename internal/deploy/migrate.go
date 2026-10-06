@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -39,9 +40,42 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 	}
 	defer adm.release(ctx)
 	state, kind, err := proxy.State(ctx, r)
-	switch {
-	case err != nil:
+	if err != nil {
 		return err
+	}
+	// kamal-proxy waiting aside is an earlier migration that did not finish: cut between moving it
+	// aside and Caddy coming up, or after Caddy came up but before kamal-proxy was removed. Taken for a
+	// server without a proxy, it would leave every app down while the run reports success.
+	aside, err := asideThere(ctx, r)
+	if err != nil {
+		return err
+	}
+	if aside {
+		switch {
+		case kind == proxy.Kind:
+			// Caddy is in place, and may have served for days: kamal-proxy's routes are stale by now, so a
+			// failure here does not put it back on its own.
+			if err := proxy.Boot(ctx, r, log, image); err != nil {
+				return fmt.Errorf("Caddy did not come up: %w\nkamal-proxy waits stopped as %s; `docker rm -f %s; docker rename %s %s; docker start %s` puts it back",
+					err, asideName, proxy.Container, asideName, proxy.Container, proxy.Container)
+			}
+			best(ctx, r, log, "docker", "rm", asideName)
+			fmt.Fprintln(log, "Caddy serves the routes; the kamal-proxy an earlier migration left aside is removed")
+			return nil
+		case state == "":
+			fmt.Fprintf(log, "an earlier migration left kamal-proxy stopped as %s: putting it back, then migrating\n", asideName)
+			if err := restoreKamal(context.WithoutCancel(ctx), r, log); err != nil {
+				return err
+			}
+			if state, kind, err = proxy.State(ctx, r); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("both %s and %s are on this server: remove the one that does not serve, then migrate again; nothing was changed",
+				proxy.Container, asideName)
+		}
+	}
+	switch {
 	case state == "":
 		fmt.Fprintln(log, "no proxy on this server: the first deploy of an app with routes starts Caddy")
 		return nil
@@ -95,8 +129,8 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 		return fmt.Errorf("stopping kamal-proxy: %w; run `docker start %s` if it is down", err, proxy.Container)
 	}
 	if _, err := r.Run(ctx, "docker", "rename", proxy.Container, asideName); err != nil {
-		best(context.WithoutCancel(ctx), r, log, "docker", "start", proxy.Container)
-		return fmt.Errorf("moving kamal-proxy aside: %w; it was started again", err)
+		// The rename may have gone through with its answer lost: kamal-proxy is looked for under both names.
+		return errors.Join(fmt.Errorf("moving kamal-proxy aside: %w", err), restoreKamal(context.WithoutCancel(ctx), r, log))
 	}
 	if err := proxy.Boot(ctx, r, log, image); err != nil {
 		return errors.Join(fmt.Errorf("Caddy did not come up: %w", err), restoreKamal(context.WithoutCancel(ctx), r, log))
@@ -107,12 +141,17 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 }
 
 // restoreKamal puts kamal-proxy back after Caddy failed to take its place. Only a container labelled
-// as Caddy is removed from the name: anything else there is not this run's to delete.
+// as Caddy is removed from the name: anything else there is not this run's to delete. kamal-proxy is
+// renamed back only when the name is free — a rename whose answer was lost may not have happened.
 func restoreKamal(ctx context.Context, r remote.Runner, log io.Writer) error {
-	if state, kind, err := proxy.State(ctx, r); err == nil && state != "" && kind == proxy.Kind {
+	state, kind, err := proxy.State(ctx, r)
+	if err == nil && state != "" && kind == proxy.Kind {
 		best(ctx, r, log, "docker", "rm", "-f", proxy.Container)
+		state = ""
 	}
-	_, err := r.Run(ctx, "docker", "rename", asideName, proxy.Container)
+	if err == nil && state == "" {
+		_, err = r.Run(ctx, "docker", "rename", asideName, proxy.Container)
+	}
 	if err == nil {
 		_, err = r.Run(ctx, "docker", "start", proxy.Container)
 	}
@@ -124,10 +163,24 @@ func restoreKamal(ctx context.Context, r remote.Runner, log io.Writer) error {
 	return nil
 }
 
-// kamalTargets reads where kamal-proxy sends each host now: host → `container:port`. A service that
-// spreads one host over several containers has no one place to send it, and that is refused rather
-// than guessed.
-func kamalTargets(ctx context.Context, r remote.Runner) (map[string]string, error) {
+// asideThere says whether kamal-proxy waits under asideName.
+func asideThere(ctx context.Context, r remote.Runner) (bool, error) {
+	out, err := r.Run(ctx, "docker", "ps", "-a", "--filter", "name=^"+regexp.QuoteMeta(asideName)+"$", "--format", "{{.Names}}")
+	if err != nil {
+		return false, fmt.Errorf("looking for %s: %w", asideName, err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
+// kamalTarget is where kamal-proxy sends a host now, and whether it serves it with TLS.
+type kamalTarget struct {
+	dial string
+	tls  bool
+}
+
+// kamalTargets reads where kamal-proxy sends each host now. A service that spreads one host over
+// several containers has no one place to send it, and that is refused rather than guessed.
+func kamalTargets(ctx context.Context, r remote.Runner) (map[string]kamalTarget, error) {
 	out, err := r.Run(ctx, "docker", "exec", proxy.Container, "kamal-proxy", "list", "--json")
 	if err != nil {
 		return nil, fmt.Errorf("reading kamal-proxy's routes: %w", err)
@@ -135,17 +188,18 @@ func kamalTargets(ctx context.Context, r remote.Runner) (map[string]string, erro
 	var services map[string]struct {
 		Hosts   []string `json:"hosts"`
 		Targets []string `json:"targets"`
+		TLS     bool     `json:"tls"`
 	}
 	if err := json.Unmarshal([]byte(out), &services); err != nil {
 		return nil, fmt.Errorf("reading kamal-proxy's routes: %w", err)
 	}
-	byHost := map[string]string{}
+	byHost := map[string]kamalTarget{}
 	for name, s := range services {
 		if len(s.Targets) != 1 {
 			return nil, fmt.Errorf("kamal-proxy's route %s goes to %v, not to one container; deploy its app once more, then migrate; nothing was changed", name, s.Targets)
 		}
 		for _, h := range s.Hosts {
-			byHost[h] = s.Targets[0]
+			byHost[h] = kamalTarget{dial: s.Targets[0], tls: s.TLS}
 		}
 	}
 	return byHost, nil
@@ -164,7 +218,7 @@ func recordedApps(ctx context.Context, r remote.Runner) ([]string, error) {
 
 // migratedRoutes builds each app's routes from its current release and kamal-proxy's targets, and
 // refuses when a host kamal-proxy routes is left without one.
-func migratedRoutes(ctx context.Context, r remote.Runner, log io.Writer, apps []string, targets map[string]string) ([]proxy.Fragment, error) {
+func migratedRoutes(ctx context.Context, r remote.Runner, log io.Writer, apps []string, targets map[string]kamalTarget) ([]proxy.Fragment, error) {
 	taken := map[string]bool{}
 	var frags []proxy.Fragment
 	for _, app := range apps {
@@ -183,8 +237,10 @@ func migratedRoutes(ctx context.Context, r remote.Runner, log io.Writer, apps []
 				fmt.Fprintf(log, "warning: %s of %s is not routed by kamal-proxy now, so it stays unrouted until %s is deployed\n", p.Host, app, app)
 				continue
 			}
-			rt := proxy.Route{Host: p.Host, Dial: target, TLS: s.TLS}
-			if c := (&config.Cert{Domains: s.CertDomains}); len(s.CertDomains) > 0 && c.Covers(p.Host) {
+			// TLS as kamal-proxy serves the host now, not as the release recorded it: a rollback keeps
+			// today's tls and points current at a release recorded with another.
+			rt := proxy.Route{Host: p.Host, Dial: target.dial, TLS: target.tls}
+			if c := (&config.Cert{Domains: s.CertDomains}); rt.TLS && len(s.CertDomains) > 0 && c.Covers(p.Host) {
 				crt, key := cert.ServerPaths(c)
 				rt.Cert = &proxy.CertFiles{Certificate: crt, Key: key}
 			}
@@ -204,7 +260,8 @@ func migratedRoutes(ctx context.Context, r remote.Runner, log io.Writer, apps []
 	if len(lost) > 0 {
 		sort.Strings(lost)
 		return nil, fmt.Errorf("kamal-proxy routes %v, which no release recorded on this server describes, so Caddy would drop them: "+
-			"deploy their apps with this boks first, or remove those routes from kamal-proxy; nothing was changed", lost)
+			"deploy their apps with the boks that runs kamal-proxy first, so that a release records them, or remove those routes from kamal-proxy "+
+			"(`docker exec %s kamal-proxy remove <service>`); nothing was changed", lost, proxy.Container)
 	}
 	return frags, nil
 }

@@ -143,3 +143,106 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		t.Errorf("want a refusal, got %v", err)
 	}
 }
+
+const asideState = `docker ps -a --filter name=^boks-proxy\.kamal$`
+
+// TLS is taken from kamal-proxy as it serves the host now: a rollback keeps today's tls and points
+// current at a release recorded without it, and the migration must not turn HTTPS off.
+func TestMigrateKeepsTheTLSKamalServes(t *testing.T) {
+	f := kamalServer()
+	f.out["cat .boks/convex-lab/releases/convex-lab-latest-1.json"] = strings.Replace(
+		f.out["cat .boks/convex-lab/releases/convex-lab-latest-1.json"], `"tls":true`, `"tls":false`, 1)
+	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if frag := f.fragmentWrite("convex-lab"); strings.Count(frag, `"tls": true`) != 2 || strings.Count(frag, `"cert"`) != 1 {
+		t.Errorf("want both hosts on TLS as kamal-proxy serves them:\n%s", frag)
+	}
+	// And a host kamal-proxy serves without TLS stays so, certificate or not.
+	g := kamalServer()
+	g.out[kamalList] = strings.ReplaceAll(g.out[kamalList], `"tls":true`, `"tls":false`)
+	if err := MigrateProxy(context.Background(), g, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if frag := g.fragmentWrite("convex-lab"); strings.Contains(frag, `"tls": true`) || strings.Contains(frag, `"cert"`) {
+		t.Errorf("want plain HTTP as kamal-proxy serves it:\n%s", frag)
+	}
+}
+
+// A migration cut after kamal-proxy moved aside, before Caddy came up, leaves no boks-proxy at all.
+// The next one puts kamal-proxy back and migrates, rather than reporting a server without a proxy.
+func TestMigrateResumesASwapCutShort(t *testing.T) {
+	f := kamalServer()
+	f.out[proxyState] = ""
+	f.out[asideState] = "boks-proxy.kamal"
+	inner := f.onRun
+	f.onRun = func(cmd string) {
+		switch {
+		case strings.HasPrefix(cmd, "docker rename boks-proxy.kamal boks-proxy"):
+			f.out[proxyState], f.out[asideState] = "exited\t", ""
+		case strings.HasPrefix(cmd, "docker start boks-proxy") && f.out[proxyState] == "exited\t":
+			f.out[proxyState] = "running\t"
+		default:
+			if strings.HasPrefix(cmd, "docker rename boks-proxy boks-proxy.kamal") {
+				f.out[asideState] = "boks-proxy.kamal"
+			}
+			inner(cmd)
+		}
+	}
+	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	back, read, created := f.at("docker rename boks-proxy.kamal boks-proxy"), f.at(kamalList), f.at("docker create --name boks-proxy")
+	if back < 0 || read < back || created < read || f.fragmentWrite("convex-lab") == "" {
+		t.Errorf("want kamal-proxy back, its routes read, then Caddy: %d %d %d %v", back, read, created, f.calls)
+	}
+}
+
+// Caddy in place with kamal-proxy still aside — a migration cut before the removal — is booted and
+// kamal-proxy removed; kamal-proxy's routes are never read again, they are stale by then.
+func TestMigrateFinishesWhenCaddyServesAndKamalWaitsAside(t *testing.T) {
+	f := newFake()
+	f.out[proxyState] = caddyUp
+	f.out[asideState] = "boks-proxy.kamal"
+	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has("docker rm boks-proxy.kamal") || f.has(kamalList) || f.has("docker rename") {
+		t.Errorf("want kamal-proxy removed and nothing else: %v", f.calls)
+	}
+	// A Caddy that does not come up then is reported, and kamal-proxy, stale, is not put back on its own.
+	g := newFake()
+	g.out[proxyState] = caddyUp
+	g.out[asideState] = "boks-proxy.kamal"
+	g.out[migrateReq] = "0"
+	if err := MigrateProxy(context.Background(), g, io.Discard, "img", fixed); err == nil || g.has("docker rename") || g.has("docker rm") {
+		t.Errorf("want the failure reported and both containers kept: %v %v", err, g.calls)
+	}
+}
+
+// A rename whose answer was lost after it went through: kamal-proxy is found under the aside name
+// and put back, not started under a name it no longer has.
+func TestMigratePutsKamalBackAfterALostRename(t *testing.T) {
+	f := kamalServer()
+	f.fail["docker rename boks-proxy boks-proxy.kamal"] = errors.New("connection lost")
+	err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed)
+	if err == nil || !strings.Contains(err.Error(), "moving kamal-proxy aside") {
+		t.Fatalf("want the failure, got %v", err)
+	}
+	back, started := f.at("docker rename boks-proxy.kamal boks-proxy"), f.lastAt("docker start boks-proxy")
+	if back < 0 || started < back || f.has("docker create") {
+		t.Errorf("want kamal-proxy renamed back and started: %v", f.calls)
+	}
+	// A rename that did not happen leaves kamal-proxy under its name: it is only started again.
+	g := kamalServer()
+	g.fail["docker rename boks-proxy boks-proxy.kamal"] = errors.New("refused")
+	inner := g.onRun
+	g.onRun = func(cmd string) {
+		if !strings.HasPrefix(cmd, "docker rename") {
+			inner(cmd)
+		}
+	}
+	if err := MigrateProxy(context.Background(), g, io.Discard, "img", fixed); err == nil || g.has("docker rename boks-proxy.kamal") || !g.has("docker start boks-proxy") {
+		t.Errorf("want kamal-proxy started where it is: %v %v", err, g.calls)
+	}
+}
