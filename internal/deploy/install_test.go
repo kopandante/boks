@@ -584,3 +584,34 @@ func TestPlanInstallAddsDebiansDockerCLI(t *testing.T) {
 		t.Errorf("noble: %v, %v", p.packages, err)
 	}
 }
+
+// The log names the keys the write adds: a pool the host's routes rule out is not claimed as written.
+func TestInstallLogsTheKeysItAdds(t *testing.T) {
+	f, fresh := installFake(emptyNoble+"route=10.0.0.0/8 dev\n"), installFake("")
+	var log strings.Builder
+	if err := Install(context.Background(), f, func() remote.Runner { return fresh }, &log, "caddy:2.11.7-alpine", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "daemon.json (adding log-driver, log-opts)") {
+		t.Errorf("log: %s", log.String())
+	}
+}
+
+// The nftables check, run by grep as the facts script runs it: a flush statement counts, a flush
+// commented out does not.
+func TestNftFlushIgnoresAComment(t *testing.T) {
+	for body, want := range map[string]bool{
+		"#!/usr/sbin/nft -f\n\nflush ruleset\n":         true,
+		"  flush   ruleset\ntable inet filter {}\n":     true,
+		"# flush ruleset\ntable inet filter {}\n":       false,
+		"table inet filter {}\n# then: flush ruleset\n": false,
+	} {
+		path := filepath.Join(t.TempDir(), "nftables.conf")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := exec.Command("grep", "-qE", nftFlush, path).Run() == nil; got != want {
+			t.Errorf("%q: flagged %v, want %v", body, got, want)
+		}
+	}
+}

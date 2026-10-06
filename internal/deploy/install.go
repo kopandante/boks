@@ -70,10 +70,14 @@ M=$(systemctl show -p MainPID --value docker 2>/dev/null)
 if [ -n "$M" ] && [ "$M" != 0 ]; then echo "dockerdcmd=$($S cat /proc/$M/cmdline 2>/dev/null | tr '\0' ' ')"
 else echo "dockerdcmd=$(systemctl show -p ExecStart --value docker 2>/dev/null | tr '\n' ' ')"; fi
 if [ "$(systemctl is-enabled nftables 2>/dev/null)" = enabled ]; then
-  for f in /etc/nftables.conf /etc/nftables.d/*.nft; do [ -f "$f" ] && grep -q 'flush ruleset' "$f" && echo "nftflush=$f"; done
+  for f in /etc/nftables.conf /etc/nftables.d/*.nft; do [ -f "$f" ] && grep -qE '` + nftFlush + `' "$f" && echo "nftflush=$f"; done
 fi
 ip -4 route show table all 2>/dev/null | awk '{print "route=" $1 " " $2}'
 `
+
+// nftFlush matches a `flush ruleset` statement of an nftables file — not one commented out, which is how
+// an owner following the refusal may well remove it.
+const nftFlush = `^[[:space:]]*flush[[:space:]]+ruleset`
 
 // aptScript runs apt-get with its arguments, waiting up to 5 minutes in all for another apt to finish —
 // on a fresh server apt-daily and unattended-upgrades run for a while. One wait for every lock:
@@ -201,6 +205,7 @@ func parseFacts(out string) (hostFacts, error) {
 type installPlan struct {
 	packages      []string
 	daemon        map[string]any
+	daemonAdds    []string // the keys daemon adds, for the log
 	restartDocker bool
 	enableDocker  bool
 	enableCron    bool
@@ -333,6 +338,7 @@ func planDaemon(f hostFacts, p *installPlan) {
 	}
 	maps.Copy(d, want)
 	p.daemon = d
+	p.daemonAdds = slices.Sorted(maps.Keys(want))
 	p.restartDocker = f.dockerUp
 }
 
@@ -538,7 +544,7 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 	// dockerd that started without it would need a restart.
 	if p.daemon != nil {
 		body, _ := json.MarshalIndent(p.daemon, "", "  ")
-		fmt.Fprintln(log, "docker: writing /etc/docker/daemon.json (log rotation, address pool)")
+		fmt.Fprintf(log, "docker: writing /etc/docker/daemon.json (adding %s)\n", strings.Join(p.daemonAdds, ", "))
 		if err := writeRoot(ctx, r, sudo, append(body, '\n'), "/etc/docker/daemon.json", f.dockerd || f.dockerUp); err != nil {
 			return fail(err)
 		}
