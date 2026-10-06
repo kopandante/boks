@@ -410,7 +410,10 @@ func discard(ctx context.Context, r remote.Runner, log io.Writer, app, name stri
 	}
 	fmt.Fprintf(log, "remove %s\n", name)
 	best(ctx, r, log, "docker", "stop", name)
-	best(ctx, r, log, "docker", "rm", "-f", name)
+	// -v takes the copy's anonymous volumes (an image's VOLUME with no named volume over it) along:
+	// nothing reuses them — a rollback starts a new container from the snapshot — and left behind
+	// they pile up with every deploy. Named volumes stay.
+	best(ctx, r, log, "docker", "rm", "-f", "-v", name)
 	_, there, err = nameOwner(ctx, r, name)
 	return err == nil && !there
 }
@@ -1059,6 +1062,9 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string, binds []stri
 	for _, alias := range n.Aliases {
 		a = append(a, "--network-alias", alias)
 	}
+	// The log is capped here rather than by the daemon's defaults (B5): a server boks did not install
+	// rotates nothing, and a chatty app fills its disk.
+	a = append(a, "--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=3")
 	a = append(a, "--restart", "unless-stopped", "--label", "boks.app="+cfg.App, "--label", "boks.version="+tag,
 		"--label", "boks.ports="+portLabel(cfg.Ports), "--label", "boks.replace="+cfg.ReplaceMode())
 	if cfg.Memory != "" {
@@ -1284,13 +1290,14 @@ func drain(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 	}
 }
 
-// retire stops and removes previous containers. Failures are reported, not fatal: the new
-// version is already serving, and a leftover container is cleaned up by the next deploy.
+// retire stops and removes previous containers, with their anonymous volumes (see discard). Failures
+// are reported, not fatal: the new version is already serving, and a leftover container is cleaned
+// up by the next deploy.
 func retire(ctx context.Context, r remote.Runner, log io.Writer, old []string) {
 	for _, c := range old {
 		fmt.Fprintf(log, "retire %s\n", c)
 		best(ctx, r, log, "docker", "stop", c)
-		best(ctx, r, log, "docker", "rm", c)
+		best(ctx, r, log, "docker", "rm", "-v", c)
 	}
 }
 

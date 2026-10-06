@@ -161,7 +161,7 @@ func TestTheProxyJoinsTheAppsNetworkOnce(t *testing.T) {
 	if err := Run(context.Background(), g, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want the failed connect")
 	}
-	if g.has(reloadVia) || g.has("docker rm demo-v1-1") || !g.has("docker rm -f "+newCopy) {
+	if g.has(reloadVia) || g.has("docker rm -v demo-v1-1") || !g.has("docker rm -f -v "+newCopy) {
 		t.Errorf("no route moves, the old copy stays and the new one goes: %v", g.calls)
 	}
 	if journalOpen(g, journal) || !strings.Contains(g.appends[journal], `"result":"failed"`) {
@@ -214,7 +214,7 @@ func TestTheFirstDeployMovesTheAppOffTheSharedNetwork(t *testing.T) {
 	if run < 0 || joined < run || probed < joined || revived < probed {
 		t.Errorf("want run < proxy joins < probe < revive: %d %d %d %d\n%v", run, joined, probed, revived, f.calls)
 	}
-	if f.has(reloadVia) || f.has("docker network disconnect") || f.has("docker rm demo-v1-1") {
+	if f.has(reloadVia) || f.has("docker network disconnect") || f.has("docker rm -v demo-v1-1") {
 		t.Errorf("no route moved, and the old copy and the proxy's networks stay: %v", f.calls)
 	}
 }

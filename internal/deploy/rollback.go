@@ -46,6 +46,14 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 		fmt.Fprintf(log, "warning: release %s was recorded without a memory limit, so it runs without one and without the memory check; "+
 			"today's config asks for %s\n", id, cfg.Memory)
 	}
+	// The release runs as it was recorded, not with today's command: say so when that falls back to
+	// the image's own. The command itself is not printed — it can carry a secret.
+	if len(cfg.Command) > 0 && len(target.Command) == 0 {
+		fmt.Fprintf(log, "warning: release %s was recorded without a command, so it runs the image's own CMD, not the one in today's config\n", id)
+	}
+	if cfg.StopSignal != "" && target.StopSignal == "" {
+		fmt.Fprintf(log, "warning: release %s was recorded without a stop_signal, so it stops with the image's STOPSIGNAL, not %s\n", id, cfg.StopSignal)
+	}
 	// Everything else — stopping an app without routes before its old copy comes back, the route
 	// switch and putting the routes back on failure, the certificate checks — is what a deploy does, by the same code.
 	return put(ctx, r, log, target, launch{
