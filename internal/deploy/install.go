@@ -58,12 +58,13 @@ if $S docker info >/dev/null 2>&1; then
   echo dockerup=yes
   echo "api=$($S docker version --format '{{.Server.APIVersion}}' 2>/dev/null)"
   echo "swarm=$($S docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null)"
-  $S docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless && echo rootless=yes
   echo "running=$($S docker ps -q | wc -l | tr -d ' ')"
   $S docker ps -a --filter name=^` + proxy.Container + `$ --format 'proxy={{.State}} {{.Label "boks.proxy"}}'
   $S docker network ls --format '{{.Name}}' | grep -vxE 'bridge|host|none' | sed 's/^/network=/'
   $S docker ps --format '{{.Names}} {{.Ports}}' | sed 's/^/ports=/'
 fi
+# Rootless Docker is the SSH user's own daemon, which sudo never reaches: asked as the user.
+docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless && echo rootless=yes
 $S ss -Htlnp '( sport = :80 or sport = :443 )' 2>/dev/null | sed 's/^/listen=/'
 [ -f /etc/docker/daemon.json ] && echo "daemon=$($S cat /etc/docker/daemon.json | base64 | tr -d '\n')"
 M=$(systemctl show -p MainPID --value docker 2>/dev/null)
