@@ -328,3 +328,44 @@ cp "$1" "$HOME/installed"
 		t.Errorf("want one's block installed and two's removed:\n%s", b)
 	}
 }
+
+// One run keeps at most 1 MiB of its output — the rest read to the end, so the job is not stopped
+// by a closed pipe — and the exit status logged is still the job's; stderr lands in the log too.
+func TestRunnerCapsOneRunsOutputAndKeepsItsExit(t *testing.T) {
+	var home string
+	out := runRunner(t, "rjob6", func(h, _ string) {
+		home = h
+		// 1.5 MiB with no newline, then a line on stderr, then exit 42.
+		serve(h, "rjob6", "r-1", "c-1", "head -c 1572864 /dev/zero | tr '\\0' z; echo oops >&2; exit 42")
+	})
+	if !strings.Contains(out, "output past 1 MiB dropped: about") || !strings.Contains(out, "end exit=42") {
+		t.Errorf("want the cut named and exit 42:\n%.300s", out[len(out)-300:])
+	}
+	log, _ := os.ReadFile(filepath.Join(home, ".boks", "rjob6", "jobs", "tick.log"))
+	if n := bytes.Count(log, []byte("z")); n != 1048576 {
+		t.Errorf("want exactly 1 MiB of the job's output kept, got %d bytes", n)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".boks", "rjob6", "jobs", "tick.out")); !os.IsNotExist(err) {
+		t.Errorf("want the pipe removed: %v", err)
+	}
+	small := runRunner(t, "rjob7", func(h, _ string) { serve(h, "rjob7", "r-1", "c-1", "echo oops >&2; exit 0") })
+	if !strings.Contains(small, "oops") || strings.Contains(small, "dropped") || !strings.Contains(small, "end exit=0") {
+		t.Errorf("want stderr kept and nothing dropped:\n%s", small)
+	}
+}
+
+// A run that fires while the previous one is going logs its skip and leaves the log alone: moving
+// it to .log.1 would move the file the running job writes.
+func TestRunnerLeavesTheLogOfARunningJobAlone(t *testing.T) {
+	t.Setenv("T_FLOCK_RC", "1")
+	var home string
+	runRunner(t, "rjob8", func(h, _ string) {
+		home = h
+		serve(h, "rjob8", "r-1", "c-1", "echo hi")
+		os.WriteFile(filepath.Join(h, ".boks", "rjob8", "jobs", "tick.log"), bytes.Repeat([]byte("y"), 1048577), 0o600)
+	})
+	log, _ := os.ReadFile(filepath.Join(home, ".boks", "rjob8", "jobs", "tick.log"))
+	if _, err := os.Stat(filepath.Join(home, ".boks", "rjob8", "jobs", "tick.log.1")); !os.IsNotExist(err) || !bytes.Contains(log, []byte("skip: the previous run")) {
+		t.Errorf("want the skip appended and no rotation: %v %d", err, len(log))
+	}
+}

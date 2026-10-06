@@ -28,31 +28,43 @@ const cronLock = ".boks/crontab.lock"
 
 // runner finds the copy that serves from release.ServingPath — the release and its container,
 // written together after the release is recorded — and runs that release's command for the job in
-// it. It skips, and says why in the job's log, rather than guess: while a deploy of the app holds its
-// lock (the serving copy is about to change), when the release has no such job (cron still carries a
-// line of the release before), when the copy is not running, and while the previous run of the same
-// job is still going. The command reaches the container on stdin, so nothing in it is ever quoted by
-// a shell or by cron (whose `%` would otherwise end the line). A log past 1 MB is moved to `.log.1` when
-// the next run starts, so the log keeps at most two files; one run's own output is not cut short.
+// it. It skips, and says why in the job's log, rather than guess: while the previous run of the same
+// job is still going, while a deploy of the app holds its lock (the serving copy is about to change),
+// when the release has no such job (cron still carries a line of the release before), and when the
+// copy is not running. The command reaches the container on stdin, so nothing in it is ever quoted by
+// a shell or by cron (whose `%` would otherwise end the line).
+//
+// The log is bounded: a log past 1 MB moves to `.log.1` when the next run starts — under the job's
+// lock, so a run that fires while another is going never moves the log that one writes — and one
+// run keeps at most 1 MiB of its own output. The rest is read to the end and counted, not cut off:
+// a job whose output pipe closed would get SIGPIPE and stop, and the exit status logged is the
+// job's, not that of whatever cut the output.
 const runner = `#!/bin/sh
 # boks-job <app> <job> — written by boks; runs a scheduled job in the copy of <app> that serves now.
 app=$1 job=$2
 d="$HOME/.boks/$app"
 log="$d/jobs/$job.log"
 mkdir -p "$d/jobs"
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+exec 9> "$d/jobs/$job.lock"
+flock -n 9 || { echo "$(ts) skip: the previous run of $job is still going" >> "$log"; exit 0; }
 if [ -f "$log" ] && [ "$(wc -c < "$log")" -gt 1048576 ]; then mv "$log" "$log.1"; fi
 exec >> "$log" 2>&1
-ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 if [ -d "/tmp/boks-$app.lock" ]; then echo "$(ts) skip: a deploy of $app is in progress"; exit 0; fi
 read -r rel c < "$d/serving" || { echo "$(ts) skip: no serving release recorded"; exit 0; }
 f="$d/jobs/$rel/$job.sh"
 [ -f "$f" ] || { echo "$(ts) skip: release $rel has no job $job"; exit 0; }
 [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] || { echo "$(ts) skip: $c is not running"; exit 0; }
-exec 9> "$d/jobs/$job.lock"
-flock -n 9 || { echo "$(ts) skip: the previous run of $job is still going"; exit 0; }
+out="$d/jobs/$job.out"
+rm -f "$out"
+mkfifo -m 600 "$out" || { echo "$(ts) skip: cannot make $out"; exit 0; }
+trap 'rm -f "$out"' EXIT
 echo "$(ts) start release=$rel container=$c"
-docker exec -i "$c" sh -s < "$f"
+{ head -c 1048576; n=$(wc -c); if [ "$n" -gt 0 ]; then echo; echo "$(ts) output past 1 MiB dropped: about $n more bytes"; fi; } < "$out" &
+reader=$!
+docker exec -i "$c" sh -s < "$f" > "$out" 2>&1
 rc=$?
+wait "$reader"
 echo "$(ts) end exit=$rc"
 `
 
