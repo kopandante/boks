@@ -543,7 +543,7 @@ func TestInstallClosesAnInstallACutRunLeftOpen(t *testing.T) {
 			t.Errorf("want the open install closed %s: %s", want, j)
 		}
 	}
-	// Another command's open entry is its own to close.
+	// A run with nothing to do closes only a cut install; another command's open entry is left to it.
 	f, fresh := installFake(ready), installFake("")
 	f.out["sh -c cat '.boks/_server/journal.jsonl'"] = `{"op":"1","action":"server apply","from":"3","to":"4","started_at":"2026-01-01T00:00:00Z"}`
 	if err := install(f, fresh); err != nil || f.appends[serverLog] != "" {

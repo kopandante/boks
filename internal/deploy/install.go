@@ -66,12 +66,13 @@ fi
 # Rootless Docker is the SSH user's own daemon, which sudo never reaches: asked as the user.
 docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless && echo rootless=yes
 $S ss -Htlnp '( sport = :80 or sport = :443 )' 2>/dev/null | sed 's/^/listen=/'
-[ -f /etc/docker/daemon.json ] && echo "daemon=$($S cat /etc/docker/daemon.json | base64 | tr -d '\n')"
+# Files under /etc are looked for as root too: a directory closed to the SSH user would hide them.
+$S test -f /etc/docker/daemon.json && echo "daemon=$($S cat /etc/docker/daemon.json | base64 | tr -d '\n')"
 M=$(systemctl show -p MainPID --value docker 2>/dev/null)
 if [ -n "$M" ] && [ "$M" != 0 ]; then echo "dockerdcmd=$($S cat /proc/$M/cmdline 2>/dev/null | tr '\0' ' ')"
 else echo "dockerdcmd=$(systemctl show -p ExecStart --value docker 2>/dev/null | tr '\n' ' ')"; fi
 if [ "$(systemctl is-enabled nftables 2>/dev/null)" = enabled ]; then
-  for f in /etc/nftables.conf /etc/nftables.d/*.nft; do [ -f "$f" ] && grep -qE '` + nftFlush + `' "$f" && echo "nftflush=$f"; done
+  for f in $($S sh -c 'ls -d /etc/nftables.conf /etc/nftables.d/*.nft 2>/dev/null'); do $S grep -qE '` + nftFlush + `' "$f" && echo "nftflush=$f"; done
 fi
 ip -4 route show table all 2>/dev/null | awk '{print "route=" $1 " " $2}'
 `
