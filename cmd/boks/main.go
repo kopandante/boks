@@ -474,13 +474,13 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 // what follows the install runs on a connection of its own, opened after it: one, shared by those
 // calls — a connection per call would trip an SSH rate limit such as ufw's `limit` (6 in 30 s).
 func installOn(ctx context.Context, s string, out io.Writer, o deploy.Options) error {
-	login, err := remote.NewMux("/tmp")
+	login, err := remote.NewMux(socketRoot)
 	if err != nil {
-		return err
+		fmt.Fprintf(out, "warning: %v; after the install every call opens a login of its own\n", err)
 	}
 	defer login.Close()
 	fresh := func() remote.Runner {
-		if login == nil { // BOKS_SSH_MUX=0
+		if login == nil { // BOKS_SSH_MUX=0, or no socket directory
 			return remote.SSH{Host: s, Alone: true}
 		}
 		return login.SSH(s)

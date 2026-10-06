@@ -63,7 +63,7 @@ func TestServerRollbackAsksEveryServerFirst(t *testing.T) {
 // usermod just added; the server is read over the shared one. The new login is one connection shared
 // by every call after it, not one per call, which an SSH rate limit (ufw's `limit`) would cut off.
 func TestServerInstallAsksDockerInANewLogin(t *testing.T) {
-	for _, mux := range []string{"", "0"} {
+	for _, mux := range []string{"", "0", "nodir"} {
 		dir := t.TempDir()
 		t.Chdir(dir)
 		facts := "user=deploy\nuid=1000\nsudo=yes\nos=ubuntu\nversion=24.04\nsystemd=yes\nmigratereq=yes\ndockerd=yes\ncrontab=yes\n" +
@@ -77,8 +77,15 @@ func TestServerInstallAsksDockerInANewLogin(t *testing.T) {
 			}
 		}
 		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-		t.Setenv("BOKS_SSH_MUX", mux)
+		t.Setenv("BOKS_SSH_MUX", strings.TrimSuffix(mux, "nodir"))
+		old := socketRoot
+		if mux == "nodir" {
+			socketRoot = filepath.Join(dir, "missing")
+		}
+		// The fake answers no proxy boot, so the run ends in an error after docker info; what is
+		// checked is the connections up to there.
 		run([]string{"server", "install", "server.yml"}, io.Discard, io.Discard)
+		socketRoot = old
 		b, _ := os.ReadFile(log)
 		socket := func(c string) string {
 			_, rest, ok := strings.Cut(c, "-o ControlPath=")
@@ -88,29 +95,51 @@ func TestServerInstallAsksDockerInANewLogin(t *testing.T) {
 			path, _, _ := strings.Cut(rest, " ")
 			return path
 		}
-		var run, login string
+		calls := strings.Split(strings.TrimSpace(string(b)), "\n")
+		usermod, docker := -1, -1
+		for i, c := range calls {
+			if strings.Contains(c, " h 'sudo' '-n' 'usermod' '-aG' 'docker' 'deploy'") {
+				usermod = i
+			}
+			if strings.Contains(c, " h 'docker' 'info'") && docker < 0 {
+				docker = i
+			}
+		}
+		if usermod < 0 || docker < usermod {
+			t.Fatalf("usermod at %d, docker info at %d; calls:\n%s", usermod, docker, b)
+		}
+		shared, login := socket(calls[usermod]), socket(calls[docker])
+		// Every call after usermod goes through one login; none goes through it before usermod —
+		// a connection opened then would keep the groups the user had before it.
 		logins := map[string]bool{}
-		after := false
-		for _, c := range strings.Split(string(b), "\n") {
-			switch {
-			case strings.Contains(c, " h 'sudo' '-n' 'usermod' '-aG' 'docker' 'deploy'"):
-				run, after = socket(c), true
-			case strings.Contains(c, " h 'docker' 'info'"):
-				login = socket(c)
-				fallthrough
-			case after && strings.Contains(c, " h 'docker' "):
+		for i, c := range calls {
+			if !strings.Contains(c, " h ") {
+				continue
+			}
+			if i < usermod && socket(c) == login && login != "none" {
+				t.Errorf("the new login used before usermod: %s", c)
+			}
+			if i > usermod && !strings.HasSuffix(c, " -O exit h") && socket(c) != shared {
 				logins[socket(c)] = true
 			}
 		}
-		if mux == "0" {
-			// Nothing shared: each call is a login of its own, past ~/.ssh/config's ControlMaster too.
-			if login != "none" || len(logins) != 1 || !logins["none"] {
-				t.Errorf("BOKS_SSH_MUX=0: docker over %q, logins %v; calls:\n%s", login, logins, b)
+		if mux != "" {
+			// Nothing shared — turned off, or no directory for sockets: each call is a login of its
+			// own, past ~/.ssh/config's ControlMaster too, and the install still goes through.
+			if login != "none" || len(logins) != 1 {
+				t.Errorf("%q: docker over %q, logins %v; calls:\n%s", mux, login, logins, b)
 			}
 			continue
 		}
-		if run == "" || run == "none" || login == "" || login == "none" || login == run || len(logins) != 1 {
-			t.Errorf("usermod over %q, docker over %q, calls after it over %v; calls:\n%s", run, login, logins, b)
+		if shared == "" || shared == "none" || login == "" || login == "none" || login == shared || len(logins) != 1 {
+			t.Errorf("usermod over %q, docker over %q, calls after it over %v; calls:\n%s", shared, login, logins, b)
+		}
+		// The login is closed and its directory removed, as the run's own.
+		if !strings.Contains(string(b), "-o ControlPath="+login+" -O exit h") {
+			t.Errorf("the new login is not closed; calls:\n%s", b)
+		}
+		if _, err := os.Stat(filepath.Dir(login)); !os.IsNotExist(err) {
+			t.Errorf("want the login's socket directory removed: %v", err)
 		}
 	}
 }
