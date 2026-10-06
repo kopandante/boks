@@ -62,15 +62,17 @@ func TestMuxSharesAConnectionPerRunAndClosesIt(t *testing.T) {
 		t.Fatalf("want three shared calls and two exits, got:\n%s", strings.Join(got, "\n"))
 	}
 	for i, host := range []string{"a", "a", "b"} {
-		want := "-o ControlMaster=auto -o ControlPath=" + m.dir + "/%C -o ControlPersist=60s " +
+		want := "-o ControlMaster=auto -o ControlPath=" + controlPath(m.dir, host) + " -o ControlPersist=60s " +
 			"-o ServerAliveInterval=5 -o ServerAliveCountMax=3 " + host + " "
 		if !strings.Contains(got[i], want) {
 			t.Errorf("call %d: want %q in %q", i, want, got[i])
 		}
 	}
 	exits := got[3:]
+	want := []string{"-o ControlPath=" + controlPath(m.dir, "a") + " -O exit a", "-o ControlPath=" + controlPath(m.dir, "b") + " -O exit b"}
 	slices.Sort(exits)
-	if exits[0] != "-o ControlPath="+m.dir+"/%C -O exit a" || exits[1] != "-o ControlPath="+m.dir+"/%C -O exit b" {
+	slices.Sort(want)
+	if !slices.Equal(exits, want) {
 		t.Errorf("want this run's connections to a and b closed, got %q", exits)
 	}
 	if _, err := os.Stat(m.dir); !os.IsNotExist(err) {
@@ -87,6 +89,19 @@ func TestMuxWithoutItsDirectory(t *testing.T) {
 	m, err := NewMux(filepath.Join(t.TempDir(), "missing"))
 	if err == nil || m != nil {
 		t.Fatalf("want an error and no mux, got %v %v", m, err)
+	}
+}
+
+// A socket belongs to the host as boks names it, not to what ssh resolves it to: two aliases with
+// the same user and address behind different ProxyCommands are two servers, and ssh's %C would give
+// them one socket.
+func TestSocketPerHostAsNamed(t *testing.T) {
+	a, b := controlPath("/tmp/boks-1", "srv-a"), controlPath("/tmp/boks-1", "srv-b")
+	if a == b || strings.Contains(a, "%") || !strings.HasPrefix(a, "/tmp/boks-1/") {
+		t.Errorf("want a socket per host name with nothing for ssh to expand, got %s and %s", a, b)
+	}
+	if len(a)+17 > 100 {
+		t.Errorf("socket path %s leaves no room for the suffix ssh adds while binding", a)
 	}
 }
 

@@ -31,7 +31,7 @@ func runWithFakeSSH(t *testing.T, config string, code string, args ...string) (i
 	return rc, strings.Split(strings.TrimSpace(string(b)), "\n"), errw.String()
 }
 
-var controlDir = regexp.MustCompile(`ControlPath=(/tmp/boks-[^/ ]+)/%C`)
+var controlDir = regexp.MustCompile(`ControlPath=(/tmp/boks-[^/ ]+)/[0-9a-f]{16} `)
 
 // checkShared asserts that every call to the servers went through one directory of the run, that
 // the run closed its connection to each of them, and that the directory is gone.
@@ -45,11 +45,11 @@ func checkShared(t *testing.T, calls []string, servers ...string) {
 	for _, s := range servers {
 		reached, closed := false, false
 		for _, c := range calls {
-			if !strings.Contains(c, "ControlPath="+dir+"/%C") {
+			if !strings.Contains(c, "ControlPath="+dir+"/") {
 				t.Errorf("a call outside the run's directory %s: %q", dir, c)
 			}
 			reached = reached || strings.Contains(c, "ControlMaster=auto") && strings.Contains(c, " "+s+" ")
-			closed = closed || c == "-o ControlPath="+dir+"/%C -O exit "+s
+			closed = closed || strings.HasPrefix(c, "-o ControlPath="+dir+"/") && strings.HasSuffix(c, " -O exit "+s)
 		}
 		if !reached || !closed {
 			t.Errorf("server %s: reached %v, closed %v, calls:\n%s", s, reached, closed, strings.Join(calls, "\n"))

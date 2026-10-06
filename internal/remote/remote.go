@@ -3,6 +3,8 @@ package remote
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -112,7 +114,7 @@ func (m *Mux) Close() {
 		return
 	}
 	for h := range m.used {
-		_ = exec.Command("ssh", "-o", "ControlPath="+controlPath(m.dir), "-O", "exit", h).Run()
+		_ = exec.Command("ssh", "-o", "ControlPath="+controlPath(m.dir, h), "-O", "exit", h).Run()
 	}
 	_ = os.RemoveAll(m.dir)
 }
@@ -120,9 +122,14 @@ func (m *Mux) Close() {
 // waitDelay is how long a call waits for its output to close once its ssh is gone (see exec).
 const waitDelay = 2 * time.Second
 
-// controlPath is the socket of one connection in dir: %C is ssh's hash of the user, host, port and
-// jump host, so two servers never share one.
-func controlPath(dir string) string { return filepath.Join(dir, "%C") }
+// controlPath is the socket of the connection to host in dir, named after host exactly as boks
+// passes it to ssh. Not ssh's %C: that hashes the resolved user, address, port and jump host but not
+// a ProxyCommand, so two aliases reaching different servers at the same address through different
+// gateways would share a socket, and commands for one would run on the other.
+func controlPath(dir, host string) string {
+	sum := sha256.Sum256([]byte(host))
+	return filepath.Join(dir, hex.EncodeToString(sum[:8]))
+}
 
 func (s SSH) Run(ctx context.Context, args ...string) (string, error) {
 	return s.exec(ctx, nil, args[0], Shell(args...))
@@ -142,7 +149,7 @@ func (s SSH) exec(ctx context.Context, stdin []byte, label, script string) (stri
 		// shared connection opens no connection of its own, so ConnectTimeout does not bound it:
 		// keepalives end a master whose server stopped answering within about 15 s, and the call
 		// then fails over to a fresh connection that ConnectTimeout does bound.
-		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+controlPath(s.ControlDir), "-o", "ControlPersist=60s",
+		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+controlPath(s.ControlDir, s.Host), "-o", "ControlPersist=60s",
 			"-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3")
 	}
 	cmd := exec.CommandContext(ctx, "ssh", append(args, s.Host, script)...)
