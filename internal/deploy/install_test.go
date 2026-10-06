@@ -24,8 +24,9 @@ flock=yes
 dockerenabled=
 cronactive=inactive
 candidate=27.5.1-0ubuntu3~24.04.2
-execstart=
-route=10.0.0.0/24
+dockerdcmd=
+route=10.0.0.0/24 dev
+route=default via
 `
 
 // readyNoble is the same server after an install, as a sudo user in group docker.
@@ -48,10 +49,9 @@ api=1.47
 swarm=inactive
 running=1
 network=boks-web
-publish=boks-proxy
-publish=boks-proxy
+ports=boks-proxy 0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp
 listen=LISTEN 0 4096 0.0.0.0:80 0.0.0.0:* users:(("docker-proxy",pid=812,fd=7))
-execstart=ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock
+dockerdcmd=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --log-level warn
 `
 
 func daemonLine(json string) string {
@@ -116,7 +116,7 @@ func TestPlanInstallDoesNotRestartDockerUnderRunningContainers(t *testing.T) {
 }
 
 func TestPlanInstallLeavesFlagsSystemdPasses(t *testing.T) {
-	facts := strings.Replace(emptyNoble, "execstart=", "execstart=ExecStart=/usr/bin/dockerd --log-opt max-size=5m --default-address-pool base=10.9.0.0/16,size=24", 1)
+	facts := strings.Replace(emptyNoble, "dockerdcmd=", "dockerdcmd=/usr/bin/dockerd --log-opt max-size=5m --default-address-pool base=10.9.0.0/16,size=24", 1)
 	p, err := plan(t, facts)
 	if err != nil {
 		t.Fatal(err)
@@ -124,15 +124,52 @@ func TestPlanInstallLeavesFlagsSystemdPasses(t *testing.T) {
 	if p.daemon != nil {
 		t.Errorf("an option given as a flag written again in daemon.json stops dockerd: %v", p.daemon)
 	}
+	// The running daemon's command line counts, whatever put the flag there (a drop-in's continued
+	// ExecStart, an environment file): --log-driver alone keeps both log keys out, --log-level keeps none.
+	idle := strings.Replace(strings.Replace(readyNoble, "running=1", "running=0", 1), "network=boks-web\n", "", 1)
+	for cmd, wantLog := range map[string]bool{
+		"/usr/bin/dockerd -H fd:// --log-driver=journald": false,
+		"/usr/bin/dockerd -H fd:// --log-level=warn":      true,
+	} {
+		p, err := plan(t, strings.Replace(idle, "dockerdcmd=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --log-level warn", "dockerdcmd="+cmd, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, driver := p.daemon["log-driver"]
+		_, opts := p.daemon["log-opts"]
+		if driver != wantLog || opts != wantLog || p.daemon["default-address-pools"] == nil {
+			t.Errorf("%s: daemon.json %v", cmd, p.daemon)
+		}
+	}
+}
+
+// A container port published elsewhere leaves 80 free; host port 80 published to any container port does not.
+func TestPlanInstallReadsHostPorts(t *testing.T) {
+	if _, err := plan(t, strings.Replace(readyNoble, "network=boks-web", "network=boks-web\nports=web 0.0.0.0:8080->80/tcp, 443/tcp", 1)); err != nil {
+		t.Errorf("8080:80 refused: %v", err)
+	}
+	for _, ports := range []string{"web 0.0.0.0:80->8080/tcp", "web [::]:443->8443/tcp", "web 0.0.0.0:400-500->400-500/tcp"} {
+		if _, err := plan(t, strings.Replace(readyNoble, "network=boks-web", "network=boks-web\nports="+ports, 1)); err == nil || !strings.Contains(err.Error(), "container web") {
+			t.Errorf("%s: want a refusal naming web, got %v", ports, err)
+		}
+	}
 }
 
 func TestPlanInstallSkipsAPoolTheHostRoutes(t *testing.T) {
-	p, err := plan(t, emptyNoble+"route=10.0.0.0/8\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.daemon["default-address-pools"] != nil || len(p.notes) != 1 || !strings.Contains(p.notes[0], "10.0.0.0/8") {
-		t.Errorf("plan: %+v", p)
+	// `ip route` prints a host route without a length, and a typed route with its type first.
+	for route, want := range map[string]string{
+		"10.0.0.0/8 dev":          "10.0.0.0/8",
+		"10.240.1.10 via":         "10.240.1.10/32",
+		"blackhole 10.240.0.0/16": "10.240.0.0/16",
+		"local 10.240.3.4":        "10.240.3.4/32",
+	} {
+		p, err := plan(t, emptyNoble+"route="+route+"\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.daemon["default-address-pools"] != nil || len(p.notes) != 1 || !strings.Contains(p.notes[0], want) {
+			t.Errorf("%s: plan %+v", route, p)
+		}
 	}
 }
 
@@ -147,21 +184,23 @@ func TestPlanInstallAddsASudoUserToDocker(t *testing.T) {
 func TestPlanInstallRefuses(t *testing.T) {
 	sudoUser := strings.Replace(emptyNoble, "user=root\nuid=0", "user=deploy\nuid=1000\nsudo=no", 1)
 	for want, facts := range map[string]string{
-		"passwordless sudo":    sudoUser,
-		"not a system":         strings.Replace(emptyNoble, "os=ubuntu", "os=fedora", 1),
-		"Ubuntu 22.04+":        strings.Replace(emptyNoble, "version=24.04", "version=20.04", 1),
-		"without systemd":      strings.Replace(emptyNoble, "systemd=yes\n", "", 1),
-		"tcp_migrate_req":      strings.Replace(emptyNoble, "migratereq=yes\n", "", 1),
-		"older than Docker 25": strings.Replace(emptyNoble, "candidate=27.5.1-0ubuntu3~24.04.2", "candidate=24.0.7-0ubuntu4", 1),
-		"Swarm":                strings.Replace(readyNoble, "swarm=inactive", "swarm=active", 1),
-		"rootless":             readyNoble + "rootless=yes\n",
-		"Engine API 1.43":      strings.Replace(readyNoble, "api=1.47", "api=1.43", 1),
-		"container dokploy-traefik publishes": strings.Replace(readyNoble, "publish=boks-proxy\npublish=boks-proxy",
-			"publish=dokploy-traefik", 1),
-		"port 80 or 443 is taken": emptyNoble + `listen=LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=700,fd=6))` + "\n",
-		"flush ruleset":           emptyNoble + "nftflush=/etc/nftables.conf\n",
-		`"iptables": false`:       emptyNoble + daemonLine(`{"iptables": false}`),
-		"does not answer":         strings.Replace(emptyNoble, "flock=yes", "flock=yes\ndockerd=yes", 1),
+		"passwordless sudo":                   sudoUser,
+		"not a system":                        strings.Replace(emptyNoble, "os=ubuntu", "os=fedora", 1),
+		"Ubuntu 22.04+":                       strings.Replace(emptyNoble, "version=24.04", "version=20.04", 1),
+		"without systemd":                     strings.Replace(emptyNoble, "systemd=yes\n", "", 1),
+		"tcp_migrate_req":                     strings.Replace(emptyNoble, "migratereq=yes\n", "", 1),
+		"older than Docker 25":                strings.Replace(emptyNoble, "candidate=27.5.1-0ubuntu3~24.04.2", "candidate=24.0.7-0ubuntu4", 1),
+		"Swarm":                               strings.Replace(readyNoble, "swarm=inactive", "swarm=active", 1),
+		"rootless":                            readyNoble + "rootless=yes\n",
+		"Engine API 1.43":                     strings.Replace(readyNoble, "api=1.47", "api=1.43", 1),
+		"container dokploy-traefik publishes": strings.Replace(readyNoble, "ports=boks-proxy", "ports=dokploy-traefik", 1),
+		"port 80 or 443 is taken":             emptyNoble + `listen=LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=700,fd=6))` + "\n",
+		"flush ruleset":                       emptyNoble + "nftflush=/etc/nftables.conf\n",
+		`"iptables": false`:                   emptyNoble + daemonLine(`{"iptables": false}`),
+		`"iptables": false (`:                 strings.Replace(readyNoble, "--log-level warn", "--log-level warn --iptables=false", 1),
+		`"bridge": "none"`:                    emptyNoble + daemonLine(`{"bridge": "none"}`),
+		`"bridge": "none" (`:                  strings.Replace(readyNoble, "--log-level warn", "--log-level warn -b none", 1),
+		"does not answer":                     strings.Replace(emptyNoble, "flock=yes", "flock=yes\ndockerd=yes", 1),
 	} {
 		if _, err := plan(t, facts); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("want a refusal containing %q, got %v", want, err)
@@ -218,8 +257,21 @@ func TestInstallOnAnEmptyServer(t *testing.T) {
 func TestInstallAsASudoUser(t *testing.T) {
 	facts := strings.Replace(emptyNoble, "user=root\nuid=0", "user=deploy\nuid=1000\nsudo=yes", 1)
 	f, fresh := installFake(facts), installFake("")
+	// The new login has the group only once usermod has run: docker asked before it would fail.
+	fresh.onRun = func(cmd string) {
+		if strings.HasPrefix(cmd, "docker info") && !f.has("sudo -n usermod") {
+			fresh.fail["docker info"] = errors.New("permission denied")
+		}
+	}
 	if err := install(f, fresh); err != nil {
 		t.Fatal(err)
+	}
+	for _, c := range f.calls {
+		for _, root := range []string{"env DEBIAN", "systemctl", "usermod"} {
+			if strings.HasPrefix(c, root) {
+				t.Errorf("a root step without sudo -n: %s", c)
+			}
+		}
 	}
 	usermod := f.callAt("sudo -n usermod -aG docker deploy")
 	if usermod < 0 || !f.has("sudo -n env DEBIAN_FRONTEND=noninteractive apt-get") || !f.has("sudo -n systemctl enable --now docker") {
@@ -288,5 +340,28 @@ func TestInstallSaysWhenDockerNeedsANewLoginAndDoesNotAnswer(t *testing.T) {
 	fresh.fail["docker info"] = errors.New("permission denied while trying to connect to the Docker daemon socket")
 	if err := install(f, fresh); err == nil || !strings.Contains(err.Error(), "without sudo in a new login") || fresh.has("docker ps") {
 		t.Errorf("got %v; fresh: %v", err, fresh.calls)
+	}
+}
+
+// An install a cut run left open is closed, not named by `boks server status` forever: as abandoned by
+// a run that has steps of its own, as done by one that finds nothing left to do.
+func TestInstallClosesAnInstallACutRunLeftOpen(t *testing.T) {
+	open := `{"op":"1","action":"server install","from":"","to":"docker.io cron","started_at":"2026-01-01T00:00:00Z"}`
+	ready := readyNoble + daemonLine(`{"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"},"default-address-pools":[{"base":"10.240.0.0/16","size":24}]}`)
+	for facts, want := range map[string]string{emptyNoble: "abandoned", ready: "ok"} {
+		f, fresh := installFake(facts), installFake("")
+		f.out["sh -c cat '.boks/_server/journal.jsonl'"] = open
+		if err := install(f, fresh); err != nil {
+			t.Fatal(err)
+		}
+		if j := f.appends[serverLog]; !strings.Contains(j, `{"op":"1","finished_at":`) || !strings.Contains(j, `"result":"`+want+`"`) {
+			t.Errorf("want the open install closed %s: %s", want, j)
+		}
+	}
+	// Another command's open entry is its own to close.
+	f, fresh := installFake(ready), installFake("")
+	f.out["sh -c cat '.boks/_server/journal.jsonl'"] = `{"op":"1","action":"server apply","from":"3","to":"4","started_at":"2026-01-01T00:00:00Z"}`
+	if err := install(f, fresh); err != nil || f.appends[serverLog] != "" {
+		t.Errorf("got %v, journal %s", err, f.appends[serverLog])
 	}
 }

@@ -44,7 +44,7 @@ echo "kernel=$(uname -r)"
 command -v dockerd >/dev/null && echo dockerd=yes
 command -v crontab >/dev/null && echo crontab=yes
 command -v flock >/dev/null && echo flock=yes
-id -nG | tr ' ' '\n' | grep -qx docker && echo indocker=yes
+id -nG "$(id -un)" | tr ' ' '\n' | grep -qx docker && echo indocker=yes
 echo "dockerenabled=$(systemctl is-enabled docker 2>/dev/null)"
 echo "cronactive=$(systemctl is-active cron 2>/dev/null)"
 if ! command -v dockerd >/dev/null; then echo "candidate=$(apt-cache policy docker.io 2>/dev/null | awk '/Candidate:/{print $2}')"; fi
@@ -55,27 +55,32 @@ if $S docker info >/dev/null 2>&1; then
   $S docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless && echo rootless=yes
   echo "running=$($S docker ps -q | wc -l | tr -d ' ')"
   $S docker network ls --format '{{.Name}}' | grep -vxE 'bridge|host|none' | sed 's/^/network=/'
-  $S docker ps --filter publish=80 --format '{{.Names}}' | sed 's/^/publish=/'
-  $S docker ps --filter publish=443 --format '{{.Names}}' | sed 's/^/publish=/'
+  $S docker ps --format '{{.Names}} {{.Ports}}' | sed 's/^/ports=/'
 fi
 $S ss -Htlnp '( sport = :80 or sport = :443 )' 2>/dev/null | sed 's/^/listen=/'
 [ -f /etc/docker/daemon.json ] && echo "daemon=$($S cat /etc/docker/daemon.json | base64 | tr -d '\n')"
-echo "execstart=$(systemctl cat docker 2>/dev/null | grep -E '^ExecStart=.+' | tail -1)"
+M=$(systemctl show -p MainPID --value docker 2>/dev/null)
+if [ -n "$M" ] && [ "$M" != 0 ]; then echo "dockerdcmd=$($S cat /proc/$M/cmdline 2>/dev/null | tr '\0' ' ')"
+else echo "dockerdcmd=$(systemctl show -p ExecStart --value docker 2>/dev/null | tr '\n' ' ')"; fi
 if [ "$(systemctl is-enabled nftables 2>/dev/null)" = enabled ]; then
   for f in /etc/nftables.conf /etc/nftables.d/*.nft; do [ -f "$f" ] && grep -q 'flush ruleset' "$f" && echo "nftflush=$f"; done
 fi
-ip -4 route show table all 2>/dev/null | awk '$1 ~ /\// {print "route=" $1}'
+ip -4 route show table all 2>/dev/null | awk '{print "route=" $1 " " $2}'
 `
 
 // hostFacts is what factsScript found.
 type hostFacts struct {
-	user, os, version, kernel, candidate, api, swarm, execStart string
-	uid, running                                                int
-	sudo, systemd, migrateReq, dockerd, crontab, flock          bool
-	inDocker, dockerUp, rootless, dockerEnabled, cronActive     bool
-	networks, publish, listen, nftFlush, routes                 []string
-	daemon                                                      map[string]any
-	daemonPresent                                               bool
+	user, os, version, kernel, candidate, api, swarm string
+	// dockerdCmd is the command line dockerd runs with — of the running daemon, so flags from a drop-in
+	// or an environment file count — or, with none running, the ExecStart systemd would run.
+	dockerdCmd                                              string
+	uid, running                                            int
+	sudo, systemd, migrateReq, dockerd, crontab, flock      bool
+	inDocker, dockerUp, rootless, dockerEnabled, cronActive bool
+	networks, publish, listen, nftFlush                     []string
+	routes                                                  []netip.Prefix
+	daemon                                                  map[string]any
+	daemonPresent                                           bool
 }
 
 func parseFacts(out string) (hostFacts, error) {
@@ -129,16 +134,21 @@ func parseFacts(out string) (hostFacts, error) {
 			f.running, _ = strconv.Atoi(v)
 		case "network":
 			f.networks = append(f.networks, v)
-		case "publish":
-			f.publish = append(f.publish, v)
+		case "ports":
+			name, ports, _ := strings.Cut(v, " ")
+			if holdsWebPort(ports) {
+				f.publish = append(f.publish, name)
+			}
 		case "listen":
 			f.listen = append(f.listen, v)
 		case "nftflush":
 			f.nftFlush = append(f.nftFlush, v)
 		case "route":
-			f.routes = append(f.routes, v)
-		case "execstart":
-			f.execStart = v
+			if r, ok := routeDest(v); ok {
+				f.routes = append(f.routes, r)
+			}
+		case "dockerdcmd":
+			f.dockerdCmd = v
 		case "daemon":
 			raw, err := base64.StdEncoding.DecodeString(v)
 			if err != nil {
@@ -202,12 +212,12 @@ func planInstall(f hostFacts) (installPlan, error) {
 			"that drops by default, and keep net.ipv4.ip_forward=1 in a file under /etc/sysctl.d — then install again",
 			strings.Join(f.nftFlush, ", "))
 	}
-	if v, ok := f.daemon["iptables"].(bool); ok && !v {
-		return p, fmt.Errorf("/etc/docker/daemon.json sets \"iptables\": false: published ports would show every visitor as the Docker gateway, " +
+	if v, ok := f.daemon["iptables"].(bool); (ok && !v) || flagValue(f.dockerdCmd, "--iptables") == "false" {
+		return p, fmt.Errorf("Docker runs with \"iptables\": false (daemon.json or a dockerd flag): published ports would show every visitor as the Docker gateway, " +
 			"so one ban shuts the site for all. Let Docker manage its rules, then install again")
 	}
-	if f.daemon["bridge"] == "none" {
-		return p, fmt.Errorf("/etc/docker/daemon.json sets \"bridge\": \"none\"; boks networks need Docker's bridge driver")
+	if f.daemon["bridge"] == "none" || flagValue(f.dockerdCmd, "--bridge") == "none" || flagValue(f.dockerdCmd, "-b") == "none" {
+		return p, fmt.Errorf("Docker runs with \"bridge\": \"none\" (daemon.json or a dockerd flag); boks networks need Docker's bridge driver")
 	}
 	if f.dockerUp {
 		if api, err := strconv.ParseFloat(f.api, 64); err != nil || api < minDockerAPI {
@@ -250,11 +260,11 @@ func planDaemon(f hostFacts, p *installPlan) {
 	want := map[string]any{}
 	_, driver := f.daemon["log-driver"]
 	_, opts := f.daemon["log-opts"]
-	if !driver && !opts && !strings.Contains(f.execStart, "--log-") {
+	if !driver && !opts && !hasFlag(f.dockerdCmd, "--log-driver") && !hasFlag(f.dockerdCmd, "--log-opt") {
 		want["log-driver"] = "json-file"
 		want["log-opts"] = map[string]any{"max-size": "10m", "max-file": "3"}
 	}
-	if _, set := f.daemon["default-address-pools"]; !set && !strings.Contains(f.execStart, "--default-address-pool") {
+	if _, set := f.daemon["default-address-pools"]; !set && !hasFlag(f.dockerdCmd, "--default-address-pool") {
 		if pool, why := poolFree(f); pool {
 			want["default-address-pools"] = []any{map[string]any{"base": addressPool, "size": float64(24)}}
 		} else {
@@ -284,7 +294,7 @@ func planDaemon(f hostFacts, p *installPlan) {
 func poolFree(f hostFacts) (bool, string) {
 	pool := netip.MustParsePrefix(addressPool)
 	for _, r := range f.routes {
-		if pr, err := netip.ParsePrefix(r); err == nil && pr.Overlaps(pool) {
+		if r.Overlaps(pool) {
 			return false, fmt.Sprintf("the host routes %s, which overlaps %s: Docker's address pool is left as it is — "+
 				"set default-address-pools in /etc/docker/daemon.json to a range nothing here uses", r, addressPool)
 		}
@@ -329,6 +339,70 @@ func atoi(s string) int {
 	return n
 }
 
+// holdsWebPort says whether docker's Ports column — "0.0.0.0:80->80/tcp, [::]:8000-8090->8000-8090/tcp"
+// — binds host port 80 or 443. A container port alone ("80/tcp") binds nothing on the host, and a
+// container port 80 published on another host port leaves 80 free.
+func holdsWebPort(ports string) bool {
+	for _, m := range strings.Split(ports, ",") {
+		host, _, ok := strings.Cut(strings.TrimSpace(m), "->")
+		if !ok {
+			continue
+		}
+		lo, hi, isRange := strings.Cut(host[strings.LastIndex(host, ":")+1:], "-")
+		if !isRange {
+			hi = lo
+		}
+		a, b := atoi(lo), atoi(hi)
+		if (a <= 80 && 80 <= b) || (a <= 443 && 443 <= b) {
+			return true
+		}
+	}
+	return false
+}
+
+// routeDest is the destination of one `ip -4 route` line, given by its first two fields. The first is
+// the destination, unless the line starts with a route type (blackhole, local, broadcast…) — then the
+// second is. A host route is printed without a length and is a /32; default is no destination a pool
+// could collide with.
+func routeDest(v string) (netip.Prefix, bool) {
+	for _, d := range strings.Fields(v) {
+		if p, err := netip.ParsePrefix(d); err == nil {
+			return p.Masked(), true
+		}
+		if a, err := netip.ParseAddr(d); err == nil && a.Is4() {
+			return netip.PrefixFrom(a, 32), true
+		}
+	}
+	return netip.Prefix{}, false
+}
+
+// hasFlag says whether the dockerd command line cmd gives the option name, as `name value` or `name=value`.
+func hasFlag(cmd, name string) bool {
+	for _, a := range strings.Fields(cmd) {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// flagValue is the value cmd gives the option name — the last one, as dockerd takes it — or "". A boolean
+// given bare is "true".
+func flagValue(cmd, name string) string {
+	args, v := strings.Fields(cmd), ""
+	for i, a := range args {
+		if val, ok := strings.CutPrefix(a, name+"="); ok {
+			v = val
+		} else if a == name {
+			v = "true"
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				v = args[i+1]
+			}
+		}
+	}
+	return v
+}
+
 // CheckInstall reads the server and says what an install would do there, or why it would refuse:
 // asked of every server before any changes.
 func CheckInstall(ctx context.Context, r remote.Runner) (installPlan, error) {
@@ -342,6 +416,8 @@ func CheckInstall(ctx context.Context, r remote.Runner) (installPlan, error) {
 	}
 	return planInstall(f)
 }
+
+const installAction = "server install"
 
 // Install makes the server ready for boks and starts the proxy from image. r is the run's connection;
 // fresh makes a new one — a user just added to group docker has it only in a new login. The plan is
@@ -377,7 +453,7 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 	as := func(args ...string) []string { return append(slices.Clone(sudo), args...) }
 	op := ""
 	if !p.empty() {
-		if op, err = release.Begin(ctx, r, serverJournal, "server install", "", strings.Join(p.packages, " "), o.Now()); err != nil {
+		if op, err = beginServer(ctx, r, log, o, installAction, "", strings.Join(p.packages, " ")); err != nil {
 			return err
 		}
 	}
@@ -409,7 +485,7 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 		}
 	}
 	if p.restartDocker {
-		fmt.Fprintln(log, "docker: restarting dockerd for the address pool (no container runs)")
+		fmt.Fprintln(log, "docker: restarting dockerd for the new daemon.json (no container runs)")
 		if _, err := r.Run(ctx, as("systemctl", "restart", "docker")...); err != nil {
 			return fail(fmt.Errorf("restarting docker: %w", err))
 		}
@@ -437,6 +513,10 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 		finish(ctx, r, log, serverJournal, op, "ok", o.Now())
 		fmt.Fprintln(log, "server ready for boks")
 	} else {
+		// An install a cut run left open got as far as this one has nothing left to do: it is closed.
+		if open, err := release.Unfinished(ctx, r, serverJournal); err == nil && open != nil && open.Action == installAction {
+			finish(ctx, r, log, serverJournal, open.Op, "ok", o.Now())
+		}
 		fmt.Fprintln(log, "server ready for boks; nothing to change")
 	}
 	fmt.Fprintln(log, "not checked from here: the provider's firewall in front of 80 and 443, and a reboot")
