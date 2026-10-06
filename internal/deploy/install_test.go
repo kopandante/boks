@@ -53,7 +53,7 @@ dockerup=yes
 api=1.47
 swarm=inactive
 running=1
-proxyup=yes
+proxy=running caddy
 network=boks-web
 ports=boks-proxy 0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp
 listen=LISTEN 0 4096 0.0.0.0:80 0.0.0.0:* users:(("docker-proxy",pid=812,fd=7))
@@ -202,6 +202,7 @@ func TestPlanInstallRefuses(t *testing.T) {
 		"container dokploy-traefik publishes": strings.Replace(readyNoble, "ports=boks-proxy", "ports=dokploy-traefik", 1),
 		"port 80 or 443 is taken":             emptyNoble + `listen=LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=700,fd=6))` + "\n",
 		"flush ruleset":                       emptyNoble + "nftflush=/etc/nftables.conf\n",
+		"boks proxy migrate":                  strings.Replace(readyNoble, "proxy=running caddy", "proxy=running ", 1),
 		`"iptables": false`:                   emptyNoble + daemonLine(`{"iptables": false}`),
 		`"iptables": false (`:                 strings.Replace(readyNoble, "--log-level warn", "--log-level warn --iptables=false", 1),
 		`"bridge": "none"`:                    emptyNoble + daemonLine(`{"bridge": "none"}`),
@@ -337,7 +338,7 @@ func TestInstallTwiceChangesNothing(t *testing.T) {
 // A server prepared but without its proxy — a first run that failed pulling it — gets the proxy as a
 // change of its own: journaled, and not reported as nothing to change.
 func TestInstallJournalsAProxyBootAlone(t *testing.T) {
-	ready := strings.Replace(readyNoble, "proxyup=yes\n", "", 1) + daemonLine(`{"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"},"default-address-pools":[{"base":"10.240.0.0/16","size":24}]}`)
+	ready := strings.Replace(readyNoble, "proxy=running caddy", "proxy=exited caddy", 1) + daemonLine(`{"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"},"default-address-pools":[{"base":"10.240.0.0/16","size":24}]}`)
 	f, fresh := installFake(ready), installFake("")
 	var log strings.Builder
 	if err := Install(context.Background(), f, func() remote.Runner { return fresh }, &log, "caddy:2.11.7-alpine", fixed); err != nil {
@@ -380,6 +381,24 @@ func TestInstallReadsAFreshImagesCandidateAfterUpdate(t *testing.T) {
 	update, daemon := f.callAt(aptCall+"update"), f.writeAt("/etc/docker/daemon.json", "")
 	if update < 0 || daemon < update || !f.has(aptCall+"install -y -q --no-install-recommends docker.io") {
 		t.Errorf("update %d daemon.json %d: %v", update, daemon, f.calls)
+	}
+}
+
+// An old docker.io in apt's index may be the index's age, not the repository's: it is refreshed before
+// the refusal stands.
+func TestInstallRefreshesAnOldCandidateBeforeRefusing(t *testing.T) {
+	old := strings.Replace(emptyNoble, "candidate=27.5.1-0ubuntu3~24.04.2", "candidate=24.0.7-0ubuntu4", 1)
+	for fresh, ok := range map[string]bool{"29.1.3-0ubuntu3~24.04.2": true, "24.0.7-0ubuntu4": false} {
+		f := installFake(old)
+		f.onRun = func(cmd string) {
+			if strings.HasPrefix(cmd, aptCall+"update") {
+				f.out[factsCall] = strings.Replace(old, "candidate=24.0.7-0ubuntu4", "candidate="+fresh, 1)
+			}
+		}
+		_, err := CheckInstall(context.Background(), f)
+		if !f.has(aptCall+"update") || (err == nil) != ok || (!ok && !strings.Contains(err.Error(), "older than Docker 25")) {
+			t.Errorf("index refreshed to %s: got %v; %v", fresh, err, f.calls)
+		}
 	}
 }
 

@@ -55,7 +55,7 @@ if $S docker info >/dev/null 2>&1; then
   echo "swarm=$($S docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null)"
   $S docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless && echo rootless=yes
   echo "running=$($S docker ps -q | wc -l | tr -d ' ')"
-  $S docker ps -q --filter name=^` + proxy.Container + `$ --filter label=boks.proxy=` + proxy.Kind + ` | grep -q . && echo proxyup=yes
+  $S docker ps -a --filter name=^` + proxy.Container + `$ --format 'proxy={{.State}} {{.Label "boks.proxy"}}'
   $S docker network ls --format '{{.Name}}' | grep -vxE 'bridge|host|none' | sed 's/^/network=/'
   $S docker ps --format '{{.Names}} {{.Ports}}' | sed 's/^/ports=/'
 fi
@@ -80,10 +80,9 @@ while ! out=$(LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get "$@" 2>&1); do
   printf '%s\n' "$out" >&2; exit 1
 done`
 
-// errNoCandidate: apt knows no docker.io — a fresh image ships without a package index, so the index
-// is refreshed before this is a refusal.
-var errNoCandidate = errors.New("apt knows no docker.io package here; install Docker Engine from Docker's own repository " +
-	"(docs.docker.com/engine/install), then install again")
+// errDockerPackage marks a refusal of the docker.io apt offers — none, or older than Docker 25. A fresh
+// image may ship no package index or an old one, so prepare refreshes the index before it stands.
+var errDockerPackage = errors.New("install Docker Engine from Docker's own repository (docs.docker.com/engine/install), then install again")
 
 // hostFacts is what factsScript found.
 type hostFacts struct {
@@ -94,11 +93,12 @@ type hostFacts struct {
 	uid, running                                            int
 	sudo, systemd, migrateReq, dockerd, crontab, flock      bool
 	inDocker, dockerUp, rootless, dockerEnabled, cronActive bool
-	proxyUp                                                 bool
-	networks, publish, listen, nftFlush                     []string
-	routes                                                  []netip.Prefix
-	daemon                                                  map[string]any
-	daemonPresent                                           bool
+	// proxyState and proxyKind are the boks-proxy container's state and boks.proxy label, empty without one.
+	proxyState, proxyKind               string
+	networks, publish, listen, nftFlush []string
+	routes                              []netip.Prefix
+	daemon                              map[string]any
+	daemonPresent                       bool
 }
 
 func parseFacts(out string) (hostFacts, error) {
@@ -142,8 +142,8 @@ func parseFacts(out string) (hostFacts, error) {
 			f.candidate = v
 		case "dockerup":
 			f.dockerUp = yes
-		case "proxyup":
-			f.proxyUp = yes
+		case "proxy":
+			f.proxyState, f.proxyKind, _ = strings.Cut(v, " ")
 		case "api":
 			f.api = v
 		case "swarm":
@@ -223,6 +223,10 @@ func planInstall(f hostFacts) (installPlan, error) {
 	if f.rootless {
 		return p, fmt.Errorf("Docker runs rootless here; boks needs the system daemon to publish 80 and 443")
 	}
+	// The kamal-proxy an earlier boks ran is moved by `boks proxy migrate`, not replaced here.
+	if f.proxyState != "" && f.proxyKind != proxy.Kind {
+		return p, proxy.NotCaddy()
+	}
 	if err := portsFree(f); err != nil {
 		return p, err
 	}
@@ -246,11 +250,10 @@ func planInstall(f hostFacts) (installPlan, error) {
 		}
 	} else if !f.dockerd {
 		if f.candidate == "" {
-			return p, errNoCandidate
+			return p, fmt.Errorf("apt knows no docker.io package here; %w", errDockerPackage)
 		}
 		if major, _, _ := strings.Cut(f.candidate, "."); atoi(major) < 25 {
-			return p, fmt.Errorf("this system's docker.io package is %q, older than Docker 25 that boks needs; install Docker Engine from "+
-				"Docker's own repository (docs.docker.com/engine/install), then install again", f.candidate)
+			return p, fmt.Errorf("this system's docker.io package is %q, older than Docker 25 that boks needs; %w", f.candidate, errDockerPackage)
 		}
 		p.packages = append(p.packages, "docker.io")
 	} else {
@@ -271,7 +274,7 @@ func planInstall(f hostFacts) (installPlan, error) {
 	if f.uid != 0 && !f.inDocker {
 		p.addToDocker = true
 	}
-	p.bootProxy = !f.proxyUp
+	p.bootProxy = f.proxyState != "running"
 	planDaemon(f, &p)
 	return p, nil
 }
@@ -435,8 +438,8 @@ func CheckInstall(ctx context.Context, r remote.Runner) (installPlan, error) {
 	return p, err
 }
 
-// prepare reads the server and plans its install. A plan that installs packages, or that cannot tell
-// the version of docker.io because apt has no package index yet, gets the index refreshed and the
+// prepare reads the server and plans its install. A plan that installs packages, or refuses the docker.io
+// apt offers — whose index may be missing or old on a fresh image — gets the index refreshed and the
 // server read and planned again: the version checked is the one apt will install, and is checked before
 // any change. Every other refusal comes first, without apt. The refresh is the one write a check makes,
 // and nothing boks is responsible for.
@@ -454,7 +457,7 @@ func prepare(ctx context.Context, r remote.Runner) (hostFacts, installPlan, erro
 		return f, p, err
 	}
 	f, p, err := read()
-	if !errors.Is(err, errNoCandidate) && (err != nil || len(p.packages) == 0) {
+	if !errors.Is(err, errDockerPackage) && (err != nil || len(p.packages) == 0) {
 		return f, p, err
 	}
 	if err := aptGet(ctx, r, sudoFor(f), "update", "-q"); err != nil {

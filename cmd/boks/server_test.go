@@ -57,3 +57,43 @@ func TestServerRollbackAsksEveryServerFirst(t *testing.T) {
 		t.Errorf("a was changed before b was asked: %v", a.calls)
 	}
 }
+
+// The docker check after usermod and the proxy boot go through a login of their own — past the run's
+// shared connection and past a ControlMaster in ~/.ssh/config — since only a new login has the group
+// usermod just added; the server is read over the shared one.
+func TestServerInstallAsksDockerInANewLogin(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	facts := "user=deploy\nuid=1000\nsudo=yes\nos=ubuntu\nversion=24.04\nsystemd=yes\nmigratereq=yes\ndockerd=yes\ncrontab=yes\n" +
+		"flock=yes\ndockerenabled=enabled\ncronactive=active\ndockerup=yes\napi=1.47\nswarm=inactive\nrunning=1\n"
+	log := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" | tr '\\n' ' ' >> " + log + "\necho >> " + log + "\n" +
+		"case \"$*\" in *'id -un'*) cat " + filepath.Join(dir, "facts") + " ;; esac\nexit 0\n"
+	for name, body := range map[string]string{"facts": facts, "ssh": script, "server.yml": "servers: [h]\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BOKS_SSH_MUX", "")
+	run([]string{"server", "install", "server.yml"}, io.Discard, io.Discard)
+	b, _ := os.ReadFile(log)
+	var usermod, docker, read bool
+	for _, c := range strings.Split(string(b), "\n") {
+		alone := strings.Contains(c, "-o ControlMaster=no -o ControlPath=none h ")
+		switch {
+		case strings.Contains(c, " h 'sudo' '-n' 'usermod' '-aG' 'docker' 'deploy'"):
+			usermod = !alone
+		case strings.Contains(c, " h 'docker' 'info'"):
+			docker = alone
+			if !alone {
+				t.Errorf("docker asked over a shared connection: %s", c)
+			}
+		case strings.Contains(c, "id -un"):
+			read = !alone && strings.Contains(c, "ControlMaster=auto")
+		}
+	}
+	if !usermod || !docker || !read {
+		t.Errorf("usermod %v, docker in a new login %v, read shared %v; calls:\n%s", usermod, docker, read, b)
+	}
+}
