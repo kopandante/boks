@@ -469,9 +469,9 @@ func TestInstallRestartsDockerRightAfterTheWrite(t *testing.T) {
 	if err := install(f, fresh); err == nil {
 		t.Fatal("want the apt failure")
 	}
-	restart := f.callAt("sudo -n systemctl restart docker")
-	if restart < 0 || f.callAt("sudo -n "+aptCall+"install") < restart {
-		t.Errorf("want dockerd restarted before apt: %v", f.calls)
+	write, restart := f.callAt(`sudo -n sh -c mkdir -p "$(dirname '/etc/docker/daemon.json')"`), f.callAt("sudo -n systemctl restart docker")
+	if write < 0 || restart < write || f.callAt("sudo -n "+aptCall+"install") < restart {
+		t.Errorf("want daemon.json written, then dockerd restarted, then apt: write %d restart %d: %v", write, restart, f.calls)
 	}
 }
 
