@@ -47,7 +47,9 @@ func (s *swap) Run(_ context.Context, args ...string) (string, error) {
 	return s.out[best], nil
 }
 
-func (s *swap) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) { return s.Run(ctx, args...) }
+func (s *swap) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
+	return s.Run(ctx, args...)
+}
 
 func (s *swap) at(prefix string) int {
 	for i, c := range s.calls {
