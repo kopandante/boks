@@ -82,7 +82,21 @@ R4 (`20261002-small-box-reality.md`) и G3 (`20261006-shchr-gaps.md`).
       json-file 5 × 10 MB, в `.boks/_server/journal.jsonl` — `proxy upgrade` с `ok`, отказ
       проверкой записи не оставляет, `boks-proxy.old` не остаётся; прокси, отставленный руками
       (`docker stop boks-proxy && docker rename boks-proxy boks-proxy.old`), — отказ с командой возврата
-- [ ] **B9** — подтверждение reload через admin API
+- [x] **B9. Подтверждение reload через admin API** (PR feat/reload-confirm, #75): когда вызов
+      `caddy reload` вернул ошибку, boks читает `GET /config/` через `docker exec` (admin API не
+      публикуется) и сравнивает разобранный JSON с порядком массивов: работает конфиг этой
+      операции — переключение маршрутов, их возврат или политика подтверждены, запуск идёт дальше;
+      работает прежний, отличный от нового, — ошибка говорит, что Caddy остался на нём; спросить не
+      удалось — сообщение без утверждений. Перезагрузка ради файлов сертификата (`Reload`) так не
+      подтверждается и не опровергается: конфиг тот же. `go test ./internal/proxy -run
+      'Lost|PutBack|Unconfirmed|OldConfig'`. На boks-lab2: ответ `/config/` побайтово отличается от
+      `.boks/_proxy/caddy.json`, а `jq -S .` у обоих совпадает; обёртка `/usr/local/bin/docker`,
+      которая на `caddy reload` отвечает кодом 255 — после выполнения reload (`take`) или не
+      выполняя его (`refuse`): `boks deploy v1.10.3` приложения `web` (`traefik/whoami`) при `take` —
+      «the reload's answer was lost, but Caddy runs the routes of web», старая копия снята, маршрут на
+      новой; `deploy v1.10.2` при `refuse` — возврат маршрутов тоже «потерян» и подтверждён, ошибка
+      «Caddy still runs the config it had», новая копия удалена, `Host: web.lab2.test` отвечает 200
+      со старой копии
 - [ ] **A** — `boks server install`
 
 ## Конструкция A (`boks server install`)

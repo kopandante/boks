@@ -700,6 +700,13 @@ func Lags(ctx context.Context, r remote.Runner, fs []Fragment) (bool, error) {
 // a run cut after writing its fragment leaves caddy.json behind the fragments, and loading it would
 // send that run's routes back to the copies it left. The caller holds the server's admission lock.
 func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment, force bool, what string) (bool, error) {
+	return reconverge(ctx, r, log, fs, force, true, what)
+}
+
+// reconverge is converge; confirm says whether a reload whose answer was lost may be confirmed by
+// asking Caddy which config it runs — right when the question is which routes run, wrong when it is
+// whether Caddy read certificate files again under unchanged paths (Reload), which no config shows.
+func reconverge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment, force, confirm bool, what string) (bool, error) {
 	pol, err := ReadPolicy(ctx, r)
 	if err != nil {
 		return false, err
@@ -738,14 +745,43 @@ func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment
 	if _, err := r.Run(ctx, reloadArgs...); err != nil {
 		// Caddy checks a config before it lets go of the running one, so a refused reload leaves the
 		// proxy serving what it served. A failed call is not a refusal, though: its answer can be lost
-		// after Caddy took the config, so the message claims neither.
-		return false, fmt.Errorf("reloading the proxy with %s failed: if Caddy refused the config it still runs the one it had, "+
-			"but the answer may have been lost after it took the new one: %w", what, err)
+		// after Caddy took the config. So Caddy is asked which config it runs: this one, and the reload
+		// went through — a routes switch or a put-back goes on as if the answer had come; the one it
+		// had, and it did not — unless that one is this one too, as for Reload, and then the config
+		// tells nothing. Asking can fail too; then the message claims neither.
+		live, liveErr := runningConfig(ctx, r)
+		switch {
+		case confirm && liveErr == nil && sameJSON(live, body):
+			fmt.Fprintf(log, "proxy: the reload's answer was lost, but Caddy runs %s\n", what)
+		case liveErr == nil && present && !sameJSON(live, body) && sameJSON(live, []byte(applied)):
+			return false, fmt.Errorf("reloading the proxy with %s failed, and Caddy still runs the config it had: %w", what, err)
+		default:
+			return false, fmt.Errorf("reloading the proxy with %s failed: if Caddy refused the config it still runs the one it had, "+
+				"but the answer may have been lost after it took the new one: %w", what, err)
+		}
 	}
 	if _, err := r.Run(ctx, "mv", nextPath(), appliedPath()); err != nil {
 		return true, fmt.Errorf("recording the proxy's config: %w", err)
 	}
 	return true, nil
+}
+
+// runningConfig is the config Caddy runs, from its admin API inside the container: not published, so
+// nothing outside the server can read or change it.
+func runningConfig(ctx context.Context, r remote.Runner) ([]byte, error) {
+	out, err := r.Run(ctx, "docker", "exec", Container, "wget", "-q", "-O", "-", adminURL+"/config/")
+	return []byte(out), err
+}
+
+// sameJSON says whether two configs are one: Caddy answers with the config it loaded, re-encoded,
+// so the bytes differ from the file and the meaning does not (measured, 2.11.7-alpine). Arrays keep
+// their order — the order of routes is the routing.
+func sameJSON(a, b []byte) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
 }
 
 // sameRoutes compares two route lists field by field; nil and empty are the same: no routes. Every
@@ -767,7 +803,7 @@ func Reload(ctx context.Context, r remote.Runner) error {
 	if err != nil {
 		return err
 	}
-	_, err = converge(ctx, r, io.Discard, fs, true, "the certificate files")
+	_, err = reconverge(ctx, r, io.Discard, fs, true, false, "the certificate files")
 	return err
 }
 
