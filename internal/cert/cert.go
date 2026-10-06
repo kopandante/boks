@@ -243,8 +243,8 @@ func markMatches(ctx context.Context, r remote.Runner, installed string, paths .
 }
 
 // Reload makes the proxy load the certificate files again, then records what it loaded. The caller
-// holds the server's admission lock: a reload of the applied config racing a deploy's reload of the
-// next one could put the proxy back on the routes that deploy just replaced.
+// holds the server's admission lock: a reload racing a deploy's could put the proxy back on the routes
+// that deploy just replaced.
 func Reload(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
 	fmt.Fprintln(log, "reloading the proxy to load the certificate")
 	if err := proxy.Reload(ctx, r); err != nil {

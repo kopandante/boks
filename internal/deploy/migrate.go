@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kopandante/boks/internal/cert"
-	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
 	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
@@ -23,8 +21,8 @@ import (
 const asideName = proxy.Container + ".kamal"
 
 // MigrateProxy replaces the kamal-proxy an earlier boks ran on this server with Caddy, keeping every
-// route. The routes are each app's current release — hosts, TLS, certificate — dialling the container
-// kamal-proxy sends that host to now, so traffic lands where it landed. A host kamal-proxy routes and
+// route. The routes are each app's current release's hosts, served as kamal-proxy serves them now —
+// the container it sends the host to, TLS, the certificate files — so traffic lands where it landed. A host kamal-proxy routes and
 // no recorded release describes would be lost, so it refuses, changing nothing; so does a deploy in
 // progress, whose lock it would otherwise race. The swap is seconds without a proxy on 80/443.
 //
@@ -172,11 +170,17 @@ func asideThere(ctx context.Context, r remote.Runner) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-// kamalTarget is where kamal-proxy sends a host now, and whether it serves it with TLS.
+// kamalTarget is where kamal-proxy sends a host now, whether it serves it with TLS, and from which
+// certificate files when not from its own ACME.
 type kamalTarget struct {
 	dial string
 	tls  bool
+	cert *proxy.CertFiles
 }
+
+// kamalState is kamal-proxy v0.10.0's state file: what `list` does not say, the certificate files a
+// service was deployed with, is there.
+const kamalState = "/home/kamal-proxy/.config/kamal-proxy/kamal-proxy.state"
 
 // kamalTargets reads where kamal-proxy sends each host now. A service that spreads one host over
 // several containers has no one place to send it, and that is refused rather than guessed.
@@ -193,16 +197,46 @@ func kamalTargets(ctx context.Context, r remote.Runner) (map[string]kamalTarget,
 	if err := json.Unmarshal([]byte(out), &services); err != nil {
 		return nil, fmt.Errorf("reading kamal-proxy's routes: %w", err)
 	}
+	certs, err := kamalCerts(ctx, r)
+	if err != nil {
+		return nil, err
+	}
 	byHost := map[string]kamalTarget{}
 	for name, s := range services {
 		if len(s.Targets) != 1 {
 			return nil, fmt.Errorf("kamal-proxy's route %s goes to %v, not to one container; deploy its app once more, then migrate; nothing was changed", name, s.Targets)
 		}
 		for _, h := range s.Hosts {
-			byHost[h] = kamalTarget{dial: s.Targets[0], tls: s.TLS}
+			byHost[h] = kamalTarget{dial: s.Targets[0], tls: s.TLS, cert: certs[name]}
 		}
 	}
 	return byHost, nil
+}
+
+// kamalCerts reads the certificate files each kamal-proxy service serves, by service name. The
+// paths are the proxy's own, and Caddy mounts the same volume at the same place.
+func kamalCerts(ctx context.Context, r remote.Runner) (map[string]*proxy.CertFiles, error) {
+	out, err := r.Run(ctx, "docker", "exec", proxy.Container, "cat", kamalState)
+	if err != nil {
+		return nil, fmt.Errorf("reading kamal-proxy's certificates from %s: %w; nothing was changed", kamalState, err)
+	}
+	var services []struct {
+		Name    string `json:"name"`
+		Options struct {
+			Certificate string `json:"tls_certificate_path"`
+			Key         string `json:"tls_private_key_path"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal([]byte(out), &services); err != nil {
+		return nil, fmt.Errorf("reading kamal-proxy's certificates from %s: %w; nothing was changed", kamalState, err)
+	}
+	certs := map[string]*proxy.CertFiles{}
+	for _, s := range services {
+		if s.Options.Certificate != "" && s.Options.Key != "" {
+			certs[s.Name] = &proxy.CertFiles{Certificate: s.Options.Certificate, Key: s.Options.Key}
+		}
+	}
+	return certs, nil
 }
 
 // recordedApps are the apps with a current release on this server, sorted.
@@ -237,12 +271,12 @@ func migratedRoutes(ctx context.Context, r remote.Runner, log io.Writer, apps []
 				fmt.Fprintf(log, "warning: %s of %s is not routed by kamal-proxy now, so it stays unrouted until %s is deployed\n", p.Host, app, app)
 				continue
 			}
-			// TLS as kamal-proxy serves the host now, not as the release recorded it: a rollback keeps
-			// today's tls and points current at a release recorded with another.
+			// TLS and its certificate as kamal-proxy serves the host now, not as the release recorded
+			// them: a rollback keeps today's tls and cert and points current at a release recorded with
+			// others.
 			rt := proxy.Route{Host: p.Host, Dial: target.dial, TLS: target.tls}
-			if c := (&config.Cert{Domains: s.CertDomains}); rt.TLS && len(s.CertDomains) > 0 && c.Covers(p.Host) {
-				crt, key := cert.ServerPaths(c)
-				rt.Cert = &proxy.CertFiles{Certificate: crt, Key: key}
+			if rt.TLS {
+				rt.Cert = target.cert
 			}
 			routes = append(routes, rt)
 			taken[p.Host] = true

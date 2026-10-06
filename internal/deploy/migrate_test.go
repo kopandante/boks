@@ -10,6 +10,7 @@ import (
 
 const (
 	kamalList  = "docker exec boks-proxy kamal-proxy list --json"
+	kamalCat   = "docker exec boks-proxy cat /home/kamal-proxy/.config/kamal-proxy/kamal-proxy.state"
 	appsListed = "sh -c for d in .boks/*/"
 	proxyState = "docker ps -a --filter name=^boks-proxy$"
 )
@@ -23,6 +24,9 @@ func kamalServer() *fake {
 	f.out[kamalList] = `{"convex-lab.api":{"hosts":["api.lab.example.com"],"path_prefixes":["/"],"tls":true,` +
 		`"targets":["convex-lab-latest-1:3210"],"read_targets":[],"state":"running"},` +
 		`"convex-lab.site":{"hosts":["site.other.com"],"tls":true,"targets":["convex-lab-latest-1:3211"]}}`
+	f.out[kamalCat] = `[{"name":"convex-lab.api","options":{"hosts":["api.lab.example.com"],"tls_enabled":true,` +
+		`"tls_certificate_path":"/certs/boks/_.lab.example.com.crt","tls_private_key_path":"/certs/boks/_.lab.example.com.key"}},` +
+		`{"name":"convex-lab.site","options":{"hosts":["site.other.com"],"tls_enabled":true,"tls_certificate_path":"","tls_private_key_path":""}}]`
 	f.out[appsListed] = "convex-lab"
 	f.out["sh -c cat '.boks/convex-lab/current'"] = "convex-lab-latest-1\n"
 	f.out["cat .boks/convex-lab/releases/convex-lab-latest-1.json"] = `{"version":6,"id":"convex-lab-latest-1","app":"convex-lab",` +
@@ -146,17 +150,26 @@ func TestMigrateIsIdempotent(t *testing.T) {
 
 const asideState = `docker ps -a --filter name=^boks-proxy\.kamal$`
 
-// TLS is taken from kamal-proxy as it serves the host now: a rollback keeps today's tls and points
-// current at a release recorded without it, and the migration must not turn HTTPS off.
+// TLS and its certificate are taken from kamal-proxy as it serves the host now: a rollback keeps
+// today's tls and cert and points current at a release recorded with others, and the migration must
+// neither turn HTTPS off nor bring back a certificate the host no longer uses.
 func TestMigrateKeepsTheTLSKamalServes(t *testing.T) {
 	f := kamalServer()
-	f.out["cat .boks/convex-lab/releases/convex-lab-latest-1.json"] = strings.Replace(
-		f.out["cat .boks/convex-lab/releases/convex-lab-latest-1.json"], `"tls":true`, `"tls":false`, 1)
+	f.out["cat .boks/convex-lab/releases/convex-lab-latest-1.json"] = strings.NewReplacer(`"tls":true`, `"tls":false`,
+		`"cert_domains":["*.lab.example.com"]`, `"cert_domains":["api.lab.example.com"]`).Replace(
+		f.out["cat .boks/convex-lab/releases/convex-lab-latest-1.json"])
 	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
 		t.Fatal(err)
 	}
-	if frag := f.fragmentWrite("convex-lab"); strings.Count(frag, `"tls": true`) != 2 || strings.Count(frag, `"cert"`) != 1 {
-		t.Errorf("want both hosts on TLS as kamal-proxy serves them:\n%s", frag)
+	if frag := f.fragmentWrite("convex-lab"); strings.Count(frag, `"tls": true`) != 2 || strings.Count(frag, `"cert"`) != 1 ||
+		!strings.Contains(frag, "/certs/boks/_.lab.example.com.crt") {
+		t.Errorf("want both hosts on TLS, the api host from the wildcard file, as kamal-proxy serves them:\n%s", frag)
+	}
+	// kamal-proxy's certificates unread: refused, nothing changed.
+	h := kamalServer()
+	h.fail[kamalCat] = errors.New("No such file")
+	if err := MigrateProxy(context.Background(), h, io.Discard, "img", fixed); err == nil || h.has("docker stop") || proxyWrites(h) {
+		t.Errorf("want a refusal that changes nothing: %v", err)
 	}
 	// And a host kamal-proxy serves without TLS stays so, certificate or not.
 	g := kamalServer()

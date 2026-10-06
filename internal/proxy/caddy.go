@@ -375,10 +375,29 @@ func sameRoutes(a, b []Route) bool {
 
 // Reload makes the proxy load its config again although it has not changed — what a certificate
 // renewal needs: the paths stay, the files behind them are new, and Caddy reads them only when it
-// loads a config. Without --force Caddy sees an unchanged config and does nothing.
+// loads a config. Without --force Caddy sees an unchanged config and does nothing. The config is the
+// one assembled from the fragments, not caddy.json as it lies: a run cut after writing its fragment
+// leaves caddy.json behind it, and loading that would put the cut run's routes back on the copies it
+// left. The caller holds the server's admission lock.
 func Reload(ctx context.Context, r remote.Runner) error {
-	_, err := r.Run(ctx, "docker", "exec", Container, "caddy", "reload", "--config", inProxy(appliedPath()), "--force")
-	return err
+	fs, err := Fragments(ctx, r)
+	if err != nil {
+		return err
+	}
+	body, err := Config(fs)
+	if err != nil {
+		return err
+	}
+	if err := remote.UploadAtomic(ctx, r, body, nextPath()); err != nil {
+		return err
+	}
+	if _, err := r.Run(ctx, "docker", "exec", Container, "caddy", "reload", "--config", inProxy(nextPath()), "--force"); err != nil {
+		return err
+	}
+	if _, err := r.Run(ctx, "mv", nextPath(), appliedPath()); err != nil {
+		return fmt.Errorf("recording the proxy's config: %w", err)
+	}
+	return nil
 }
 
 // inProxy is a file of Dir as the proxy sees it.

@@ -203,7 +203,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if stopFirst {
 		err = replaceStopFirst(ctx, r, log, cfg, l, o, op, adm, name, live, was)
 	} else {
-		err = replaceOverlap(ctx, r, log, cfg, l, o, op, adm, name, was)
+		err = replaceOverlap(ctx, r, log, cfg, l, o, op, adm, name, was, names(old))
 	}
 	if err != nil {
 		return err
@@ -240,7 +240,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 // the copy is gone again): from then on the memory check of the next deploy counts its limit, and
 // the proxy's networks are settled. The switch takes it again, since the config is every app's.
 func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, l launch, o Options,
-	op operation, adm *admission, name string, was []proxy.Route) error {
+	op operation, adm *admission, name string, was []proxy.Route, previous []string) error {
 	err := l.start(ctx, name)
 	if err == nil {
 		// The proxy joins before it is asked to probe the new copy, under the admission lock, like
@@ -254,7 +254,7 @@ func replaceOverlap(ctx context.Context, r remote.Runner, log io.Writer, cfg *co
 	touched := false
 	if err == nil {
 		if touched, err = switchRoutes(ctx, r, log, cfg, name, o, nil); err == nil {
-			drain(ctx, r, log, cfg, was, o.Poll)
+			drain(ctx, r, log, cfg, previous, o.Poll)
 			return nil
 		}
 	}
@@ -1177,12 +1177,14 @@ func underAdmission(ctx context.Context, r remote.Runner, log io.Writer, app str
 	return fn()
 }
 
-// drain waits, up to drain_timeout, for the proxy to finish the requests it holds to the copies the
-// routes left: after a reload Caddy's previous server goes on with them, and a copy stopped under them
-// would cut them off. kamal-proxy drained the same way. A proxy that cannot say is waited out to the
-// bound: stopping early is the outcome the wait exists to prevent.
-func drain(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, was []proxy.Route, poll time.Duration) {
-	if len(was) == 0 {
+// drain waits, up to drain_timeout, for the proxy to finish the requests it holds to the previous
+// copies: after a reload Caddy's previous server goes on with them, and a copy stopped under them
+// would cut them off. kamal-proxy drained the same way. By container, not by the routes the fragment
+// names: a run cut after writing its fragment leaves one that names a copy Caddy never sent anything
+// to. A proxy that cannot say is waited out to the bound: stopping early is the outcome the wait
+// exists to prevent.
+func drain(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, previous []string, poll time.Duration) {
+	if len(previous) == 0 {
 		return
 	}
 	if poll <= 0 {
@@ -1192,16 +1194,12 @@ func drain(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 	if err != nil || timeout <= 0 {
 		return
 	}
-	var dials []string
-	for _, rt := range was {
-		dials = append(dials, rt.Dial)
-	}
 	deadline := time.Now().Add(timeout)
 	// The bound covers the questions themselves: one that hangs is cut off at it.
 	bctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	for {
-		n, err := proxy.Busy(bctx, r, dials)
+		n, err := proxy.Busy(bctx, r, previous)
 		if err == nil && n == 0 {
 			return
 		}

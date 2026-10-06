@@ -1136,9 +1136,27 @@ func TestTheOldCopyDrainsBeforeItGoes(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a hung drain question held the deploy past drain_timeout")
 	}
+	// The drain is by container: a fragment a cut run left, naming a copy Caddy never sent anything
+	// to, does not let the copy that served go before its requests end.
+	c := routedFake(t)
+	c.out[frags] = fragment(t, "demo", "demo-cut-1", webPort)
+	busy := 0
+	c.onRun = func(cmd string) {
+		if cmd == upstreams {
+			if busy++; busy < 3 {
+				c.out[upstreams] = `[{"address":"demo-cut-1:3000","num_requests":0},{"address":"demo-v1-1:3000","num_requests":1}]`
+			} else {
+				c.out[upstreams] = `[]`
+			}
+		}
+	}
+	if err := Run(context.Background(), c, io.Discard, parse(t, onePort), "v2", quick()); err != nil || busy != 3 {
+		t.Errorf("want the copy that served drained: %d %v", busy, err)
+	}
 	// A first deploy has nothing to drain.
 	h := routedFake(t)
 	h.out[frags] = ""
+	h.out["docker ps -a --filter label=boks.app=demo"] = ""
 	if err := Run(context.Background(), h, io.Discard, parse(t, onePort), "v2", quick()); err != nil || h.has(upstreams) {
 		t.Errorf("nothing to drain: %v %v", err, h.calls)
 	}

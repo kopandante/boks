@@ -337,16 +337,16 @@ func TestProbe(t *testing.T) {
 	}
 }
 
-// Busy counts the requests in flight to the addresses asked about, in the shape Caddy 2.11.7 answers
-// /reverse_proxy/upstreams (measured on boks-lab); others are not counted.
+// Busy counts the requests in flight to the containers asked about, on every port, in the shape Caddy
+// 2.11.7 answers /reverse_proxy/upstreams (measured on boks-lab); others are not counted.
 func TestBusy(t *testing.T) {
 	f := &fake{out: map[string]string{"docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": `[{"address":"demo-v1-1:3000","num_requests":2,"fails":0},` +
 		`{"address":"demo-v1-1:3001","num_requests":1,"fails":0},{"address":"other-v1-1:80","num_requests":7,"fails":0}]`}}
-	n, err := Busy(context.Background(), f, []string{"demo-v1-1:3000", "demo-v1-1:3001"})
+	n, err := Busy(context.Background(), f, []string{"demo-v1-1"})
 	if err != nil || n != 3 {
 		t.Errorf("want 3 in flight, got %d %v", n, err)
 	}
-	if _, err := Busy(context.Background(), &fake{}, []string{"x:1"}); err == nil {
+	if _, err := Busy(context.Background(), &fake{}, []string{"x"}); err == nil {
 		t.Error("an answer that is no list must not read as nothing in flight")
 	}
 }

@@ -403,7 +403,7 @@ func TestPendingUntilReloadRecordsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Forced: the paths are unchanged, and Caddy skips an unchanged config (measured on boks-lab).
-	if !strings.Contains(strings.Join(f.calls, "\n"), "docker exec boks-proxy caddy reload --config /etc/boks/caddy.json --force") {
+	if !strings.Contains(strings.Join(f.calls, "\n"), "docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json --force") {
 		t.Errorf("reload must force Caddy to load the files again, calls:\n%s", strings.Join(f.calls, "\n"))
 	}
 	pending, err = Pending(ctx, f, cfg)

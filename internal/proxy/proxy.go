@@ -246,10 +246,10 @@ func Probe(ctx context.Context, r remote.Runner, target string, port int, health
 	return err
 }
 
-// Busy says how many requests the proxy has in flight to each of these dial addresses. After a reload
-// the previous config's server finishes the requests it holds, and they count here until it does: an
-// address that is not listed, or lists none, has nothing left to drain.
-func Busy(ctx context.Context, r remote.Runner, dials []string) (int, error) {
+// Busy says how many requests the proxy has in flight to these containers, on any port. After a
+// reload the previous config's server finishes the requests it holds, and they count here until it
+// does: a container that is not listed, or lists none, has nothing left to drain.
+func Busy(ctx context.Context, r remote.Runner, containers []string) (int, error) {
 	out, err := r.Run(ctx, "docker", "exec", Container, "wget", "-q", "-O", "-", adminURL+"/reverse_proxy/upstreams")
 	if err != nil {
 		return 0, fmt.Errorf("asking the proxy for its requests in flight: %w", err)
@@ -263,7 +263,7 @@ func Busy(ctx context.Context, r remote.Runner, dials []string) (int, error) {
 	}
 	n := 0
 	for _, u := range ups {
-		if slices.Contains(dials, u.Address) {
+		if c, _, _ := strings.Cut(u.Address, ":"); slices.Contains(containers, c) {
 			n += u.NumRequests
 		}
 	}

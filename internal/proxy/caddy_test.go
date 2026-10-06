@@ -412,8 +412,30 @@ func TestReloadIsForced(t *testing.T) {
 	if err := Reload(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
-	if !d.ran("docker exec boks-proxy caddy reload --config /etc/boks/caddy.json --force") {
-		t.Errorf("want a forced reload of the applied config: %v", d.calls)
+	if !d.ran(reloadNext + " --force") {
+		t.Errorf("want a forced reload: %v", d.calls)
+	}
+}
+
+// A reload loads the config the fragments make, not caddy.json as it lies: a run cut after writing its
+// fragment left caddy.json behind it, and loading that would send its routes back to the copy it left.
+func TestReloadLoadsWhatTheFragmentsSay(t *testing.T) {
+	d := newDisk()
+	old := []Route{{Host: "demo.example.com", Dial: "demo-old:3000", TLS: true}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", old); err != nil {
+		t.Fatal(err)
+	}
+	d.fail["mv "+Dir+"/caddy.next.json"] = errors.New("connection lost")
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err == nil {
+		t.Fatal("want the cut run's error")
+	}
+	delete(d.fail, "mv "+Dir+"/caddy.next.json")
+	if err := Reload(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := Config([]Fragment{{App: "demo", Routes: web}})
+	if d.files[Dir+"/caddy.json"] != string(want) {
+		t.Errorf("want the reload to load demo's new routes: %s", d.files[Dir+"/caddy.json"])
 	}
 }
 
