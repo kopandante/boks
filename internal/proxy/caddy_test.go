@@ -210,6 +210,9 @@ func TestConfigOwnsPort80BesideTLS(t *testing.T) {
 	if want := `[{"handle":[{"handler":"static_response","headers":{"Location":["https://{http.request.host}{http.request.uri}"]},"status_code":308}],"match":[{"host":["a.example.com"]}],"terminal":true},{"handle":[{"handler":"static_response","status_code":404}],"terminal":true}]`; string(routes) != want {
 		t.Errorf("want 80 to redirect the TLS host and 404 the rest:\n got %s\nwant %s", routes, want)
 	}
+	if l, _ := json.Marshal(dig(m, "apps", "http", "servers", "http", "listen")); string(l) != `[":80"]` {
+		t.Errorf("want boks's own server on 80: %s", l)
+	}
 	if dig(m, "apps", "http", "servers", "http", "logs") == nil {
 		t.Errorf("want 80 logging its requests like 443")
 	}
