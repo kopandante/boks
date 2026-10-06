@@ -22,7 +22,10 @@ type disk struct {
 	ps    string // what `docker ps` prints for the proxy: "<state>\t<label>"
 	fail  map[string]error
 	// lost acts as asked and then answers with the error, once: an answer lost after the command ran.
-	lost  map[string]error
+	lost map[string]error
+	// caddy is the config Caddy runs: what the last reload it took loaded. caddy.json is only boks's
+	// record of it, and a run cut after a reload leaves the two apart.
+	caddy string
 	calls []string
 }
 
@@ -78,6 +81,8 @@ func (d *disk) run(_ context.Context, args ...string) (string, error) {
 			return strings.TrimSpace("present\n" + body), nil
 		}
 		return "absent", nil
+	case strings.HasPrefix(cmd, reloadNext):
+		d.caddy = d.files[Dir+"/caddy.next.json"]
 	case args[0] == "mv":
 		d.files[args[2]] = d.files[args[1]]
 		delete(d.files, args[1])

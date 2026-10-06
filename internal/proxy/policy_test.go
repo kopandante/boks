@@ -82,92 +82,66 @@ func TestDomainsPatternCoversEveryDepth(t *testing.T) {
 	}
 }
 
-// The policy is recorded before the reload, the history only after Caddy took it.
-func TestSetPolicyRecordsThenReloads(t *testing.T) {
+// served is a server with demo's routes and pol applied and running; the config each policy makes
+// is what the tests compare Caddy's against.
+func served(t *testing.T, pol Policy) *disk {
+	t.Helper()
 	d := newDisk()
 	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
 		t.Fatal(err)
 	}
-	d.calls = nil
-	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err != nil {
+	if err := SetPolicy(context.Background(), d, io.Discard, pol); err != nil {
 		t.Fatal(err)
 	}
-	pol, reload, hist := index(d.calls, "upload "+ServerDir+"/policy.json"), index(d.calls, reloadNext), index(d.calls, "upload "+ServerDir+"/history/1.json")
-	if pol < 0 || reload < pol || hist < reload {
-		t.Errorf("want policy, reload, history in that order: %v", d.calls)
-	}
-	want, _ := Config(habsida, []Fragment{{App: "demo", Routes: web}})
-	if d.files[Dir+"/caddy.json"] != string(want) {
-		t.Errorf("want the filtered config applied")
+	return d
+}
+
+func configOf(p Policy) string {
+	b, _ := Config(p, []Fragment{{App: "demo", Routes: web}})
+	return string(b)
+}
+
+// revision2 drops the crawlers block of habsida: a policy Caddy runs differently.
+func revision2() Policy {
+	p := habsida
+	p.Revision, p.Floor, p.Block = 2, 2, habsida.Block[:1]
+	return p
+}
+
+// Caddy runs the policy — assembled from the policy recorded before the reload — the history keeps it
+// without the floor, and a later deploy assembles from the record and keeps the filter.
+func TestSetPolicyRecordsThenReloads(t *testing.T) {
+	d := served(t, habsida)
+	if d.caddy != configOf(habsida) || d.files[Dir+"/caddy.json"] != d.caddy {
+		t.Errorf("want Caddy on the filtered config, recorded as applied")
 	}
 	if h := d.files[ServerDir+"/history/1.json"]; !strings.Contains(h, `"floor": 0`) {
 		t.Errorf("want the history without the server's floor: %s", h)
 	}
-	// Any later reload keeps the filter: a deploy assembles from the recorded policy.
 	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", []Route{{Host: "o.example.com", Dial: "o:1"}}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(d.files[Dir+"/caddy.json"], `"status_code": 403`) {
+	if !strings.Contains(d.caddy, `"status_code": 403`) {
 		t.Errorf("a deploy dropped the filter")
 	}
 }
 
-// A reload whose answer is lost after Caddy took the new config puts the previous policy back and
-// reloads it by force, and the previous config is what is recorded as applied. No history claims the
-// revision.
-func TestSetPolicyPutsThePreviousBackWhenTheReloadFails(t *testing.T) {
-	d := newDisk()
-	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err != nil {
-		t.Fatal(err)
-	}
-	before, applied := d.files[ServerDir+"/policy.json"], d.files[Dir+"/caddy.json"]
-	next := habsida
-	next.Revision, next.Floor = 2, 2
-	next.Block = next.Block[:1]
-	d.lost[reloadNext] = errors.New("connection reset")
-	d.calls = nil
-	if err := SetPolicy(context.Background(), d, io.Discard, next); err == nil || !strings.Contains(err.Error(), "previous one is back") {
-		t.Fatalf("want the failure reported, got %v", err)
-	}
-	if d.files[ServerDir+"/policy.json"] != before {
-		t.Errorf("want the previous policy back:\n%s", d.files[ServerDir+"/policy.json"])
-	}
-	if !d.ran(reloadNext+" --force") || d.files[Dir+"/caddy.json"] != applied {
-		t.Errorf("want the previous config reloaded by force and recorded: %v", d.calls)
-	}
-	if _, ok := d.files[ServerDir+"/history/2.json"]; ok {
-		t.Errorf("want no history for a revision that was not applied")
-	}
-}
-
-// A write of the policy whose answer is lost after the file was replaced is put back too: left there,
-// the next deploy of any app would load the policy this run reported failed.
-func TestSetPolicyPutsThePreviousBackWhenTheWriteIsLost(t *testing.T) {
-	d := newDisk()
-	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err != nil {
-		t.Fatal(err)
-	}
-	before, applied := d.files[ServerDir+"/policy.json"], d.files[Dir+"/caddy.json"]
-	next := habsida
-	next.Revision, next.Floor, next.Block = 2, 2, nil
-	d.lost["upload "+ServerDir+"/policy.json"] = errors.New("connection reset")
-	if err := SetPolicy(context.Background(), d, io.Discard, next); err == nil || !strings.Contains(err.Error(), "previous one is back") {
-		t.Fatalf("want the failure reported, got %v", err)
-	}
-	if d.files[ServerDir+"/policy.json"] != before || d.files[Dir+"/caddy.json"] != applied {
-		t.Errorf("want the previous policy back and applied:\n%s", d.files[ServerDir+"/policy.json"])
-	}
-	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", []Route{{Host: "o.example.com", Dial: "o:1"}}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(d.files[Dir+"/caddy.json"], `"status_code": 403`) {
-		t.Errorf("a later deploy dropped the filter the failed run did not apply")
+// A run that fails once its policy may be in place — the answer to its write or to its reload lost —
+// puts the previous policy back, Caddy on it and recorded, and no history claims the revision.
+func TestSetPolicyPutsThePreviousBack(t *testing.T) {
+	for _, lost := range []string{"upload " + ServerDir + "/policy.json", reloadNext} {
+		d := served(t, habsida)
+		before := d.files[ServerDir+"/policy.json"]
+		d.lost[lost] = errors.New("connection reset")
+		if err := SetPolicy(context.Background(), d, io.Discard, revision2()); err == nil || !strings.Contains(err.Error(), "previous one is back") {
+			t.Fatalf("%s: want the failure reported, got %v", lost, err)
+		}
+		if d.files[ServerDir+"/policy.json"] != before || d.caddy != configOf(habsida) || d.files[Dir+"/caddy.json"] != d.caddy {
+			t.Errorf("%s: want the previous policy back, run and recorded", lost)
+		}
+		if _, ok := d.files[ServerDir+"/history/2.json"]; ok {
+			t.Errorf("%s: want no history for a revision that was not applied", lost)
+		}
 	}
 }
 
@@ -256,96 +230,70 @@ func TestLagsCountsThePolicy(t *testing.T) {
 }
 
 // A revision whose history write failed after Caddy took it is kept before it is replaced: otherwise it
-// could never be rolled back to.
+// could never be rolled back to. Kept before anything changes: if that write fails too, the policy and
+// Caddy stay as they were.
 func TestSetPolicyKeepsTheReplacedRevisionInTheHistory(t *testing.T) {
 	d := newDisk()
 	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
 		t.Fatal(err)
 	}
-	// The write fails after Caddy took revision 1: no history of it.
 	d.lost["upload "+ServerDir+"/history/1.json"] = errors.New("connection reset")
 	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err == nil {
 		t.Fatal("want the failed history write reported")
 	}
-	delete(d.files, ServerDir+"/history/1.json")
-	next := habsida
-	next.Revision, next.Floor, next.Block = 2, 2, nil
-	if err := SetPolicy(context.Background(), d, io.Discard, next); err != nil {
-		t.Fatal(err)
-	}
-	h, ok := d.files[ServerDir+"/history/1.json"]
-	if !ok || !strings.Contains(h, `"floor": 0`) || !strings.Contains(h, "telegrambot") {
-		t.Errorf("want revision 1 kept in the history before it was replaced: %q", h)
-	}
-	// Kept before anything changes: a history write that fails leaves the policy and the proxy as they were.
-	d2 := newDisk()
-	if _, err := SetRoutes(context.Background(), d2, io.Discard, "demo", web); err != nil {
-		t.Fatal(err)
-	}
-	d2.files[ServerDir+"/policy.json"] = string(marshal(habsida))
-	if _, err := converge(context.Background(), d2, io.Discard, nil, false, "test"); err != nil {
-		t.Fatal(err)
-	}
-	before, applied := d2.files[ServerDir+"/policy.json"], d2.files[Dir+"/caddy.json"]
-	d2.lost["upload "+ServerDir+"/history/1.json"] = errors.New("connection reset")
-	d2.calls = nil
-	if err := SetPolicy(context.Background(), d2, io.Discard, next); err == nil {
+	delete(d.files, ServerDir+"/history/1.json") // the write did not happen
+	before := d.files[ServerDir+"/policy.json"]
+	failHistory := "upload sh -c umask 077 && mkdir -p '" + ServerDir + "/history' && cat > '" + ServerDir + "/history/1.json"
+	d.fail[failHistory] = errors.New("connection reset")
+	if err := SetPolicy(context.Background(), d, io.Discard, revision2()); err == nil {
 		t.Fatal("want the failed history write reported")
 	}
-	if d2.files[ServerDir+"/policy.json"] != before || d2.files[Dir+"/caddy.json"] != applied || d2.ran(reloadNext) {
-		t.Errorf("want nothing changed when the replaced revision could not be kept: %v", d2.calls)
+	if d.files[ServerDir+"/policy.json"] != before || d.caddy != configOf(habsida) {
+		t.Errorf("want nothing changed while the replaced revision is not kept")
+	}
+	delete(d.fail, failHistory)
+	if err := SetPolicy(context.Background(), d, io.Discard, revision2()); err != nil {
+		t.Fatal(err)
+	}
+	if h := d.files[ServerDir+"/history/1.json"]; !strings.Contains(h, `"floor": 0`) || !strings.Contains(h, "crawlers") {
+		t.Errorf("want revision 1 kept in the history: %q", h)
 	}
 }
 
-// A rollback after a run cut once Caddy took its policy, before caddy.json was recorded: the policy put
-// back matches the stale caddy.json, and only a forced reload takes Caddy off the cut run's policy.
-func TestSetPolicyReloadsANewPolicyByForce(t *testing.T) {
-	d := newDisk()
-	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
-		t.Fatal(err)
+// A run cut once Caddy took its policy, before caddy.json recorded it, leaves the record behind Caddy;
+// a rollback to the policy before matches that record and must still take Caddy back. A repeat of
+// the policy Caddy runs reloads nothing.
+func TestSetPolicyTakesCaddyBackAfterACutRun(t *testing.T) {
+	d := served(t, habsida)
+	cut := revision2()
+	d.files[ServerDir+"/policy.json"] = string(marshal(cut))
+	d.files[Dir+"/caddy.next.json"] = configOf(cut)
+	if _, err := d.Run(context.Background(), strings.Fields(reloadNext)...); err != nil || d.caddy != configOf(cut) {
+		t.Fatalf("setting up the cut run: %v", err)
 	}
-	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err != nil {
-		t.Fatal(err)
-	}
-	next := habsida
-	next.Revision, next.Floor, next.Block = 2, 2, nil
-	d.fail["mv "+Dir+"/caddy.next.json"] = errors.New("killed")
-	d.fail["docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json --force"] = errors.New("killed")
-	_ = SetPolicy(context.Background(), d, io.Discard, next) // cut: restore fails too, as a killed run would leave it
-	d.fail = map[string]error{}
-	d.files[ServerDir+"/policy.json"] = string(marshal(Policy{Revision: 2, Floor: 2, Allow: next.Allow}))
 	back := habsida
 	back.Floor = 2
-	d.calls = nil
 	if err := SetPolicy(context.Background(), d, io.Discard, back); err != nil {
 		t.Fatal(err)
 	}
-	if !d.ran(reloadNext + " --force") {
-		t.Errorf("want the policy put back reloaded by force: %v", d.calls)
+	if d.caddy != configOf(habsida) {
+		t.Errorf("want Caddy back on revision 1, not on the cut run's policy")
 	}
 	d.calls = nil
 	if err := SetPolicy(context.Background(), d, io.Discard, back); err != nil || d.ran(reloadNext) {
-		t.Errorf("want a repeat of the policy the proxy runs to reload nothing: %v %v", err, d.calls)
+		t.Errorf("want a repeat of the policy Caddy runs to reload nothing: %v %v", err, d.calls)
 	}
 }
 
 // A policy that cannot be read stops a deploy before any reload: read as none, the reload would drop
 // the filter.
 func TestAnUnreadablePolicyStopsTheReload(t *testing.T) {
-	d := newDisk()
-	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
-		t.Fatal(err)
-	}
-	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err != nil {
-		t.Fatal(err)
-	}
-	applied := d.files[Dir+"/caddy.json"]
+	d := served(t, habsida)
 	d.fail["sh -c if [ -f '"+ServerDir+"/policy.json'"] = errors.New("connection reset")
-	d.calls = nil
 	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", []Route{{Host: "o.example.com", Dial: "o:1"}}); err == nil {
 		t.Fatal("want the failed read reported")
 	}
-	if d.ran(reloadNext) || d.files[Dir+"/caddy.json"] != applied {
-		t.Errorf("want no reload without the policy: %v", d.calls)
+	if d.caddy != configOf(habsida) {
+		t.Errorf("want Caddy left on the filtered config")
 	}
 }
