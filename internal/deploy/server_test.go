@@ -48,6 +48,33 @@ func TestCheckRevision(t *testing.T) {
 			t.Errorf("revision %d: want %q, got %v", c.next.Revision, c.want, err)
 		}
 	}
+	// The same revision with any one field changed is another policy, not a repeat.
+	full := proxy.Policy{Revision: 3, Floor: 5,
+		Allow: []proxy.BotAllow{{Host: "img.example.com", Paths: []string{"/pics"}, UserAgent: "(?i)telegrambot"}},
+		Block: []proxy.BotBlock{{Name: "infra", Domains: []string{"example.com"}, UserAgent: "(?i)bot"}}}
+	if err := CheckRevision(full, proxy.Policy{Revision: 3, Allow: full.Allow, Block: full.Block}); err != nil {
+		t.Errorf("the same policy with allows, again: %v", err)
+	}
+	for name, edit := range map[string]func(p *proxy.Policy){
+		"user_agent": func(p *proxy.Policy) {
+			p.Block = []proxy.BotBlock{{Name: "infra", Domains: []string{"example.com"}, UserAgent: "(?i)crawler"}}
+		},
+		"domains": func(p *proxy.Policy) {
+			p.Block = []proxy.BotBlock{{Name: "infra", Domains: []string{"example.org"}, UserAgent: "(?i)bot"}}
+		},
+		"allow path": func(p *proxy.Policy) {
+			p.Allow = []proxy.BotAllow{{Host: "img.example.com", Paths: []string{"/img"}, UserAgent: "(?i)telegrambot"}}
+		},
+		"allow host": func(p *proxy.Policy) {
+			p.Allow = []proxy.BotAllow{{Host: "x.example.com", Paths: []string{"/pics"}, UserAgent: "(?i)telegrambot"}}
+		},
+	} {
+		next := proxy.Policy{Revision: 3, Allow: full.Allow, Block: full.Block}
+		edit(&next)
+		if err := CheckRevision(full, next); err == nil || !strings.Contains(err.Error(), "older file") {
+			t.Errorf("%s changed at the same revision: want a refusal, got %v", name, err)
+		}
+	}
 	// A server that never applied a policy takes whatever revision the fleet is at.
 	if err := CheckRevision(proxy.Policy{}, proxy.Policy{Revision: 9}); err != nil {
 		t.Errorf("a new server: %v", err)

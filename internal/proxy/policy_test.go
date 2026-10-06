@@ -254,3 +254,48 @@ func TestLagsCountsThePolicy(t *testing.T) {
 		t.Errorf("want no lag once the filter is applied: %v %v", lag, err)
 	}
 }
+
+// A revision whose history write failed after Caddy took it is kept before it is replaced: otherwise it
+// could never be rolled back to.
+func TestSetPolicyKeepsTheReplacedRevisionInTheHistory(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	// The write fails after Caddy took revision 1: no history of it.
+	d.lost["upload "+ServerDir+"/history/1.json"] = errors.New("connection reset")
+	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err == nil {
+		t.Fatal("want the failed history write reported")
+	}
+	delete(d.files, ServerDir+"/history/1.json")
+	next := habsida
+	next.Revision, next.Floor, next.Block = 2, 2, nil
+	if err := SetPolicy(context.Background(), d, io.Discard, next); err != nil {
+		t.Fatal(err)
+	}
+	h, ok := d.files[ServerDir+"/history/1.json"]
+	if !ok || !strings.Contains(h, `"floor": 0`) || !strings.Contains(h, "telegrambot") {
+		t.Errorf("want revision 1 kept in the history before it was replaced: %q", h)
+	}
+}
+
+// A policy that cannot be read stops a deploy before any reload: read as none, the reload would drop
+// the filter.
+func TestAnUnreadablePolicyStopsTheReload(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err != nil {
+		t.Fatal(err)
+	}
+	applied := d.files[Dir+"/caddy.json"]
+	d.fail["sh -c if [ -f '"+ServerDir+"/policy.json'"] = errors.New("connection reset")
+	d.calls = nil
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "other", []Route{{Host: "o.example.com", Dial: "o:1"}}); err == nil {
+		t.Fatal("want the failed read reported")
+	}
+	if d.ran(reloadNext) || d.files[Dir+"/caddy.json"] != applied {
+		t.Errorf("want no reload without the policy: %v", d.calls)
+	}
+}

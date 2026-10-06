@@ -151,6 +151,22 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if err != nil {
 		return err
 	}
+	// The policy being replaced goes into the history first if it is not there: a run whose history
+	// write failed after Caddy took its policy left none, and once replaced, that revision could not
+	// be rolled back to, nor applied again past the floor.
+	if prevPresent {
+		var prev Policy
+		if err := json.Unmarshal([]byte(prevBody), &prev); err != nil {
+			return fmt.Errorf("reading %s: %w", policyPath(), err)
+		}
+		if _, kept, err := readFile(ctx, r, historyPath(prev.Revision)); err != nil {
+			return err
+		} else if !kept {
+			if err := recordHistory(ctx, r, prev); err != nil {
+				return err
+			}
+		}
+	}
 	fs, err := Fragments(ctx, r)
 	if err != nil {
 		return err
@@ -179,9 +195,13 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
 		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))
 	}
-	h := p
-	h.Floor = 0
-	if err := remote.UploadAtomic(ctx, r, marshal(h), historyPath(p.Revision)); err != nil {
+	return recordHistory(ctx, r, p)
+}
+
+// recordHistory keeps the policy of p's revision, without the server's floor: it is what a rollback puts back.
+func recordHistory(ctx context.Context, r remote.Runner, p Policy) error {
+	p.Floor = 0
+	if err := remote.UploadAtomic(ctx, r, marshal(p), historyPath(p.Revision)); err != nil {
 		return fmt.Errorf("recording revision %d in the history: %w", p.Revision, err)
 	}
 	return nil
