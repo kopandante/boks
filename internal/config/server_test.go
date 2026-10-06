@@ -34,6 +34,15 @@ func TestParseServer(t *testing.T) {
 	}
 }
 
+// A server.yml that only lists servers is what `boks server install` reads: it applies no policy, so
+// it needs no revision.
+func TestParseServerWithServersOnly(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [lab]\n"))
+	if err != nil || s.Revision != 0 || len(s.Servers) != 1 {
+		t.Errorf("got %+v, %v", s, err)
+	}
+}
+
 func TestParseServerRejects(t *testing.T) {
 	block := func(rule string) string {
 		return "servers: [lab]\nrevision: 1\nbots:\n  block:\n    - " + rule + "\n"
@@ -43,7 +52,8 @@ func TestParseServerRejects(t *testing.T) {
 	}
 	cases := map[string]string{
 		"servers":                     "revision: 1\n",
-		"revision":                    "servers: [lab]\n",
+		"revision":                    "servers: [lab]\nbots:\n  block:\n    - {name: a, user_agent: gptbot}\n",
+		"from 1":                      "servers: [lab]\nrevision: -1\n",
 		"field bot not found":         "servers: [lab]\nrevision: 1\nbot: {}\n",
 		"more than one YAML document": "servers: [lab]\nrevision: 1\n---\nservers: [x]\n",
 		// An empty document hides nothing after it.

@@ -123,6 +123,17 @@ func TestMuxCanBeTurnedOff(t *testing.T) {
 	}
 }
 
+// A connection alone shares neither this run's socket nor one the user's ~/.ssh/config names.
+func TestAloneOpensItsOwnConnection(t *testing.T) {
+	log := fakeSSH(t, "")
+	if _, err := (SSH{Host: "a", Alone: true}).Run(context.Background(), "true"); err != nil {
+		t.Fatal(err)
+	}
+	if c := calls(t, log); len(c) != 1 || !strings.Contains(c[0], "-o ControlMaster=no -o ControlPath=none a ") {
+		t.Errorf("got %v", c)
+	}
+}
+
 // A call cut off by its context returns at it even when something outlives the killed ssh and holds
 // its output open — what a ControlMaster does while the remote command of that session still runs.
 // Deadlines in deploy and proxy (health probe, drain, proxy answer) rely on this.

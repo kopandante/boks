@@ -89,7 +89,9 @@ func (s *Server) validate() error {
 	if len(s.Servers) == 0 {
 		return errors.New("servers: at least one is required")
 	}
-	if s.Revision < 1 {
+	// A file of servers alone — what `boks server install` reads — has no policy to number. One with a
+	// policy needs its revision, and `boks server apply` asks for one either way.
+	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0) {
 		return errors.New("revision: required, a whole number from 1 that grows by one with every edit")
 	}
 	names := map[string]bool{}

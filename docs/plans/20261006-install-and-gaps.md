@@ -97,7 +97,11 @@ R4 (`20261002-small-box-reality.md`) и G3 (`20261006-shchr-gaps.md`).
       новой; `deploy v1.10.2` при `refuse` — возврат маршрутов тоже «потерян» и подтверждён, ошибка
       «Caddy still runs the config it had», новая копия удалена, `Host: web.lab2.test` отвечает 200
       со старой копии
-- [ ] **A** — `boks server install`
+- [x] **A. `boks server install`** (PR feat/server-install): предпроверка всех серверов одним скриптом
+      фактов, отказ до изменений; под замком допуска — `daemon.json`, пакеты, группа docker, `proxy
+      boot`. Доступ к docker проверяется соединением мимо общего и мимо ControlMaster из
+      `~/.ssh/config` (`remote.SSH.Alone`). Чистая Ubuntu 24.04 (OrbStack), root и sudo-пользователь:
+      `boks server install <file>` дважды подряд — установка ~30 с, второй запуск «nothing to change»
 
 ## Конструкция A (`boks server install`)
 
