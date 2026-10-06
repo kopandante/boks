@@ -374,3 +374,29 @@ func TestMigrateStartsKamalAgainAfterAFailedStop(t *testing.T) {
 		t.Errorf("want kamal-proxy started where it is: %v %v", err, f.calls)
 	}
 }
+
+// BootProxy runs what follows the boot — a certificate's install and reload — under the same admission
+// lock, after the boot, and not at all when the boot fails; its error is the command's.
+func TestBootProxyRunsTheCertificateStepUnderTheLock(t *testing.T) {
+	f := newFake()
+	f.out[proxyState] = caddyUp
+	ran := -1
+	err := BootProxy(context.Background(), f, io.Discard, "img", func() error {
+		ran = len(f.calls)
+		return errors.New("reload refused")
+	})
+	if err == nil || err.Error() != "reload refused" {
+		t.Errorf("want the step's error, got %v", err)
+	}
+	// BootProxy stamps its lock with the clock, not the fixed time of the other tests.
+	taken, given := f.at("ln -sn _proxy."), f.lastAt(`sh -c [ "$(readlink /tmp/boks.admit.lock)" = '_proxy.`)
+	if ran < 0 || taken < 0 || ran <= taken || given < ran {
+		t.Errorf("want lock < boot < step < release: %d %d %d %v", taken, ran, given, f.calls)
+	}
+	g := newFake()
+	g.out[proxyState] = "running\t" // kamal-proxy: the boot refuses
+	called := false
+	if err := BootProxy(context.Background(), g, io.Discard, "img", func() error { called = true; return nil }); err == nil || called {
+		t.Errorf("want the boot's refusal and no step: %v %v", err, called)
+	}
+}
