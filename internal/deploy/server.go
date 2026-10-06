@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kopandante/boks/internal/proxy"
@@ -57,7 +58,10 @@ func CheckApply(ctx context.Context, r remote.Runner, next proxy.Policy) error {
 	if err != nil {
 		return err
 	}
-	return CheckRevision(cur, next)
+	if err := CheckRevision(cur, next); err != nil {
+		return err
+	}
+	return proxy.CheckEgress(ctx, r, next)
 }
 
 // RollbackServer puts back the policy of an earlier revision from the server's history. The floor
@@ -80,8 +84,11 @@ func CheckServerRollback(ctx context.Context, r remote.Runner, rev int) error {
 	if _, err := policyProxy(ctx, r); err != nil {
 		return err
 	}
-	_, err := policyOfRevision(ctx, r, rev)
-	return err
+	p, err := policyOfRevision(ctx, r, rev)
+	if err != nil {
+		return err
+	}
+	return proxy.CheckEgress(ctx, r, p)
 }
 
 func policyOfRevision(ctx context.Context, r remote.Runner, rev int) (proxy.Policy, error) {
@@ -133,12 +140,21 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	if err != nil {
 		return err
 	}
+	// The container first — a port is published only when it is created — then the policy that
+	// listens on it. A failed swap leaves the old proxy serving the old policy.
+	if err := proxy.Reshape(ctx, r, log, next); err != nil {
+		finish(ctx, r, log, serverJournal, op, "failed", o.Now())
+		return err
+	}
 	if err := proxy.SetPolicy(ctx, r, log, next); err != nil {
 		finish(ctx, r, log, serverJournal, op, "failed", o.Now())
 		return err
 	}
 	finish(ctx, r, log, serverJournal, op, "ok", o.Now())
 	fmt.Fprintf(log, "server policy: revision %d (%d blocks, %d allows)\n", next.Revision, len(next.Block), len(next.Allow))
+	if e := next.Egress; e != nil {
+		fmt.Fprintf(log, "  egress proxy on port %d for %s\n", e.Port, strings.Join(e.Allow, ", "))
+	}
 	if !running {
 		fmt.Fprintf(log, "  %s is not running on this server: nothing is filtered until it starts and loads this policy\n", proxy.Container)
 	}
@@ -155,12 +171,22 @@ func beginServer(ctx context.Context, r remote.Runner, log io.Writer, o Options,
 	return release.Begin(ctx, r, serverJournal, action, from, to, o.Now())
 }
 
-// ServerStatus is what a server applies, and the run that changed it and never finished, if any.
-func ServerStatus(ctx context.Context, r remote.Runner) (proxy.Policy, *release.Entry, error) {
+// ServerStatus is what a server applies, the run that changed it and never finished, if any, and what
+// of the running proxy the policy does not see (proxy.Drift).
+func ServerStatus(ctx context.Context, r remote.Runner) (proxy.Policy, *release.Entry, []string, error) {
 	p, err := proxy.ReadPolicy(ctx, r)
 	if err != nil {
-		return p, nil, err
+		return p, nil, nil, err
 	}
 	open, err := release.Unfinished(ctx, r, serverJournal)
-	return p, open, err
+	if err != nil {
+		return p, nil, nil, err
+	}
+	// The policy is the answer; a proxy that cannot be compared with it — docker down, a hosts file gone
+	// — is a line of the report, not the end of it.
+	drift, err := proxy.Drift(ctx, r, p)
+	if err != nil {
+		drift = append(drift, fmt.Sprintf("could not compare the running proxy with the policy: %v", err))
+	}
+	return p, open, drift, nil
 }

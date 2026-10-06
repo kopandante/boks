@@ -44,12 +44,12 @@ const usage = `usage: boks [-f boks.yml] <command>
                    in group docker — and start the proxy; refuses, before any change, a server
                    it cannot share (another proxy on 80/443, Swarm, an unknown firewall)
   server apply <server.yml>
-                   apply the server's policy (the bot filter) to the servers it lists; the
-                   file's revision must be the one after the highest each server applied
+                   apply the server's policy (the bot filter, the egress proxy) to the servers it
+                   lists; the file's revision must be the one after the highest each server applied
   server rollback <server.yml> <revision>
                    put back the policy of an earlier revision on those servers
   server status <server.yml>
-                   the revision each server applies, and a run that never finished
+                   the revision each server applies, its egress proxy, and a run that never finished
   cert pull        copy the certificate and its lego metadata back from the first server, so a
                    renewal elsewhere can tell whether anything is due without holding the key
 
@@ -437,6 +437,15 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("%s: revision: required for apply, a whole number from 1", args[1])
 		}
 		next := policyOf(sc)
+		// The egress login's password comes from the environment, before any server is asked: a missing
+		// one would stop the run halfway down the list.
+		if sc.Egress != nil {
+			pw, err := sc.Egress.Password()
+			if err != nil {
+				return fmt.Errorf("%s: %w", args[1], err)
+			}
+			next.Egress.Password = pw
+		}
 		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next) }); err != nil {
 			return err
 		}
@@ -452,7 +461,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		return on(func(ctx context.Context, r remote.Runner) error { return deploy.RollbackServer(ctx, r, out, rev, o) })
 	case args[0] == "status" && len(args) == 2:
 		return on(func(ctx context.Context, r remote.Runner) error {
-			p, open, err := deploy.ServerStatus(ctx, r)
+			p, open, drift, err := deploy.ServerStatus(ctx, r)
 			if err != nil {
 				return err
 			}
@@ -460,6 +469,16 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 				fmt.Fprintln(out, "  no policy applied")
 			} else {
 				fmt.Fprintf(out, "  revision %d (highest applied %d): %d blocks, %d allows\n", p.Revision, p.Floor, len(p.Block), len(p.Allow))
+			}
+			if e := p.Egress; e != nil {
+				login := "no login"
+				if e.User != "" {
+					login = "login " + e.User
+				}
+				fmt.Fprintf(out, "  egress proxy on port %d for %s, %s\n", e.Port, strings.Join(e.Allow, ", "), login)
+			}
+			for _, d := range drift {
+				fmt.Fprintf(out, "  ! %s\n", d)
 			}
 			if open != nil {
 				fmt.Fprintf(out, "  ! %s started %s and never finished; run it again\n", open.Action, open.StartedAt.Format(time.RFC3339))
@@ -496,6 +515,13 @@ func policyOf(sc *config.Server) proxy.Policy {
 	}
 	for _, a := range sc.Bots.Allow {
 		p.Allow = append(p.Allow, proxy.BotAllow{Host: a.Host, Paths: a.Paths, UserAgent: a.UserAgent})
+	}
+	if e := sc.Egress; e != nil {
+		var allow []string
+		for _, pr := range e.Prefixes() {
+			allow = append(allow, pr.String())
+		}
+		p.Egress = &proxy.Egress{Port: e.Port, Allow: allow, User: e.User, Ports: e.Ports, HostsFile: e.HostsFile}
 	}
 	return p
 }

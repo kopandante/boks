@@ -718,7 +718,7 @@ func TestReloadLoadsWhatTheFragmentsSay(t *testing.T) {
 // the certificate volume kamal-proxy used, reads the state directory, not one file, read-only, and
 // keeps its request log rotated.
 func TestCreateArgs(t *testing.T) {
-	got := strings.Join(CreateArgs("caddy:2.11.7-alpine", "/home/u/.boks/_proxy"), " ")
+	got := strings.Join(CreateArgs("caddy:2.11.7-alpine", "/home/u/.boks/_proxy", Shape{}), " ")
 	want := "docker create --name boks-proxy --restart unless-stopped --label boks.proxy=caddy " +
 		"--log-driver json-file --log-opt max-size=10m --log-opt max-file=5 " +
 		"--sysctl net.ipv4.tcp_migrate_req=1 --network boks -p 80:80 -p 443:443 " +

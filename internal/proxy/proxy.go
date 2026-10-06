@@ -103,6 +103,23 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 	if _, err := converge(ctx, r, log, fs, false, "the routes on the server"); err != nil {
 		return err
 	}
+	if state != "" {
+		// A stopped proxy in another shape than the policy needs is made again: it serves nothing now,
+		// and started as it is it would drop the egress port.
+		want, err := appliedShape(ctx, r)
+		if err != nil {
+			return err
+		}
+		if have, err := currentShape(ctx, r); err != nil {
+			return err
+		} else if have != want {
+			fmt.Fprintf(log, "proxy: container is %s and lacks what the server's policy needs; creating it again\n", state)
+			if _, err := r.Run(ctx, "docker", "rm", Container); err != nil {
+				return err
+			}
+			state = ""
+		}
+	}
 	if state == "" {
 		fmt.Fprintf(log, "proxy: starting %s (%s)\n", Container, image)
 		if err := create(ctx, r, image); err != nil {
@@ -145,7 +162,11 @@ func create(ctx context.Context, r remote.Runner, image string) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.Run(ctx, CreateArgs(image, abs)...)
+	s, err := appliedShape(ctx, r)
+	if err != nil {
+		return err
+	}
+	_, err = r.Run(ctx, CreateArgs(image, abs, s)...)
 	return err
 }
 
