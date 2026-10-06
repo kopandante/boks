@@ -68,11 +68,29 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 	if state != "" && kind != Kind {
 		return NotCaddy()
 	}
+	fs, err := Fragments(ctx, r)
+	if err != nil {
+		return err
+	}
 	if state == "running" {
 		if err := checkMigrateReq(ctx, r); err != nil {
 			return err
 		}
-		return reattach(ctx, r, log)
+		if err := reattach(ctx, r, log, fs); err != nil {
+			return err
+		}
+		// A run cut after writing its fragment left the applied config behind the fragments: the proxy
+		// catches up here, so `boks proxy boot` repairs it and a later restart loads the right config.
+		if lagging, err := Lags(ctx, r, fs); err != nil || !lagging {
+			return err
+		}
+		_, err := converge(ctx, r, log, fs, false, "the routes on the server")
+		return err
+	}
+	// Caddy loads the applied config when it starts: the one the fragments make — on a server that
+	// never had a proxy, one with no routes — and not one a cut run left behind.
+	if _, err := converge(ctx, r, log, fs, false, "the routes on the server"); err != nil {
+		return err
 	}
 	if state == "" {
 		fmt.Fprintf(log, "proxy: starting %s (%s)\n", Container, image)
@@ -83,7 +101,7 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 		fmt.Fprintf(log, "proxy: container is %s, starting it\n", state)
 	}
 	// On its networks before it starts, so its first requests reach the copies its routes dial.
-	if err := reattach(ctx, r, log); err != nil {
+	if err := reattach(ctx, r, log, fs); err != nil {
 		return err
 	}
 	if _, err := r.Run(ctx, "docker", "start", Container); err != nil {
@@ -110,25 +128,8 @@ func checkMigrateReq(ctx context.Context, r remote.Runner) error {
 	return nil
 }
 
-// create makes the proxy container without starting it. Caddy loads the applied config when it
-// starts, so one is written first if the server has none: assembled from the fragments, which on a
-// server that never had a proxy is a config with no routes.
+// create makes the proxy container without starting it; the applied config it loads is in place.
 func create(ctx context.Context, r remote.Runner, image string) error {
-	if _, present, err := readFile(ctx, r, appliedPath()); err != nil {
-		return err
-	} else if !present {
-		fs, err := Fragments(ctx, r)
-		if err != nil {
-			return err
-		}
-		body, err := Config(fs)
-		if err != nil {
-			return err
-		}
-		if err := remote.UploadAtomic(ctx, r, body, appliedPath()); err != nil {
-			return err
-		}
-	}
 	// Docker takes a bind source only as an absolute path, and Dir lives under the SSH user's home.
 	abs, err := r.Run(ctx, "sh", "-c", "cd "+remote.Quote(Dir)+" && pwd -P")
 	if err != nil {
@@ -147,11 +148,7 @@ func create(ctx context.Context, r remote.Runner, image string) error {
 // short between creating the proxy and joining is finished by the next. A route whose container is
 // gone has no network to join and costs a warning; any other failure is the boot's, because a route to
 // a container that runs and cannot be reached is an outage the boot would otherwise report as a success.
-func reattach(ctx context.Context, r remote.Runner, log io.Writer) error {
-	fs, err := Fragments(ctx, r)
-	if err != nil {
-		return err
-	}
+func reattach(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment) error {
 	on, err := networks(ctx, r)
 	if err != nil {
 		return err

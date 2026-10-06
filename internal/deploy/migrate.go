@@ -116,7 +116,20 @@ func MigrateProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 	if _, err := r.Run(ctx, "docker", "pull", image); err != nil {
 		return fmt.Errorf("%w; nothing was changed", err)
 	}
-	// The proxy is not Caddy yet, so this writes the files Caddy will load, and reloads nothing.
+	// The proxy is not Caddy yet, so this writes the files Caddy will load, and reloads nothing. The
+	// fragments are exactly what kamal-proxy serves: one an earlier, cut migration left for an app that
+	// has no routes now goes, or Caddy would start with routes to copies retired since.
+	left, err := proxy.Fragments(ctx, r)
+	if err != nil {
+		return fmt.Errorf("%w; nothing was changed", err)
+	}
+	for _, f := range left {
+		if proxy.Of(frags, f.App) == nil {
+			if _, err := proxy.SetRoutes(ctx, r, log, f.App, nil); err != nil {
+				return fmt.Errorf("%w; kamal-proxy still serves, untouched", err)
+			}
+		}
+	}
 	for _, f := range frags {
 		if _, err := proxy.SetRoutes(ctx, r, log, f.App, f.Routes); err != nil {
 			return fmt.Errorf("%w; kamal-proxy still serves, untouched", err)

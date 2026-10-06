@@ -162,6 +162,29 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err != nil {
 		return err
 	}
+	// An app that drops its routes on a server still on kamal-proxy: its routes there are kamal-proxy's,
+	// which this boks does not touch, and retiring the copies they dial would leave them answering 502
+	// — and leave hosts the migration could not place. Refused like a deploy with routes, before
+	// anything of the app changes.
+	if !routed && !allRouteless(old) {
+		state, kind, err := proxy.State(ctx, r)
+		if err != nil {
+			return err
+		}
+		if state != "" && kind != proxy.Kind {
+			return proxy.NotCaddy()
+		}
+	}
+	// Routes to drop: the app's fragment, or a removal a cut run wrote to the fragments but never got
+	// into the config the proxy runs.
+	dropRoutes := false
+	if !routed {
+		if dropRoutes = len(was) > 0; !dropRoutes {
+			if dropRoutes, err = proxy.Lags(ctx, r, fs); err != nil {
+				return err
+			}
+		}
+	}
 	// The copies on the server have a say in how they are replaced, and it is read from them, not
 	// from what the journal believes is serving: a release that started and failed to be recorded
 	// still writes its volume. Either side asking for stop-first is enough.
@@ -208,7 +231,7 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err != nil {
 		return err
 	}
-	if !routed && len(was) > 0 {
+	if dropRoutes {
 		err := underAdmission(ctx, r, log, cfg.App, o, nil, func() error {
 			_, err := proxy.SetRoutes(ctx, r, log, cfg.App, nil)
 			return err
@@ -839,6 +862,17 @@ func (c container) asksStopFirst() bool {
 	return c.routeless
 }
 
+// allRouteless reports whether every copy was started without routes; one started by an older boks,
+// without the label, may have had them.
+func allRouteless(cs []container) bool {
+	for _, c := range cs {
+		if !c.routeless {
+			return false
+		}
+	}
+	return true
+}
+
 func anyStopFirst(cs []container) bool {
 	for _, c := range cs {
 		if c.asksStopFirst() {
@@ -1114,6 +1148,9 @@ func awaitReady(ctx context.Context, r remote.Runner, log io.Writer, cfg *config
 			}
 			if path == "" {
 				path = defaultHealthPath
+			} else if !strings.HasPrefix(path, "/") {
+				// kamal-proxy joined the path onto the target's URL, so `up` meant /up.
+				path = "/" + path
 			}
 			if err := proxy.Probe(pctx, r, name, port, path); err != nil {
 				left, last = append(left, p), fmt.Errorf("port %s (%s:%d%s): %w", p.Name, name, port, path, err)
@@ -1198,22 +1235,29 @@ func drain(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 	// The bound covers the questions themselves: one that hangs is cut off at it.
 	bctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	// held is the proxy's last answer: a question the bound cuts off says nothing new, and the warning
+	// reports what the proxy did say.
+	held := -1
 	for {
 		n, err := proxy.Busy(bctx, r, previous)
 		if err == nil && n == 0 {
 			return
 		}
+		if err == nil {
+			held = n
+		}
 		if time.Now().After(deadline) {
-			if err != nil {
+			if held < 0 {
 				fmt.Fprintf(log, "warning: the proxy could not say what it still holds for the previous copies (%v); waited %s\n", err, cfg.DrainTimeout)
 			} else {
-				fmt.Fprintf(log, "warning: %d requests to the previous copies still in flight after %s; they go now\n", n, cfg.DrainTimeout)
+				fmt.Fprintf(log, "warning: %d requests to the previous copies still in flight after %s; they go now\n", held, cfg.DrainTimeout)
 			}
 			return
 		}
 		select {
 		case <-ctx.Done():
 			return
+		case <-bctx.Done():
 		case <-time.After(poll):
 		}
 	}

@@ -40,6 +40,9 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 			return "", err
 		}
 	}
+	if strings.HasPrefix(cmd, "docker ps -a --filter name=^boks-proxy$") {
+		return "running\tcaddy", nil // the proxy a renewal reloads is up: the command boots it first
+	}
 	if len(args) == 5 && args[3] == "cat" {
 		if content, ok := f.files[args[4]]; ok {
 			return content, nil

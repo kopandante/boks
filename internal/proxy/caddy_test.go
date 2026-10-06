@@ -197,7 +197,7 @@ func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 }
 
 // A reload must not cut the WebSockets of the apps it does not change: every route keeps its streams
-// open past the unload of the config they came through.
+// open past the unload of the config they came through. And every route bounds the wait for headers.
 func TestConfigKeepsStreamsAcrossAReload(t *testing.T) {
 	b, err := Config([]Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:80"}, {Host: "s.example.com", Dial: "a:81", TLS: true}}}})
 	if err != nil {
@@ -211,6 +211,10 @@ func TestConfigKeepsStreamsAcrossAReload(t *testing.T) {
 		h := dig(routes[0], "handle").([]any)[0]
 		if d := dig(h, "stream_close_delay"); d != streamCloseDelay {
 			t.Errorf("%s: want stream_close_delay %s, got %v", srv, streamCloseDelay, d)
+		}
+		// And a copy that takes a request and sends no headers gets a 504 at kamal-proxy's 30s, not never.
+		if d := dig(h, "transport", "response_header_timeout"); d != "30s" || dig(h, "transport", "protocol") != "http" {
+			t.Errorf("%s: want the http transport with response_header_timeout 30s, got %v", srv, dig(h, "transport"))
 		}
 	}
 }

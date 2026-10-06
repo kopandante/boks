@@ -111,9 +111,33 @@ func TestANewProxyGetsAConfigToLoad(t *testing.T) {
 	if at(f.calls, "sh -c umask 077") < 0 || at(f.calls, "sh -c umask 077") > at(f.calls, "docker create") {
 		t.Errorf("want the config written before the container is created: %v", f.calls)
 	}
-	g := &fake{state: ""}
+	empty, _ := Config(nil)
+	g := &fake{state: "", out: map[string]string{"sh -c if [ -f ": "present\n" + strings.TrimSuffix(string(empty), "\n")}}
 	if err := Boot(context.Background(), g, io.Discard, "img"); err != nil || at(g.calls, "sh -c umask 077") >= 0 {
-		t.Errorf("an applied config is kept as it is: %v %v", err, g.calls)
+		t.Errorf("an applied config that is what the fragments make is kept as it is: %v %v", err, g.calls)
+	}
+	// One a cut run left behind the fragments is replaced before Caddy loads it.
+	h := &fake{state: ""}
+	if err := Boot(context.Background(), h, io.Discard, "img"); err != nil || at(h.calls, "sh -c umask 077") < 0 ||
+		at(h.calls, "sh -c umask 077") > at(h.calls, "docker start") {
+		t.Errorf("want the lagging applied config replaced before the start: %v %v", err, h.calls)
+	}
+}
+
+// A running proxy whose applied config lags the fragments — a run cut after writing its fragment — is
+// reloaded with what the fragments make; one that does not lag is left alone.
+func TestBootCatchesARunningProxyUp(t *testing.T) {
+	f := &fake{state: "running\tcaddy"}
+	if err := Boot(context.Background(), f, io.Discard, "img"); err != nil {
+		t.Fatal(err)
+	}
+	if at(f.calls, "docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json") < 0 {
+		t.Errorf("want a reload with the assembled config: %v", f.calls)
+	}
+	empty, _ := Config(nil)
+	g := &fake{state: "running\tcaddy", out: map[string]string{"sh -c if [ -f ": "present\n" + strings.TrimSuffix(string(empty), "\n")}}
+	if err := Boot(context.Background(), g, io.Discard, "img"); err != nil || at(g.calls, "docker exec boks-proxy caddy reload") >= 0 {
+		t.Errorf("want no reload of a proxy that runs what the fragments make: %v %v", err, g.calls)
 	}
 }
 

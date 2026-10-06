@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/kopandante/boks/internal/config"
 )
 
 const (
@@ -257,5 +259,19 @@ func TestMigratePutsKamalBackAfterALostRename(t *testing.T) {
 	}
 	if err := MigrateProxy(context.Background(), g, io.Discard, "img", fixed); err == nil || g.has("docker rename boks-proxy.kamal") || !g.has("docker start boks-proxy") {
 		t.Errorf("want kamal-proxy started where it is: %v %v", err, g.calls)
+	}
+}
+
+// Fragments are exactly what kamal-proxy serves: one an earlier, cut migration left for an app with
+// no routes now is removed before Caddy starts, or Caddy would route its hosts to retired copies.
+func TestMigrateDropsAFragmentACutMigrationLeft(t *testing.T) {
+	f := kamalServer()
+	f.out[frags] = fragment(t, "gone", "gone-v1-1", config.Port{Name: "web", Port: 80, Host: "gone.example.com"})
+	if err := MigrateProxy(context.Background(), f, io.Discard, "img", fixed); err != nil {
+		t.Fatal(err)
+	}
+	removed, stopped := f.at("rm -f .boks/_proxy/routes/gone.json"), f.at("docker stop boks-proxy")
+	if removed < 0 || stopped < removed {
+		t.Errorf("want the leftover fragment removed before kamal-proxy stops: %v", f.calls)
 	}
 }

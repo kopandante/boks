@@ -41,6 +41,10 @@ const (
 	// only another host closed the stream at once, and with the delay kept it). The streams of the copy
 	// a deploy replaces end anyway when it is retired after the drain.
 	streamCloseDelay = "24h"
+	// responseHeaderTimeout is kamal-proxy's response timeout (30s by default, its ResponseHeaderTimeout):
+	// a copy that takes a request and sends no headers gets a 504 instead of holding it forever, which is
+	// Caddy's default.
+	responseHeaderTimeout = "30s"
 )
 
 // Route is one host the proxy serves for an app: requests for Host go to Dial, the `container:port`
@@ -126,8 +130,9 @@ func Config(fragments []Fragment) ([]byte, error) {
 			servers[name] = s
 		}
 		s.Routes = append(s.Routes, caddyRoute{
-			Match:    []match{{Host: []string{e.r.Host}}},
-			Handle:   []handler{{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: e.r.Dial}}, StreamCloseDelay: streamCloseDelay}},
+			Match: []match{{Host: []string{e.r.Host}}},
+			Handle: []handler{{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: e.r.Dial}}, StreamCloseDelay: streamCloseDelay,
+				Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout}}},
 			Terminal: true,
 		})
 		if e.r.TLS && e.r.Cert != nil {
@@ -197,6 +202,11 @@ type (
 		Handler          string     `json:"handler"`
 		Upstreams        []upstream `json:"upstreams"`
 		StreamCloseDelay string     `json:"stream_close_delay,omitempty"`
+		Transport        *transport `json:"transport,omitempty"`
+	}
+	transport struct {
+		Protocol              string `json:"protocol"`
+		ResponseHeaderTimeout string `json:"response_header_timeout,omitempty"`
 	}
 	upstream struct {
 		Dial string `json:"dial"`
@@ -302,13 +312,50 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 	if err != nil {
 		return false, err
 	}
-	var had []Route
-	for _, f := range fs {
-		if f.App == app {
-			had = f.Routes
+	next := withRoutes(fs, app, routes)
+	if _, err := Config(next); err != nil {
+		return false, err
+	}
+	if force || !sameRoutes(Of(fs, app), routes) {
+		if len(routes) == 0 {
+			_, err = r.Run(ctx, "rm", "-f", fragmentPath(app))
+		} else {
+			var frag []byte
+			if frag, err = json.MarshalIndent(Fragment{App: app, Routes: routes}, "", "  "); err == nil {
+				err = remote.UploadAtomic(ctx, r, append(frag, '\n'), fragmentPath(app))
+			}
+		}
+		if err != nil {
+			// The write may have gone through with its answer lost: the routes are put back either way.
+			return true, fmt.Errorf("recording the routes of %s: %w", app, err)
 		}
 	}
-	body, err := Config(withRoutes(fs, app, routes))
+	reloaded, err := converge(ctx, r, log, next, force, "the routes of "+app)
+	if err != nil {
+		return true, err
+	}
+	return reloaded, nil
+}
+
+// Lags says whether an applied config is there and differs from the one the fragments fs assemble:
+// a run was cut after writing its fragment, and the proxy has not caught up.
+func Lags(ctx context.Context, r remote.Runner, fs []Fragment) (bool, error) {
+	body, err := Config(fs)
+	if err != nil {
+		return false, err
+	}
+	applied, present, err := readFile(ctx, r, appliedPath())
+	return present && applied != string(body), err
+}
+
+// converge makes the proxy run the config the fragments fs assemble, and records it as applied: a
+// reload when the applied config differs (or force, for a reload whose answer was lost), and for a
+// proxy that is not running, the applied config alone — what it loads when it starts. Every way
+// boks makes the proxy load a config goes through here, so none of them loads caddy.json as it lies:
+// a run cut after writing its fragment leaves caddy.json behind the fragments, and loading it would
+// send that run's routes back to the copies it left. The caller holds the server's admission lock.
+func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment, force bool, what string) (bool, error) {
+	body, err := Config(fs)
 	if err != nil {
 		return false, err
 	}
@@ -316,53 +363,38 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 	if err != nil {
 		return false, err
 	}
-	stale := !present || applied != string(body) || force
-	if !stale && sameRoutes(had, routes) {
+	if present && applied == string(body) && !force {
 		return false, nil
 	}
 	running, err := caddyRunning(ctx, r)
 	if err != nil {
 		return false, err
 	}
-	reload := stale && running
-	if len(routes) == 0 {
-		_, err = r.Run(ctx, "rm", "-f", fragmentPath(app))
-	} else {
-		var frag []byte
-		if frag, err = json.MarshalIndent(Fragment{App: app, Routes: routes}, "", "  "); err == nil {
-			err = remote.UploadAtomic(ctx, r, append(frag, '\n'), fragmentPath(app))
+	if !running {
+		if err := remote.UploadAtomic(ctx, r, body, appliedPath()); err != nil {
+			return false, fmt.Errorf("recording the proxy's config: %w", err)
 		}
-	}
-	if err != nil {
-		// The write may have gone through with its answer lost: the routes are put back either way.
-		return true, fmt.Errorf("recording the routes of %s: %w", app, err)
-	}
-	if !stale {
 		return false, nil
 	}
-	if reload {
-		if err := remote.UploadAtomic(ctx, r, body, nextPath()); err != nil {
-			return true, err
-		}
-		fmt.Fprintf(log, "proxy: reloading with the routes of %s\n", app)
-		reloadArgs := []string{"docker", "exec", Container, "caddy", "reload", "--config", inProxy(nextPath())}
-		if force {
-			// Unchanged in Caddy's eyes when the lost reload did go through; without --force it would do nothing.
-			reloadArgs = append(reloadArgs, "--force")
-		}
-		if _, err := r.Run(ctx, reloadArgs...); err != nil {
-			// Caddy checks a config before it lets go of the running one, so a refused reload leaves the
-			// proxy serving what it served.
-			return true, fmt.Errorf("the proxy refused the new routes and keeps the ones it had: %w", err)
-		}
-		_, err = r.Run(ctx, "mv", nextPath(), appliedPath())
-	} else {
-		err = remote.UploadAtomic(ctx, r, body, appliedPath())
+	if err := remote.UploadAtomic(ctx, r, body, nextPath()); err != nil {
+		return false, err
 	}
-	if err != nil {
+	fmt.Fprintf(log, "proxy: reloading with %s\n", what)
+	reloadArgs := []string{"docker", "exec", Container, "caddy", "reload", "--config", inProxy(nextPath())}
+	if force {
+		// Unchanged in Caddy's eyes when a lost reload did go through, or when only the files behind
+		// its certificate paths are new; without --force it would do nothing.
+		reloadArgs = append(reloadArgs, "--force")
+	}
+	if _, err := r.Run(ctx, reloadArgs...); err != nil {
+		// Caddy checks a config before it lets go of the running one, so a refused reload leaves the
+		// proxy serving what it served.
+		return false, fmt.Errorf("the proxy refused the new routes and keeps the ones it had: %w", err)
+	}
+	if _, err := r.Run(ctx, "mv", nextPath(), appliedPath()); err != nil {
 		return true, fmt.Errorf("recording the proxy's config: %w", err)
 	}
-	return reload, nil
+	return true, nil
 }
 
 // sameRoutes compares two route lists; nil and empty are the same: no routes.
@@ -375,29 +407,15 @@ func sameRoutes(a, b []Route) bool {
 
 // Reload makes the proxy load its config again although it has not changed — what a certificate
 // renewal needs: the paths stay, the files behind them are new, and Caddy reads them only when it
-// loads a config. Without --force Caddy sees an unchanged config and does nothing. The config is the
-// one assembled from the fragments, not caddy.json as it lies: a run cut after writing its fragment
-// leaves caddy.json behind it, and loading that would put the cut run's routes back on the copies it
-// left. The caller holds the server's admission lock.
+// loads a config. Forced: without --force Caddy sees an unchanged config and does nothing. The caller
+// holds the server's admission lock.
 func Reload(ctx context.Context, r remote.Runner) error {
 	fs, err := Fragments(ctx, r)
 	if err != nil {
 		return err
 	}
-	body, err := Config(fs)
-	if err != nil {
-		return err
-	}
-	if err := remote.UploadAtomic(ctx, r, body, nextPath()); err != nil {
-		return err
-	}
-	if _, err := r.Run(ctx, "docker", "exec", Container, "caddy", "reload", "--config", inProxy(nextPath()), "--force"); err != nil {
-		return err
-	}
-	if _, err := r.Run(ctx, "mv", nextPath(), appliedPath()); err != nil {
-		return fmt.Errorf("recording the proxy's config: %w", err)
-	}
-	return nil
+	_, err = converge(ctx, r, io.Discard, fs, true, "the certificate files")
+	return err
 }
 
 // inProxy is a file of Dir as the proxy sees it.

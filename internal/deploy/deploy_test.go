@@ -300,12 +300,14 @@ func TestRunHappyPath(t *testing.T) {
 		admitTake("demo"),
 		"docker network inspect boks",
 		proxyProbe,
+		fragsRead,
 		// A running proxy is checked for the sysctl every reload relies on.
 		migrateReq,
 		// The proxy is on the networks of the copies its routes dial.
-		fragsRead,
 		proxyNets,
 		inspectOf("demo-v1-1"),
+		// And runs what the fragments make: a cut run may have left the applied config behind them.
+		"sh -c if [ -f '.boks/_proxy/caddy.json' ]; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		admitGive("demo"),
 		// What the proxy serves for the app now: where a failed switch would send the routes back.
 		fragsRead,
@@ -355,9 +357,11 @@ func TestRunHappyPath(t *testing.T) {
 	if f.uploads[".boks/demo/demo-v2-1700000000.env"] != "SECRET=1\n" {
 		t.Errorf("env not uploaded: %v", f.uploads)
 	}
-	// The fragment is written once Caddy took the config that dials the new copy.
-	if !strings.Contains(f.fragmentWrite("demo"), `"dial": "demo-v2-1700000000:3000"`) || !strings.Contains(f.fragmentWrite("demo"), `"tls": true`) || f.writeAt(".boks/_proxy/routes/demo.json", "demo-v2") < f.at(reloadVia) {
-		t.Errorf("want the fragment recorded after the reload: %q", f.fragmentWrite("demo"))
+	// The fragment is written before the reload, so a run cut after it leaves the next run a config to
+	// catch up with, and the applied config is moved in once Caddy took it.
+	if !strings.Contains(f.fragmentWrite("demo"), `"dial": "demo-v2-1700000000:3000"`) || !strings.Contains(f.fragmentWrite("demo"), `"tls": true`) ||
+		f.writeAt(".boks/_proxy/routes/demo.json", "demo-v2") >= f.at(reloadVia) || f.at("mv .boks/_proxy/caddy.next.json .boks/_proxy/caddy.json") < f.at(reloadVia) {
+		t.Errorf("want the fragment recorded before the reload, the applied config after: %q", f.fragmentWrite("demo"))
 	}
 }
 
@@ -432,6 +436,11 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		// Whether the app has routes to drop is its fragment's to say, not the proxy's.
 		frags + `; do [ -f "$f" ] && cat "$f"; done; true`,
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
+		// A copy an older boks started, without the ports label, may have had routes: the proxy must not
+		// be the kamal-proxy whose routes to it this boks cannot drop.
+		proxyState + " --format {{.State}}\t{{.Label \"boks.proxy\"}}",
+		// A removal a cut run wrote to the fragments but never got into the proxy's config.
+		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",
 		admitTake("bot"),
 		netOwnerQuery("boks-bot"),
@@ -936,6 +945,55 @@ func TestRoutelessDropsTheRoutesOfRemovedPorts(t *testing.T) {
 	}
 }
 
+// A removal a cut run wrote to the fragments but never got into the proxy's config — the fragment
+// gone, the applied config still routing the app — is finished by the next deploy, though the app
+// has no fragment left to say so.
+func TestRoutelessFinishesARemovalACutRunLeft(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
+	other := fragment(t, "other", "other-v1-1", config.Port{Name: "web", Port: 80, Host: "other.example.com"})
+	f.out[frags] = other
+	var both []proxy.Fragment
+	for _, fr := range []string{fragment(t, "bot", "bot-v1-1", botPort), other} {
+		var x proxy.Fragment
+		if err := json.Unmarshal([]byte(fr), &x); err != nil {
+			t.Fatal(err)
+		}
+		both = append(both, x)
+	}
+	stale, _ := proxy.Config(both)
+	f.out[applied] = "present\n" + strings.TrimSuffix(string(stale), "\n")
+	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	next := f.uploads[".boks/_proxy/caddy.next.json"]
+	if !f.has(reloadVia) || strings.Contains(next, "bot.example.com") || !strings.Contains(next, "other.example.com") {
+		t.Errorf("want a reload without the app's routes:\n%s\n%v", next, f.calls)
+	}
+	if f.at(reloadVia) > f.at("docker rm bot-v1-1") {
+		t.Errorf("the routes go before the old copy: %v", f.calls)
+	}
+}
+
+// An app that drops its routes on a server still on kamal-proxy is refused before anything of it
+// changes: its routes are kamal-proxy's, and retiring the copies they dial would leave them on 502.
+func TestRoutelessRefusesToDropKamalRoutes(t *testing.T) {
+	f := routelessFake("healthy")
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running\t"
+	f.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t" + `[{"name":"web","port":3000,"host":"bot.example.com"}]` + "\n"
+	err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "boks proxy migrate") || f.has("docker stop") || f.has("docker run") {
+		t.Errorf("want the migration asked for and nothing changed: %v %v", err, f.calls)
+	}
+	// An app that never had routes deploys there as before.
+	g := routelessFake("healthy")
+	g.out["docker ps -a --filter name=^boks-proxy$"] = "running\t"
+	g.out["docker ps -a --filter label=boks.app=bot"] = "bot-v1-1\t[]\n"
+	if err := Run(context.Background(), g, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
+		t.Errorf("a routeless app has nothing on kamal-proxy: %v", err)
+	}
+}
+
 // An app that never had routes reloads nothing.
 func TestRoutelessWithoutRoutesLeavesTheProxyAlone(t *testing.T) {
 	f := routelessFake("healthy")
@@ -1123,6 +1181,24 @@ func TestTheOldCopyDrainsBeforeItGoes(t *testing.T) {
 	if time.Since(start) < 200*time.Millisecond || !strings.Contains(log.String(), "could not say") || q.at("docker stop demo-v1-1") < q.lastAt(upstreams) {
 		t.Errorf("want the bound waited out before the stop, with a warning: %s %q", time.Since(start), log.String())
 	}
+	// A question the bound cuts off after the proxy said what it holds: the warning reports that.
+	k := routedFake(t)
+	answered := 0
+	k.onRun = func(cmd string) {
+		if cmd == upstreams {
+			if answered++; answered > 1 {
+				k.hang = []string{upstreams}
+			}
+		}
+	}
+	k.out[upstreams] = `[{"address":"demo-v1-1:3000","num_requests":1}]`
+	log.Reset()
+	if err := Run(context.Background(), k, &log, parse(t, onePort+"drain_timeout: 100ms\n"), "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "1 requests to the previous copies still in flight after 100ms") {
+		t.Errorf("want the proxy's last answer in the warning: %q", log.String())
+	}
 	// A question that never answers is cut off at the bound, not waited on forever.
 	w := routedFake(t)
 	w.hang = []string{upstreams}
@@ -1159,6 +1235,19 @@ func TestTheOldCopyDrainsBeforeItGoes(t *testing.T) {
 	h.out["docker ps -a --filter label=boks.app=demo"] = ""
 	if err := Run(context.Background(), h, io.Discard, parse(t, onePort), "v2", quick()); err != nil || h.has(upstreams) {
 		t.Errorf("nothing to drain: %v %v", err, h.calls)
+	}
+}
+
+// A health path written without its slash means what kamal-proxy made of it: /up, joined onto the
+// copy's address.
+func TestARelativeHealthPathIsJoinedOntoTheAddress(t *testing.T) {
+	f := routedFake(t)
+	cfg := parse(t, strings.Replace(onePort, "health_path: /up", "health_path: up", 1))
+	if err := Run(context.Background(), f, io.Discard, cfg, "v2", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if !f.has(probe + "http://demo-v2-1700000000:3000/up") {
+		t.Errorf("want the probe at /up: %v", f.calls)
 	}
 }
 
