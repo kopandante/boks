@@ -135,7 +135,7 @@ func TestRoutelessRollbackBringsTheOldCopyBack(t *testing.T) {
 	if err == nil {
 		t.Fatal("want the unhealthy release to fail the rollback")
 	}
-	removed, restarted := f.callAt("docker rm -f bot-v1-1700000000"), f.callAt("docker start bot-v2-2")
+	removed, restarted := f.callAt("docker rm -f -v bot-v1-1700000000"), f.callAt("docker start bot-v2-2")
 	if removed < 0 || restarted < 0 || removed > restarted {
 		t.Errorf("the restored copy must be gone before the old one restarts: %v", f.calls)
 	}
@@ -191,7 +191,7 @@ func TestRollbackKeepsTheOldCopyWhenCurrentCannotBeMoved(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "could not record it") || !strings.Contains(err.Error(), "`boks rollback bot-v1-1` again") {
 		t.Fatalf("want the unrecorded rollback reported with the rollback to repeat, got %v", err)
 	}
-	if f.has("docker rm bot-v2-2") {
+	if f.has("docker rm -v bot-v2-2") {
 		t.Errorf("the previous copy must be kept: %v", f.calls)
 	}
 }

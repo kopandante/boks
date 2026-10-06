@@ -515,8 +515,9 @@ func TestParseSchedules(t *testing.T) {
 		app + "schedules: [{name: w, cron: '* * * * *', command: x}, {name: w, cron: '* * * * *', command: y}]\n": "named twice",
 	}
 	multi := "app: demo\nimage: x\nservers: [a, b]\nports: [{name: w, port: 1, host: h}]\nschedules: [{name: w, cron: '* * * * *', command: x}]\n"
-	if _, err := Parse([]byte(multi)); err == nil || !strings.Contains(err.Error(), "one server") {
-		t.Errorf("an app with schedules on two servers would run each job twice: got %v", err)
+	if _, err := Parse([]byte(multi)); err == nil || !strings.Contains(err.Error(), "one server") ||
+		!strings.Contains(err.Error(), "split the jobs into an app of their own") || !strings.Contains(err.Error(), "run them from outside") {
+		t.Errorf("an app with schedules on two servers would run each job twice, and the refusal says what to do: got %v", err)
 	}
 	// What the server's crontab would refuse is refused here: the crontab is installed only after the
 	// release already serves.

@@ -154,7 +154,7 @@ func TestACreatedContainerThatCannotJoinIsRemoved(t *testing.T) {
 			t.Fatalf("%s: want an error", failing)
 		}
 		// A failed create may have created the copy all the same, so it is removed too.
-		if !f.has("docker rm -f "+newCopy) || f.has(reloadVia) {
+		if !f.has("docker rm -f -v "+newCopy) || f.has(reloadVia) {
 			t.Errorf("%s: want the new container removed and no route moved: %v", failing, f.calls)
 		}
 	}

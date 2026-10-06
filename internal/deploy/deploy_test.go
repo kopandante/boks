@@ -323,7 +323,7 @@ func TestRunHappyPath(t *testing.T) {
 		"docker network create --label boks.app=demo boks-demo",
 		"sh -c cat '.boks/demo/journal.jsonl' 2>/dev/null || true",
 		"sh -c cat '.boks/demo/current' 2>/dev/null || true",
-		"docker run -d --name demo-v2-1700000000 --network boks-demo --network-alias demo --restart unless-stopped " +
+		"docker run -d --name demo-v2-1700000000 --network boks-demo --network-alias demo --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
 			"--label boks.replace=overlap --env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
@@ -351,7 +351,7 @@ func TestRunHappyPath(t *testing.T) {
 		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
 		cronClear("demo"),
 		"docker stop demo-v1-1",
-		"docker rm demo-v1-1",
+		"docker rm -v demo-v1-1",
 		"docker images ghcr.io/x/y --format {{.Tag}} {{.ID}}",
 		"docker rmi ghcr.io/x/y:v0",
 		"rmdir /tmp/boks-demo.lock",
@@ -459,7 +459,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker stop bot-v1-1",
 		// The stop is confirmed by the container's state, not by the command having returned.
 		isRunningQuery + "bot-v1-1",
-		"docker run -d --name bot-v2-1700000000 --network boks-bot --network-alias bot --restart unless-stopped " +
+		"docker run -d --name bot-v2-1700000000 --network boks-bot --network-alias bot --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 --restart unless-stopped " +
 			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] --label boks.replace=stop-first " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
@@ -474,7 +474,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		proxyNets,
 		admitGive("bot"),
 		"docker stop bot-v1-1",
-		"docker rm bot-v1-1",
+		"docker rm -v bot-v1-1",
 		"docker images ghcr.io/x/bot --format {{.Tag}} {{.ID}}",
 		"rmdir /tmp/boks-bot.lock",
 	}
@@ -540,7 +540,7 @@ func TestRoutelessRefusesAContainerWithoutHealthcheck(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HEALTHCHECK") {
 		t.Fatalf("want a refusal naming HEALTHCHECK, got %v", err)
 	}
-	if !f.has("docker rm -f bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
+	if !f.has("docker rm -f -v bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
 		t.Errorf("the new copy must go and the old one must come back: %v", f.calls)
 	}
 }
@@ -565,13 +565,13 @@ func TestRoutelessBringsTheOldCopyBackWhenTheNewOneIsUnhealthy(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unhealthy") {
 		t.Fatalf("want an unhealthy error, got %v", err)
 	}
-	if !f.has("docker stop bot-v2-1700000000") || !f.has("docker rm -f bot-v2-1700000000") {
+	if !f.has("docker stop bot-v2-1700000000") || !f.has("docker rm -f -v bot-v2-1700000000") {
 		t.Errorf("the unhealthy new copy must be stopped and removed: %v", f.calls)
 	}
 	if !f.has("docker start bot-v1-1") {
 		t.Errorf("old copy must be restarted: %v", f.calls)
 	}
-	if f.has("docker rm bot-v1-1") {
+	if f.has("docker rm -v bot-v1-1") {
 		t.Errorf("the old copy must not be retired when the new one failed: %v", f.calls)
 	}
 }
@@ -586,7 +586,7 @@ func TestRoutelessGivesUpAtTheDeployTimeout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not become healthy within 20ms") {
 		t.Fatalf("want a timeout, got %v", err)
 	}
-	if !f.has("docker rm -f bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
+	if !f.has("docker rm -f -v bot-v2-1700000000") || !f.has("docker start bot-v1-1") {
 		t.Errorf("the new copy must go and the old one must come back: %v", f.calls)
 	}
 }
@@ -651,7 +651,7 @@ func TestRoutelessRevivesOnlyWhatWasRunning(t *testing.T) {
 	if err := Run(context.Background(), ok, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
 	}
-	if !ok.has("docker rm bot-v0-1") || !ok.has("docker rm bot-v1-1") {
+	if !ok.has("docker rm -v bot-v0-1") || !ok.has("docker rm -v bot-v1-1") {
 		t.Errorf("a successful deploy retires every previous container: %v", ok.calls)
 	}
 }
@@ -835,7 +835,7 @@ func TestTheSwitchReplacesTheAppsWholeFragment(t *testing.T) {
 	if strings.Contains(f.fragmentWrite("demo"), "old.example.com") || f.fragmentWrite("other") != "" {
 		t.Errorf("want demo's fragment rewritten and other's left alone: %q %q", f.fragmentWrite("demo"), f.fragmentWrite("other"))
 	}
-	if reloaded, retired := f.at(reloadVia), f.at("docker rm demo-v1-1"); reloaded < 0 || retired < reloaded {
+	if reloaded, retired := f.at(reloadVia), f.at("docker rm -v demo-v1-1"); reloaded < 0 || retired < reloaded {
 		t.Errorf("the reload comes before the old container goes: %v", f.calls)
 	}
 }
@@ -896,7 +896,7 @@ func TestRoutelessKeepsTheOldCopyWhenARouteStays(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "bot-v1-1") {
 		t.Fatalf("want an error naming the kept container, got %v", err)
 	}
-	if f.has("docker rm bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f bot-v2") {
+	if f.has("docker rm -v bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f -v bot-v2") {
 		t.Errorf("the old copy is kept stopped and the new one stays: %v", f.calls)
 	}
 	if journalOpen(f, ".boks/bot/journal.jsonl") == false {
@@ -920,7 +920,7 @@ func TestRoutelessDropsItsRoutesWhileTheProxyIsStopped(t *testing.T) {
 		f.uploads[".boks/_proxy/caddy.json"] == "" {
 		t.Errorf("want bot's routes gone from the files the proxy loads: %v %v", f.calls, f.uploads)
 	}
-	if !f.has("docker rm bot-v1-1") {
+	if !f.has("docker rm -v bot-v1-1") {
 		t.Errorf("no route reaches the old copy any more, so it goes: %v", f.calls)
 	}
 }
@@ -936,7 +936,7 @@ func TestRoutelessDropsTheRoutesOfRemovedPorts(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err != nil {
 		t.Fatal(err)
 	}
-	healthy, reloaded, retired := f.at("docker inspect --format"), f.at(reloadVia), f.at("docker rm bot-v1-1")
+	healthy, reloaded, retired := f.at("docker inspect --format"), f.at(reloadVia), f.at("docker rm -v bot-v1-1")
 	if reloaded < healthy || retired < reloaded {
 		t.Errorf("the routes must go after the new copy is healthy and before the old one is retired: %v", f.calls)
 	}
@@ -974,7 +974,7 @@ func TestRoutelessFinishesARemovalACutRunLeft(t *testing.T) {
 	if !f.has(reloadVia) || strings.Contains(next, "bot.example.com") || !strings.Contains(next, "other.example.com") {
 		t.Errorf("want a reload without the app's routes:\n%s\n%v", next, f.calls)
 	}
-	if f.at(reloadVia) > f.at("docker rm bot-v1-1") {
+	if f.at(reloadVia) > f.at("docker rm -v bot-v1-1") {
 		t.Errorf("the routes go before the old copy: %v", f.calls)
 	}
 }
@@ -1051,11 +1051,11 @@ func TestRunKeepsOldWhenSwitchFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "connection reset") {
 		t.Fatalf("want the switch error, got %v", err)
 	}
-	restored, removed := f.at(reloadVia+" --force"), f.at("docker rm -f "+newCopy)
+	restored, removed := f.at(reloadVia+" --force"), f.at("docker rm -f -v "+newCopy)
 	if restored < 0 || removed < restored {
 		t.Errorf("want the routes put back, then the new copy removed: %v", f.calls)
 	}
-	if f.has("docker stop demo-v1-1") || f.has("docker rm demo-v1-1") {
+	if f.has("docker stop demo-v1-1") || f.has("docker rm -v demo-v1-1") {
 		t.Errorf("old container must survive a failed switch, got %v", f.calls)
 	}
 	if !strings.Contains(f.uploads[".boks/_proxy/caddy.next.json"], `"dial": "demo-v1-1:3000"`) {
@@ -1078,7 +1078,7 @@ func TestAFailedSwitchThatCannotBePutBackKeepsBothCopies(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "putting the routes back failed too") {
 		t.Fatalf("want both failures named, got %v", err)
 	}
-	if f.has("docker rm -f "+newCopy) || f.has("docker stop demo-v1-1") || !journalOpen(f, journal) {
+	if f.has("docker rm -f -v "+newCopy) || f.has("docker stop demo-v1-1") || !journalOpen(f, journal) {
 		t.Errorf("want both copies kept and the operation open: %v %q", f.calls, f.appends[journal])
 	}
 }
@@ -1093,7 +1093,7 @@ func TestAnUnhealthyCopyGetsNoRoute(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not pass its health check within 1ms, so no route moved") || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("want the health check named, got %v", err)
 	}
-	if f.has(reloadVia) || !f.has("docker rm -f "+newCopy) || f.has("docker stop demo-v1-1") {
+	if f.has(reloadVia) || !f.has("docker rm -f -v "+newCopy) || f.has("docker stop demo-v1-1") {
 		t.Errorf("no reload, the new copy removed, the old one kept: %v", f.calls)
 	}
 	if journalOpen(f, journal) {
@@ -1437,7 +1437,7 @@ func TestDeployRecordsBeforeItRetires(t *testing.T) {
 	if snap < 0 || current <= snap || closed <= current {
 		t.Errorf("want snapshot, then current, then the closing line; got %d %d %d", snap, current, closed)
 	}
-	if retired := f.callAt("docker rm demo-v1-1"); retired < 0 || retired < f.writeAt(journal, `"result":"ok"`) {
+	if retired := f.callAt("docker rm -v demo-v1-1"); retired < 0 || retired < f.writeAt(journal, `"result":"ok"`) {
 		t.Errorf("the previous container goes only after the release is recorded: %v", f.calls)
 	}
 }
@@ -1449,7 +1449,7 @@ func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
 		f := routedFake(t)
 		f.fail[digests] = errors.New("connection reset")
 		err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
-		if err == nil || !strings.Contains(err.Error(), "could not record") || f.has("docker rm demo-v1-1") {
+		if err == nil || !strings.Contains(err.Error(), "could not record") || f.has("docker rm -v demo-v1-1") {
 			t.Fatalf("a snapshot without its digest is not a record: %v %v", err, f.calls)
 		}
 	})
@@ -1465,7 +1465,7 @@ func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "could not record") || !strings.Contains(err.Error(), "bot-v1-1") {
 			t.Fatalf("want an error naming the kept copy, got %v", err)
 		}
-		if f.has("docker rm bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f bot-v2") {
+		if f.has("docker rm -v bot-v1-1") || f.has("docker start bot-v1-1") || f.has("docker rm -f -v bot-v2") {
 			t.Errorf("the old copy stays stopped and the new one runs: %v", f.calls)
 		}
 	})
@@ -1486,7 +1486,7 @@ func TestUnrecordedReleaseKeepsThePreviousContainers(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "could not record") || !strings.Contains(err.Error(), "demo-v1-1") {
 				t.Fatalf("want an error naming the kept container, got %v", err)
 			}
-			if f.has("docker rm demo-v1-1") || f.has("docker stop demo-v1-1") {
+			if f.has("docker rm -v demo-v1-1") || f.has("docker stop demo-v1-1") {
 				t.Errorf("the previous container must stay: %v", f.calls)
 			}
 		})
@@ -1606,7 +1606,7 @@ func TestRoutelessFailedStartClosesTheJournalAfterTheCleanup(t *testing.T) {
 			t.Fatalf("%s: want an error", name)
 		}
 		closed := f.writeAt(botJournal, `"result":"failed"`)
-		cleaned := f.callAt("docker rm -f bot-v2-1700000000")
+		cleaned := f.callAt("docker rm -f -v bot-v2-1700000000")
 		if name == "unhealthy" {
 			cleaned = f.callAt("docker start bot-v1-1")
 		}

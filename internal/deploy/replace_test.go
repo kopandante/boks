@@ -298,7 +298,7 @@ func TestStopFirstStopsTheOldCopyBeforeTheNewOneStarts(t *testing.T) {
 	if f.has(upstreams) {
 		t.Errorf("the old copy is down already: nothing to drain: %v", f.calls)
 	}
-	if !f.has("docker rm demo-v1-1") || f.uploads[".boks/demo/current"] != newCopy+"\n" {
+	if !f.has("docker rm -v demo-v1-1") || f.uploads[".boks/demo/current"] != newCopy+"\n" {
 		t.Errorf("a successful stop-first deploy records and retires as usual: %v", f.calls)
 	}
 }
@@ -342,11 +342,11 @@ func TestStopFirstBringsTheOldCopyBack(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("want the health failure, got %v", err)
 	}
-	removed, restarted := f.callAt("docker rm -f "+newCopy), f.callAt("docker start demo-v1-1")
+	removed, restarted := f.callAt("docker rm -f -v "+newCopy), f.callAt("docker start demo-v1-1")
 	if removed < 0 || restarted < 0 || removed > restarted || f.has(reloadVia) {
 		t.Errorf("want removed < restarted, and no reload: %d %d\n%v", removed, restarted, f.calls)
 	}
-	if journalOpen(f, journal) || f.has("docker rm demo-v1-1") || f.uploads[".boks/demo/current"] != "" {
+	if journalOpen(f, journal) || f.has("docker rm -v demo-v1-1") || f.uploads[".boks/demo/current"] != "" {
 		t.Errorf("a failed deploy closes the entry, neither retires nor records: %v %q", f.calls, f.appends[journal])
 	}
 }
@@ -368,7 +368,7 @@ func TestStopFirstPutsTheRoutesBackBeforeTheOldCopyStarts(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	restored, removed, restarted := f.callAt(reloadVia+" --force"), f.callAt("docker rm -f "+newCopy), f.callAt("docker start demo-v1-1")
+	restored, removed, restarted := f.callAt(reloadVia+" --force"), f.callAt("docker rm -f -v "+newCopy), f.callAt("docker start demo-v1-1")
 	if restored < 0 || removed < restored || restarted < removed {
 		t.Errorf("want restored < removed < restarted: %d %d %d\n%v", restored, removed, restarted, f.calls)
 	}
@@ -513,7 +513,7 @@ func TestStopFirstLeftoverAfterASwitchLeavesTheJournalOpen(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "putting the routes back failed too") || !strings.Contains(err.Error(), newCopy+" is left running") {
 		t.Fatalf("want the routes named, got %v", err)
 	}
-	if !journalOpen(f, journal) || f.has("docker rm -f "+newCopy) || f.has("docker start demo-v1-1") {
+	if !journalOpen(f, journal) || f.has("docker rm -f -v "+newCopy) || f.has("docker start demo-v1-1") {
 		t.Errorf("want the entry open, the new copy kept and the old one stopped: %v %q", f.calls, f.appends[journal])
 	}
 }
@@ -671,7 +671,7 @@ func TestAFailedStartLeavesAnotherAppsContainerAlone(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already in use") {
 		t.Fatalf("want the start error, got %v", err)
 	}
-	if f.has("docker stop "+newCopy) || f.has("docker rm -f "+newCopy) {
+	if f.has("docker stop "+newCopy) || f.has("docker rm -f -v "+newCopy) {
 		t.Errorf("another app's container must be left alone: %v", f.calls)
 	}
 	if !f.has("docker start demo-v1-1") {
@@ -755,14 +755,14 @@ func TestDiscardReadsExactlyItsOwnName(t *testing.T) {
 	f := routelessFake("unhealthy")
 	f.out[query] = "bot-v1-0-1700000000\tbot-v1\nbot-v1.0-1700000000\tbot\n"
 	f.onRun = func(cmd string) {
-		if cmd == "docker rm -f bot-v1.0-1700000000" {
+		if cmd == "docker rm -f -v bot-v1.0-1700000000" {
 			f.out[query] = "bot-v1-0-1700000000\tbot-v1\n"
 		}
 	}
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v1.0", quick()); err == nil {
 		t.Fatal("want the health failure")
 	}
-	if !f.has("docker rm -f bot-v1.0-1700000000") {
+	if !f.has("docker rm -f -v bot-v1.0-1700000000") {
 		t.Errorf("this run's own copy is removed, whatever line it is on: %v", f.calls)
 	}
 	if !f.has(query) {
@@ -777,7 +777,7 @@ func TestDiscardReadsExactlyItsOwnName(t *testing.T) {
 	if err := Run(context.Background(), g, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
 		t.Fatal("want the health failure")
 	}
-	if g.has("docker rm -f bot-v2-1700000000") {
+	if g.has("docker rm -f -v bot-v2-1700000000") {
 		t.Errorf("a container this app never labelled is not removed: %v", g.calls)
 	}
 }
@@ -894,5 +894,55 @@ func TestStopFirstNamesACopyThatStayedDown(t *testing.T) {
 	err := Run(context.Background(), f, io.Discard, cfg, "v2", o)
 	if err == nil || !strings.Contains(err.Error(), "did not come back up") {
 		t.Fatalf("want the copy that stayed down named, got %v", err)
+	}
+}
+
+// A rollback to a release recorded without a command or a stop signal runs the image's own, as it
+// did — and says so when today's config sets them, without printing the command: it can carry a
+// secret.
+func TestRollbackSaysWhenItDropsTheCommand(t *testing.T) {
+	f := demoReleases(t, `{`+v1Release+`}`)
+	var log strings.Builder
+	cfg := parse(t, onePort+"command: [sh, -c, 'exec redis-server --requirepass s3cret']\nstop_signal: SIGINT\n")
+	if err := Rollback(context.Background(), f, &log, cfg, "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	out := log.String()
+	if !strings.Contains(out, "recorded without a command, so it runs the image's own CMD") ||
+		!strings.Contains(out, "recorded without a stop_signal, so it stops with the image's STOPSIGNAL, not SIGINT") {
+		t.Errorf("want both warnings: %s", out)
+	}
+	if strings.Contains(out, "s3cret") {
+		t.Errorf("the command was printed: %s", out)
+	}
+	run := f.calls[f.at("docker run")]
+	if strings.Contains(run, "s3cret") || strings.Contains(run, "--stop-signal") {
+		t.Errorf("want the release run as recorded, not with today's command: %s", run)
+	}
+	// Recorded with them: no warning.
+	g := demoReleases(t, `{`+v1Release+`,"command":["redis-server"],"stop_signal":"SIGTERM"}`)
+	var quiet strings.Builder
+	if err := Rollback(context.Background(), g, &quiet, cfg, "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(quiet.String(), "recorded without a") {
+		t.Errorf("no warning for a release that has them: %s", quiet.String())
+	}
+	// Each field on its own: a warning only for the one today's config sets and the release lacks.
+	const noCommand, noSignal = "recorded without a command", "recorded without a stop_signal"
+	for _, c := range []struct{ config, recorded, want, not string }{
+		{"command: [redis-server]\n", ``, noCommand, noSignal},
+		{"stop_signal: SIGINT\n", ``, noSignal, noCommand},
+		{"command: [redis-server]\nstop_signal: SIGINT\n", `,"command":["redis-server"]`, noSignal, noCommand},
+		{"command: [redis-server]\nstop_signal: SIGINT\n", `,"stop_signal":"SIGTERM"`, noCommand, noSignal},
+	} {
+		h := demoReleases(t, `{`+v1Release+c.recorded+`}`)
+		var out strings.Builder
+		if err := Rollback(context.Background(), h, &out, parse(t, onePort+c.config), "", fixed); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), c.want) || strings.Contains(out.String(), c.not) {
+			t.Errorf("config %q, recorded %q: want %q and not %q: %s", c.config, c.recorded, c.want, c.not, out.String())
+		}
 	}
 }
