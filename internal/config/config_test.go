@@ -182,6 +182,10 @@ func TestCertSlug(t *testing.T) {
 	if got := (&Cert{Domains: []string{"*.lab.example.com"}}).Slug(); got != "_.lab.example.com" {
 		t.Errorf("got %s, want lego's own naming", got)
 	}
+	// lego names the files of a domain in Unicode in punycode (#77).
+	if got := (&Cert{Domains: []string{"*.пример.рф", "пример.рф"}}).Slug(); got != "_.xn--e1afmkfd.xn--p1ai" {
+		t.Errorf("got %s, want lego's punycode name", got)
+	}
 }
 
 func TestCertRejects(t *testing.T) {
