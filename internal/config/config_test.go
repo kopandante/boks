@@ -608,6 +608,10 @@ func TestParsePortRouting(t *testing.T) {
 			t.Errorf("%q: want error containing %q, got %v", in, want, err)
 		}
 	}
+	// A certificate covers a host whatever the case of either.
+	if _, err := Parse([]byte(app + "tls: true\ncert: {domains: ['*.Example.com'], dns: cloudflare, email: a@b.c}\nports: [{name: w, port: 1, host: '*.EXAMPLE.com'}]\n")); err != nil {
+		t.Errorf("a covered wildcard in other letters must parse: %v", err)
+	}
 	// A dot inside a segment is a name, not a dot segment.
 	if _, err := Parse([]byte(port("path: /.well-known/x..y, path_rewrite: /v1.0"))); err != nil {
 		t.Errorf("dots inside segments must parse: %v", err)

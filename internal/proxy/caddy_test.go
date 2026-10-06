@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // disk is a server as far as the proxy's state goes: files under Dir, the proxy container's state
@@ -798,7 +799,7 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 	// matcher's cleaning but not the strip's — is refused before any rewrite: stripping would miss
 	// the prefix and the app would resolve the path outside the new one.
 	unclean := `{"group":"path","handle":[{"handler":"static_response","status_code":400}],` +
-		`"match":[{"vars_regexp":{"{http.request.uri.path}":{"pattern":"(^|/)\\.\\.?(/|$)|//"}}}],"terminal":false},`
+		`"match":[{"vars_regexp":{"{http.request.uri.path}":{"pattern":"(^|/)\\.\\.?(/|$)|//|[\\x{130}\\x{212A}]"}}}],"terminal":false},`
 	// The path itself is replaced whole; below it the prefix is stripped the way the matcher compares
 	// (no case, no escapes) and the new one put in front.
 	if h := handle(0); h != `[{"handler":"subroute","routes":[`+unclean+
@@ -858,12 +859,24 @@ func TestUncleanPathIsWhatCleaningChanges(t *testing.T) {
 	for p, unclean := range map[string]bool{
 		"/api/images/x": false, "/api/images/": false, "/": false, "/a/.well-known/b": false, "/a/..b/c.": false,
 		"/x/../api": true, "/./api": true, "/api/..": true, "/api/.": true, "//api/x": true, "/api//images": true, "/api/images//": true,
+		"/\u212Aey/x": true, "/ap\u0130/x": true, "/фото/Ä.jpg": false,
 	} {
 		if re.MatchString(p) != unclean {
 			t.Errorf("%s: unclean %v, want %v", p, !unclean, unclean)
 		}
 		if clean := path.Clean(p); !unclean && clean != strings.TrimSuffix(p, "/") && p != "/" {
 			t.Errorf("%s is called clean, but cleaning makes it %s", p, clean)
+		}
+	}
+}
+
+// The matcher lowercases the whole decoded path the way Go does; the strip folds ASCII byte by byte.
+// They disagree exactly on the characters that lowercase into ASCII, and uncleanPath refuses them all.
+func TestUncleanPathFoldsLikeTheMatcher(t *testing.T) {
+	re := regexp.MustCompile(uncleanPath)
+	for r := rune(0x80); r <= unicode.MaxRune; r++ {
+		if l := strings.ToLower(string(r)); l != string(r) && strings.IndexFunc(l, func(c rune) bool { return c < 0x80 }) >= 0 && !re.MatchString("/"+string(r)) {
+			t.Errorf("%U lowercases to %q, which the strip would not fold, and is let through", r, l)
 		}
 	}
 }

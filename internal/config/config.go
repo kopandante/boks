@@ -581,7 +581,10 @@ func (c *Cert) Covers(host string) bool {
 	if c == nil {
 		return false
 	}
+	// Names are matched without regard to case, as the proxy matches hosts and certificates do.
+	host = strings.ToLower(host)
 	for _, d := range c.Domains {
+		d = strings.ToLower(d)
 		if d == host {
 			return true
 		}

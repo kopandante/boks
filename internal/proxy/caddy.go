@@ -382,9 +382,11 @@ func addHost(hosts []string, h string) []string {
 	return append(hosts, h)
 }
 
-// uncleanPath finds, in a decoded path, what cleaning would change: a `.` or `..` segment, or an
-// empty one.
-const uncleanPath = `(^|/)\.\.?(/|$)|//`
+// uncleanPath finds, in a decoded path, what makes the matcher and the strip disagree: what cleaning
+// would change — a `.` or `..` segment, or an empty one — and the two characters that Go's lowercasing,
+// which the matcher applies to the whole path, turns into ASCII letters (İ → i, Kelvin K → k), while
+// the strip folds case byte by byte. TestUncleanPathFoldsLikeTheMatcher holds the list complete.
+const uncleanPath = `(^|/)\.\.?(/|$)|//|[\x{130}\x{212A}]`
 
 // routeMatch is the host and, for a route under a path, the path itself and everything below it —
 // not every path that merely starts with the same letters (`/img` must not take `/images`).
@@ -401,11 +403,12 @@ func routeHandle(r Route) []handler {
 	var hs []handler
 	if r.StripPath || r.PathRewrite != "" {
 		// The rewrite must take exactly the requests the path matcher lets in. Caddy matches the decoded
-		// path cleaned of dot and empty segments, without regard to case; strip_path_prefix compares the
-		// same way, but cleans the escaped path, where `%2e%2e` is no dot segment and `%2F/` no double
-		// slash. On a path that is already clean the two agree, letter for letter — so only such a
-		// path is rewritten, and any other is refused (400) rather than passed on with its prefix
-		// unstripped, where the app would resolve it outside the new one. Browsers send clean paths.
+		// path cleaned of dot and empty segments, lowercased; strip_path_prefix compares the same way,
+		// but cleans the escaped path, where `%2e%2e` is no dot segment and `%2F/` no double slash, and
+		// folds case byte by byte. On a clean path without the two characters lowercasing turns into
+		// ASCII they agree letter for letter — so only such a path is rewritten, and any other is
+		// refused (400) rather than passed on with its prefix unstripped, where the app would resolve
+		// it outside the new one. Browsers send clean paths.
 		routes := []caddyRoute{{Group: "path", Match: []match{{VarsRegexp: map[string]varRegexp{"{http.request.uri.path}": {Pattern: uncleanPath}}}},
 			Handle: []handler{{Handler: "static_response", StatusCode: 400}}}}
 		if r.StripPath {
