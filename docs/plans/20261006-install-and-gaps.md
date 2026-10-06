@@ -45,14 +45,17 @@ R4 (`20261002-small-box-reality.md`) и G3 (`20261006-shchr-gaps.md`).
       PID 1 `redis-server` с uid 999, NOAUTH без пароля; после трёх деплоев подряд остаётся анонимный
       том только текущей копии; `LogConfig` — json-file, max-size 10m, max-file 3
 - [x] **B5. Бюджет вывода задания** (PR feat/job-output-cap, #72): `boks-job` пускает вывод запуска
-      через FIFO — первые 1 MiB stdout и stderr идут в журнал, остаток дочитывается до конца и
+      через FIFO — первые 1 MiB stdout и stderr идут в журнал по ходу запуска (`dd bs=1`, не
+      буферизующий `head`), остаток дочитывается до конца и
       считается строкой «output past 1 MiB dropped: about N more bytes»; задание не получает SIGPIPE,
       в `end exit=` — код задания; замок `flock -n` берётся до ротации журнала, и запуск поверх
       идущего пишет пропуск, не переименовывая журнал. `go test ./internal/deploy -run TestRunner`.
       На boks-lab2: приложение `alpine:3.20` с `command: [sleep, infinity]` и расписанием
       `* * * * *` `head -c 2097152 /dev/zero | tr '\0' z; echo done >&2; exit 5` — после
       срабатывания cron в `jobs/big.log` ровно 1048576 байт `z`, «dropped: about 1048581 more
-      bytes» (1 MiB + `done\n` из stderr), `end exit=5`, `jobs/big.out` нет
+      bytes» (1 MiB + `done\n` из stderr), `end exit=5`, `jobs/big.out` нет; второе расписание
+      `echo step1; sleep 20; echo step2; exit 3` — `step1` в `jobs/slow.log` через 7 с после
+      старта, во время сна
 - [ ] **B1** — idna
 - [ ] **G3** — `boks proxy upgrade`
 - [ ] **B9** — подтверждение reload через admin API
