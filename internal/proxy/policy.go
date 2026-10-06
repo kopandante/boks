@@ -154,8 +154,8 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	// The policy being replaced goes into the history first if it is not there: a run whose history
 	// write failed after Caddy took its policy left none, and once replaced, that revision could not
 	// be rolled back to, nor applied again past the floor.
+	var prev Policy
 	if prevPresent {
-		var prev Policy
 		if err := json.Unmarshal([]byte(prevBody), &prev); err != nil {
 			return fmt.Errorf("reading %s: %w", policyPath(), err)
 		}
@@ -183,7 +183,10 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if err != nil {
 		err = fmt.Errorf("recording the server's policy: %w", err)
 	} else {
-		_, err = converge(ctx, r, log, fs, false, fmt.Sprintf("the server's policy, revision %d", p.Revision))
+		// A new policy reloads by force: a run cut after Caddy took its policy leaves caddy.json behind
+		// it, and a rollback to the policy before would match that file and leave Caddy where it is.
+		force := prevPresent && !SamePolicy(prev, p)
+		_, err = converge(ctx, r, log, fs, force, fmt.Sprintf("the server's policy, revision %d", p.Revision))
 	}
 	if err != nil {
 		back := context.WithoutCancel(ctx)

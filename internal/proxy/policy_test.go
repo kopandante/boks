@@ -277,6 +277,56 @@ func TestSetPolicyKeepsTheReplacedRevisionInTheHistory(t *testing.T) {
 	if !ok || !strings.Contains(h, `"floor": 0`) || !strings.Contains(h, "telegrambot") {
 		t.Errorf("want revision 1 kept in the history before it was replaced: %q", h)
 	}
+	// Kept before anything changes: a history write that fails leaves the policy and the proxy as they were.
+	d2 := newDisk()
+	if _, err := SetRoutes(context.Background(), d2, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	d2.files[ServerDir+"/policy.json"] = string(marshal(habsida))
+	if _, err := converge(context.Background(), d2, io.Discard, nil, false, "test"); err != nil {
+		t.Fatal(err)
+	}
+	before, applied := d2.files[ServerDir+"/policy.json"], d2.files[Dir+"/caddy.json"]
+	d2.lost["upload "+ServerDir+"/history/1.json"] = errors.New("connection reset")
+	d2.calls = nil
+	if err := SetPolicy(context.Background(), d2, io.Discard, next); err == nil {
+		t.Fatal("want the failed history write reported")
+	}
+	if d2.files[ServerDir+"/policy.json"] != before || d2.files[Dir+"/caddy.json"] != applied || d2.ran(reloadNext) {
+		t.Errorf("want nothing changed when the replaced revision could not be kept: %v", d2.calls)
+	}
+}
+
+// A rollback after a run cut once Caddy took its policy, before caddy.json was recorded: the policy put
+// back matches the stale caddy.json, and only a forced reload takes Caddy off the cut run's policy.
+func TestSetPolicyReloadsANewPolicyByForce(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPolicy(context.Background(), d, io.Discard, habsida); err != nil {
+		t.Fatal(err)
+	}
+	next := habsida
+	next.Revision, next.Floor, next.Block = 2, 2, nil
+	d.fail["mv "+Dir+"/caddy.next.json"] = errors.New("killed")
+	d.fail["docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json --force"] = errors.New("killed")
+	_ = SetPolicy(context.Background(), d, io.Discard, next) // cut: restore fails too, as a killed run would leave it
+	d.fail = map[string]error{}
+	d.files[ServerDir+"/policy.json"] = string(marshal(Policy{Revision: 2, Floor: 2, Allow: next.Allow}))
+	back := habsida
+	back.Floor = 2
+	d.calls = nil
+	if err := SetPolicy(context.Background(), d, io.Discard, back); err != nil {
+		t.Fatal(err)
+	}
+	if !d.ran(reloadNext + " --force") {
+		t.Errorf("want the policy put back reloaded by force: %v", d.calls)
+	}
+	d.calls = nil
+	if err := SetPolicy(context.Background(), d, io.Discard, back); err != nil || d.ran(reloadNext) {
+		t.Errorf("want a repeat of the policy the proxy runs to reload nothing: %v %v", err, d.calls)
+	}
 }
 
 // A policy that cannot be read stops a deploy before any reload: read as none, the reload would drop
