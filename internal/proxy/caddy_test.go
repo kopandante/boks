@@ -949,3 +949,60 @@ func TestFragmentsCarryTheirFormat(t *testing.T) {
 		t.Errorf("want a newer format refused, got %v", err)
 	}
 }
+
+// Apps routing one host in Unicode and in punycode are refused like apps routing one host twice:
+// Caddy would give it to whichever route came first. Fragments written before boks compared this way
+// are caught too — the check runs on every assembly.
+func TestConfigRefusesOneHostInTwoSpellings(t *testing.T) {
+	_, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "пример.рф", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "xn--e1afmkfd.XN--P1AI", Dial: "b:1"}}}})
+	if err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
+		t.Errorf("want the host refused, got %v", err)
+	}
+}
+
+// Two spellings of one host are one host everywhere the config names hosts, not only in the duplicate
+// check: its TLS mode, its place in the order, the hosts a wildcard leaves out, and each matcher, which
+// Caddy refuses when it names one host twice.
+func TestConfigTreatsTwoSpellingsAsOneHost(t *testing.T) {
+	if _, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "XN--E1AFMKFD.xn--p1ai", Dial: "a:1", TLS: true}}},
+		{App: "b", Routes: []Route{{Host: "пример.рф", Path: "/b", Dial: "b:1"}}}}); err == nil ||
+		!strings.Contains(err.Error(), "with TLS by a and without it by b") {
+		t.Errorf("want one host with and without TLS refused, got %v", err)
+	}
+	// By spelling the punycode bare host sorts first ('x' before Cyrillic) and would take the path's requests.
+	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "xn--e1afmkfd.xn--p1ai", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "пример.рф", Path: "/images", Dial: "b:1"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := json.Marshal(dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)[0].(map[string]any)["match"])
+	if string(first) != `[{"host":["пример.рф"],"path":["/images","/images/*"]}]` {
+		t.Errorf("want the path before the bare host whatever the spelling: %s", first)
+	}
+	cert := &CertFiles{Certificate: "/certs/boks/x.crt", Key: "/certs/boks/x.key"}
+	b, err = Config(Policy{}, []Fragment{
+		{App: "plain", Routes: []Route{{Host: "*.пример.рф", Dial: "p:1"}}},
+		{App: "tls", Routes: []Route{
+			{Host: "api.пример.рф", Path: "/one", Dial: "t:1", TLS: true, Cert: cert},
+			{Host: "api.xn--e1afmkfd.xn--p1ai", Path: "/two", Dial: "t:2", TLS: true, Cert: cert},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decoded(t, b)
+	all, _ := json.Marshal(m)
+	for _, want := range []string{
+		`"not":[{"host":["api.пример.рф"]}]`, // the plain wildcard leaves the TLS host out, once
+		`"skip_certificates":["api.пример.рф"]`,
+	} {
+		if !strings.Contains(string(all), want) {
+			t.Errorf("want %s in %s", want, all)
+		}
+	}
+	redir, _ := json.Marshal(dig(m, "apps", "http", "servers", "http", "routes").([]any)[1].(map[string]any)["match"])
+	if string(redir) != `[{"host":["api.пример.рф"]}]` {
+		t.Errorf("want the TLS host redirected, named once: %s", redir)
+	}
+}
