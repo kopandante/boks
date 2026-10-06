@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -132,11 +133,14 @@ func startNew(ctx context.Context, r remote.Runner, log io.Writer, image, abs st
 // putBack returns the old proxy to service after cause stopped the swap, from what the server holds
 // rather than from the step that failed: an error over SSH does not prove docker did not act, so a
 // stop or a rename may have gone through all the same. The old proxy aside means whatever stands
-// under the proxy's name is the new one: removed, and the old one renamed back. Then it is started
-// and asked to answer.
+// under the proxy's name is the new one: removed, and the old one renamed back. Otherwise the old
+// one is still under its name, and a stop whose reply was lost may still be under way — docker goes
+// on with it, and a start meanwhile does nothing — so it is stopped to the end first. Then it is
+// started and asked to answer.
 func putBack(ctx context.Context, r remote.Runner, current string, cause error) error {
 	ctx = context.WithoutCancel(ctx)
 	restore := func() error {
+		var stopErr error
 		aside, err := exists(ctx, r, asideName)
 		if err != nil {
 			return err
@@ -152,11 +156,17 @@ func putBack(ctx context.Context, r remote.Runner, current string, cause error) 
 			if _, err := r.Run(ctx, "docker", "rename", asideName, Container); err != nil {
 				return err
 			}
+		} else {
+			// Whether this stop fails too is told by whether the proxy answers once started.
+			_, stopErr = r.Run(ctx, "docker", "stop", Container)
 		}
 		if _, err := r.Run(ctx, "docker", "start", Container); err != nil {
-			return err
+			return errors.Join(stopErr, err)
 		}
-		return awaitAnswer(ctx, r)
+		if err := awaitAnswer(ctx, r); err != nil {
+			return errors.Join(stopErr, err)
+		}
+		return nil
 	}
 	if err := restore(); err != nil {
 		return fmt.Errorf("%w; putting the old proxy back failed too: %v — see `docker ps -a --filter name=%s`, "+

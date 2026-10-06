@@ -257,6 +257,23 @@ func TestUpgradeProxyJournalsTheSwapAlone(t *testing.T) {
 		t.Errorf("a failed swap: want it journaled failed, got %v %s", err, f.appends[serverLog])
 	}
 
+	// A run cut after the new proxy answered, before its entry closed: the retry finds the image in
+	// place and closes that upgrade, and only that one.
+	for open, want := range map[string]bool{
+		`{"op":"1","action":"proxy upgrade","from":"caddy:old","to":"caddy:new","started_at":"2026-01-01T00:00:00Z"}`: true,
+		`{"op":"1","action":"proxy upgrade","from":"caddy:new","to":"caddy:old","started_at":"2026-01-01T00:00:00Z"}`: false,
+		`{"op":"1","action":"server apply","from":"3","to":"4","started_at":"2026-01-01T00:00:00Z"}`:                  false,
+	} {
+		f = upgradeFake()
+		f.out[proxyImage] = "caddy:new"
+		f.out["sh -c cat '.boks/_server/journal.jsonl'"] = open
+		err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed)
+		if closed := strings.Contains(f.appends[serverLog], `{"op":"1","finished_at":`); err != nil || closed != want || f.has("docker stop") ||
+			strings.Contains(f.appends[serverLog], `"started_at"`) {
+			t.Errorf("already runs, open %s: want closed=%v and nothing begun, got %v %s", open, want, err, f.appends[serverLog])
+		}
+	}
+
 	f = upgradeFake()
 	f.out["sh -c cat '.boks/_server/journal.jsonl'"] = `{"op":"1","action":"proxy upgrade","from":"a","to":"b","started_at":"2026-01-01T00:00:00Z"}`
 	if err := UpgradeProxy(context.Background(), f, io.Discard, "caddy:new", fixed); err != nil || !strings.Contains(f.appends[serverLog], `{"op":"1","finished_at":`) ||

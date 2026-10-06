@@ -17,15 +17,19 @@ type box struct{ state, image, kind string }
 // swap is a server for an upgrade that keeps its containers, so that each step acts on what the ones
 // before it left: docker's name filter is a regular expression, as docker reads it. fail refuses a
 // command by prefix and does nothing; lost does it and then fails, as a reply lost over SSH would.
-// only refuses by prefix while the container under the proxy's name is made from newImage. Every
+// only refuses by prefix while the container under the proxy's name is made from newImage. slow
+// makes the proxy's stop fail in its reply while docker is still at it: the container goes on
+// running, a start meanwhile does nothing, and the stop lands after it — or with the next stop. Every
 // other command answers by its longest prefix in out.
 type swap struct {
-	boxes map[string]box
-	out   map[string]string
-	fail  map[string]error
-	only  map[string]error
-	lost  map[string]bool
-	calls []string
+	boxes    map[string]box
+	out      map[string]string
+	fail     map[string]error
+	only     map[string]error
+	lost     map[string]bool
+	slow     bool
+	stopping bool
+	calls    []string
 }
 
 const (
@@ -62,6 +66,18 @@ func (s *swap) Run(_ context.Context, args ...string) (string, error) {
 			return "", err
 		}
 	}
+	if s.slow && cmd == "docker stop "+Container && !s.stopping {
+		s.stopping = true
+		return "", errors.New("connection lost")
+	}
+	if s.stopping && cmd == "docker start "+Container {
+		s.stopping = false
+		b := s.boxes[Container]
+		b.state = "exited"
+		s.boxes[Container] = b
+		return "", nil
+	}
+	s.stopping = s.stopping && cmd != "docker stop "+Container
 	out, err := s.act(cmd, args)
 	for p := range s.lost {
 		if strings.HasPrefix(cmd, p) {
@@ -265,6 +281,7 @@ func TestUpgradePutsTheOldProxyBack(t *testing.T) {
 		"a network does not connect":  func(s *swap) { s.fail["docker network connect"] = errors.New("network not found") },
 		"the stop fails":              func(s *swap) { s.fail["docker stop"] = errors.New("timeout") },
 		"the stop's reply is lost":    func(s *swap) { s.lost["docker stop"] = true },
+		"the stop is still under way": func(s *swap) { s.slow = true },
 		"the rename fails":            func(s *swap) { s.fail["docker rename boks-proxy boks-proxy.old"] = errors.New("refused") },
 		"the rename's reply is lost":  func(s *swap) { s.lost["docker rename boks-proxy boks-proxy.old"] = true },
 	}

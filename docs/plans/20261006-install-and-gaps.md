@@ -72,7 +72,7 @@ R4 (`20261002-small-box-reality.md`) и G3 (`20261006-shchr-gaps.md`).
       (admin API, `tcp_migrate_req`), при неудаче возвращается старый — по контейнерам на сервере,
       а не по шагу (ответ docker мог потеряться по дороге); остаток оборванной подмены — отказ с
       точной командой, и раньше, чем «already runs». `proxy boot` работающий прокси не трогает, но называет расхождение
-      образов. `go test ./internal/proxy -run 'TestUpgrade|TestBootNames'`. На boks-lab2 из
+      образов. `go test ./internal/proxy ./internal/deploy -run 'Upgrade|BootNames'`. На boks-lab2 из
       каталога с `boks.yml` приложения `idn1` и нужным `proxy_image`, зонд
       `GET http://<адрес>/` с `Host: xn--e1aybc.lab2.test` каждые 20 мс: `proxy boot` при
       `caddy:2.11.7` — предупреждение, прокси не тронут; `proxy upgrade` на `caddy:2.6-alpine` —
