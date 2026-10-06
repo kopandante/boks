@@ -629,12 +629,13 @@ func (c *Config) validateLists() error {
 		if seenName[p.Name] {
 			return fmt.Errorf("ports: duplicate name %q", p.Name)
 		}
-		// Two ports on one host would be two routes for one host: the proxy would send it to the
-		// first and never to the second.
-		if seenHost[p.Host+" "+p.Path] {
+		// Two ports on one host and path would be two routes for one: the proxy would send it to the
+		// first and never to the second. The proxy matches hosts and paths without regard to case.
+		route := strings.ToLower(p.Host + " " + p.Path)
+		if seenHost[route] {
 			return fmt.Errorf("ports: duplicate host %q", p.Host+p.Path)
 		}
-		seenName[p.Name], seenHost[p.Host+" "+p.Path] = true, true
+		seenName[p.Name], seenHost[route] = true, true
 	}
 	for _, v := range c.Volumes {
 		if err := validateVolume(v); err != nil {

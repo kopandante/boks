@@ -11,7 +11,6 @@ import (
 	"io"
 	"path"
 	"reflect"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -115,14 +114,33 @@ func Config(fragments []Fragment) ([]byte, error) {
 		r   Route
 	}
 	var all []entry
+	// Caddy matches hosts and paths without regard to case, so the same host and path in other letters
+	// is the same route.
 	owner := map[string]string{}
+	// A host is served with TLS or without it, whichever app names it: a path without TLS on a host
+	// whose other paths have it would be routed on 80 only, and its HTTPS requests would go to the
+	// host's other routes.
+	type mode struct {
+		app string
+		tls bool
+	}
+	modes := map[string]mode{}
 	for _, f := range fragments {
 		for _, r := range f.Routes {
-			key := strings.ToLower(r.Host) + " " + r.Path
+			host := strings.ToLower(r.Host)
+			key := host + " " + strings.ToLower(r.Path)
 			if o, ok := owner[key]; ok {
 				return nil, fmt.Errorf("host %s%s is routed by both %s and %s", r.Host, r.Path, o, f.App)
 			}
 			owner[key] = f.App
+			if m, ok := modes[host]; ok && m.tls != r.TLS {
+				with, without := m.app, f.App
+				if r.TLS {
+					with, without = f.App, m.app
+				}
+				return nil, fmt.Errorf("host %s is served with TLS by %s and without it by %s: one host is one or the other", r.Host, with, without)
+			}
+			modes[host] = mode{f.App, r.TLS}
 			all = append(all, entry{f.App, r})
 		}
 	}
@@ -135,8 +153,9 @@ func Config(fragments []Fragment) ([]byte, error) {
 		if wa, wb := strings.HasPrefix(a.Host, "*."), strings.HasPrefix(b.Host, "*."); wa != wb {
 			return wb
 		}
-		if a.Host != b.Host {
-			return a.Host < b.Host
+		// In one case, or a bare host in capitals would sort before, and take, a path of the same host.
+		if ha, hb := strings.ToLower(a.Host), strings.ToLower(b.Host); ha != hb {
+			return ha < hb
 		}
 		if len(a.Path) != len(b.Path) {
 			return len(a.Path) > len(b.Path)
@@ -279,6 +298,8 @@ type (
 		DisableRedirects bool     `json:"disable_redirects,omitempty"`
 	}
 	caddyRoute struct {
+		// Group: of the routes of one group in a subroute, only the first that matches runs.
+		Group    string    `json:"group,omitempty"`
 		Match    []match   `json:"match,omitempty"`
 		Handle   []handler `json:"handle"`
 		Terminal bool      `json:"terminal"`
@@ -298,10 +319,13 @@ type (
 		// Caddy names both "headers".
 		Headers any `json:"headers,omitempty"`
 		// rewrite
+		URI             string          `json:"uri,omitempty"`
 		StripPathPrefix string          `json:"strip_path_prefix,omitempty"`
 		PathRegexp      []regexpReplace `json:"path_regexp,omitempty"`
 		// static_response
 		StatusCode int `json:"status_code,omitempty"`
+		// subroute
+		Routes []caddyRoute `json:"routes,omitempty"`
 	}
 	proxyHeaders struct {
 		Request  *headerOps `json:"request,omitempty"`
@@ -351,7 +375,16 @@ func routeHandle(r Route) []handler {
 	case r.StripPath:
 		hs = append(hs, handler{Handler: "rewrite", StripPathPrefix: r.Path})
 	case r.PathRewrite != "":
-		hs = append(hs, handler{Handler: "rewrite", PathRegexp: []regexpReplace{{Find: "^" + regexp.QuoteMeta(r.Path), Replace: r.PathRewrite}}})
+		// The rewrite must take every request the path matcher let in, and Caddy matches paths without
+		// regard to case or escapes (`/API/x`, `/%61pi/x`): a regexp on the escaped path would let those
+		// through unrewritten. strip_path_prefix compares the way the matcher does, so the prefix is
+		// stripped and the new one put in front; the path itself alone is replaced whole, so `/api`
+		// becomes `/img`, not `/img/`. In the replacement `$` is literal, not a regexp group.
+		hs = append(hs, handler{Handler: "subroute", Routes: []caddyRoute{
+			{Group: "path_rewrite", Match: []match{{Path: []string{r.Path}}}, Handle: []handler{{Handler: "rewrite", URI: r.PathRewrite}}},
+			{Group: "path_rewrite", Handle: []handler{{Handler: "rewrite", StripPathPrefix: r.Path,
+				PathRegexp: []regexpReplace{{Find: "^/", Replace: strings.ReplaceAll(r.PathRewrite, "$", "$$") + "/"}}}}},
+		}})
 	}
 	// RFC 7239 Forwarded is the visitor's to forge, and Caddy, unlike kamal-proxy, passes it on; the
 	// port's own header changes come after.

@@ -158,6 +158,9 @@ func TestConfigServesTLSAndPlainHostsApart(t *testing.T) {
 	if l := dig(https, "listen").([]any); l[0] != ":443" || len(dig(https, "routes").([]any)) != 4 {
 		t.Errorf("want the three TLS hosts on 443, then the 404 for any other: %v", https)
 	}
+	if last, _ := json.Marshal(dig(https, "routes").([]any)[3]); string(last) != `{"handle":[{"handler":"static_response","status_code":404}],"terminal":true}` {
+		t.Errorf("want HTTPS for a host no route names answered 404: %s", last)
+	}
 	if p, _ := json.Marshal(dig(https, "protocols")); string(p) != `["h1","h2"]` {
 		t.Errorf("want no HTTP/3 on a port whose udp is not published: %s", p)
 	}
@@ -336,23 +339,30 @@ func TestSetRoutesCatchesUpALaggingFragment(t *testing.T) {
 // A lagging fragment that differs from the new routes only in what C2–C4 added — the path, the
 // rewrite, a header — is still caught up: it is what the next run of any app assembles from.
 func TestSetRoutesCatchesUpAFragmentThatDiffersOnlyInRouting(t *testing.T) {
-	routed := []Route{{Host: "demo.example.com", Path: "/api", StripPath: true, Dial: "demo:3000",
-		Headers: &Headers{Response: map[string]string{"X-Content-Type-Options": "nosniff"}}}}
-	for name, old := range map[string][]Route{
-		"path":    {{Host: "demo.example.com", Path: "/v1", StripPath: true, Dial: "demo:3000", Headers: routed[0].Headers}},
-		"strip":   {{Host: "demo.example.com", Path: "/api", Dial: "demo:3000", Headers: routed[0].Headers}},
-		"headers": {{Host: "demo.example.com", Path: "/api", StripPath: true, Dial: "demo:3000"}},
+	nosniff := &Headers{Response: map[string]string{"X-Content-Type-Options": "nosniff"}}
+	stripped := []Route{{Host: "demo.example.com", Path: "/api", StripPath: true, Dial: "demo:3000", Headers: nosniff}}
+	rewritten := []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/img", Dial: "demo:3000",
+		Headers: &Headers{Request: map[string]string{"Cookie": ""}, Response: map[string]string{"X-Content-Type-Options": "nosniff"}}}}
+	for name, c := range map[string]struct{ routed, old []Route }{
+		"path":    {stripped, []Route{{Host: "demo.example.com", Path: "/v1", StripPath: true, Dial: "demo:3000", Headers: nosniff}}},
+		"strip":   {stripped, []Route{{Host: "demo.example.com", Path: "/api", Dial: "demo:3000", Headers: nosniff}}},
+		"headers": {stripped, []Route{{Host: "demo.example.com", Path: "/api", StripPath: true, Dial: "demo:3000"}}},
+		"rewrite": {rewritten, []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/old", Dial: "demo:3000", Headers: rewritten[0].Headers}}},
+		"request header value": {rewritten, []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/img", Dial: "demo:3000",
+			Headers: &Headers{Request: map[string]string{"Cookie": "x"}, Response: rewritten[0].Headers.Response}}}},
+		"response header value": {rewritten, []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/img", Dial: "demo:3000",
+			Headers: &Headers{Request: rewritten[0].Headers.Request, Response: map[string]string{"X-Content-Type-Options": ""}}}}},
 	} {
 		d := newDisk()
-		body, _ := Config([]Fragment{{App: "demo", Routes: routed}})
+		body, _ := Config([]Fragment{{App: "demo", Routes: c.routed}})
 		d.files[Dir+"/caddy.json"] = string(body)
-		frag, _ := json.MarshalIndent(Fragment{App: "demo", Routes: old}, "", "  ")
+		frag, _ := json.MarshalIndent(Fragment{App: "demo", Routes: c.old}, "", "  ")
 		d.files[Dir+"/routes/demo.json"] = string(frag) + "\n"
-		if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", routed); err != nil {
+		if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", c.routed); err != nil {
 			t.Fatal(err)
 		}
 		fs, _ := Fragments(context.Background(), d)
-		if !reflect.DeepEqual(Of(fs, "demo"), routed) {
+		if !reflect.DeepEqual(Of(fs, "demo"), c.routed) {
 			t.Errorf("%s: want the fragment caught up, got %+v", name, Of(fs, "demo"))
 		}
 	}
@@ -731,6 +741,39 @@ func TestConfigOrdersRoutesSoTheMostSpecificWins(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
 		t.Errorf("want a refusal of one host and path routed twice, got %v", err)
 	}
+	// Caddy matches paths without regard to case: the same path in capitals is the same route.
+	if _, err := Config([]Fragment{
+		{App: "a", Routes: []Route{{Host: "h.example.com", Path: "/img", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "h.example.com", Path: "/Img", Dial: "b:1"}}},
+	}); err == nil || !strings.Contains(err.Error(), "routed by both a and b") {
+		t.Errorf("want a refusal of one path in two cases, got %v", err)
+	}
+	// A bare host in capitals still goes after a path of the same host; by spelling it would sort
+	// first and take the path's requests.
+	b, err = Config([]Fragment{
+		{App: "a", Routes: []Route{{Host: "API.example.com", Dial: "a:1"}}},
+		{App: "b", Routes: []Route{{Host: "api.example.com", Path: "/images", Dial: "b:1"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := json.Marshal(dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)[0].(map[string]any)["match"])
+	if string(first) != `[{"host":["api.example.com"],"path":["/images","/images/*"]}]` {
+		t.Errorf("want the path before the bare host whatever the case: %s", first)
+	}
+}
+
+// Routes of one host from different apps share its TLS mode: a path without TLS on a TLS host would
+// be served on 80 alone, and HTTPS for it would go to the host's other routes.
+func TestConfigRefusesAHostWithAndWithoutTLS(t *testing.T) {
+	for _, fs := range [][]Fragment{
+		{{App: "a", Routes: []Route{{Host: "h.example.com", Dial: "a:1", TLS: true}}}, {App: "b", Routes: []Route{{Host: "h.example.com", Path: "/b", Dial: "b:1"}}}},
+		{{App: "b", Routes: []Route{{Host: "h.example.com", Path: "/b", Dial: "b:1"}}}, {App: "a", Routes: []Route{{Host: "H.example.com", Dial: "a:1", TLS: true}}}},
+	} {
+		if _, err := Config(fs); err == nil || !strings.Contains(err.Error(), "with TLS by a and without it by b") {
+			t.Errorf("want the mixed host refused, got %v", err)
+		}
+	}
 }
 
 // A route rewrites the path when it asks — strip the prefix, or put another in its place, measured on
@@ -738,7 +781,7 @@ func TestConfigOrdersRoutesSoTheMostSpecificWins(t *testing.T) {
 func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 	b, err := Config([]Fragment{{App: "gw", Routes: []Route{
 		{Host: "cars.example.com", Path: "/api/cn/images", PathRewrite: "/img", Dial: "gw:8080",
-			Headers: &Headers{Request: map[string]string{"Cookie": ""}, Response: map[string]string{"Set-Cookie": "", "X-Content-Type-Options": "nosniff"}}},
+			Headers: &Headers{Request: map[string]string{"Cookie": "", "X-Gateway": "images"}, Response: map[string]string{"Set-Cookie": "", "X-Content-Type-Options": "nosniff"}}},
 		{Host: "cars.example.com", Path: "/old", StripPath: true, Dial: "gw:8081"},
 	}}})
 	if err != nil {
@@ -749,8 +792,12 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 		h, _ := json.Marshal(routes[i].(map[string]any)["handle"])
 		return string(h)
 	}
-	if h := handle(0); h != `[{"handler":"rewrite","path_regexp":[{"find":"^/api/cn/images","replace":"/img"}]},`+
-		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"]},"response":{"delete":["Set-Cookie"],`+
+	// The path itself is replaced whole; below it the prefix is stripped the way the matcher compares
+	// (no case, no escapes) and the new one put in front.
+	if h := handle(0); h != `[{"handler":"subroute","routes":[`+
+		`{"group":"path_rewrite","handle":[{"handler":"rewrite","uri":"/img"}],"match":[{"path":["/api/cn/images"]}],"terminal":false},`+
+		`{"group":"path_rewrite","handle":[{"handler":"rewrite","path_regexp":[{"find":"^/","replace":"/img/"}],"strip_path_prefix":"/api/cn/images"}],"terminal":false}]},`+
+		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Gateway":["images"]}},"response":{"delete":["Set-Cookie"],`+
 		`"set":{"X-Content-Type-Options":["nosniff"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
 		`"upstreams":[{"dial":"gw:8080"}]}]` {
 		t.Errorf("unexpected rewrite and headers: %s", h)
@@ -759,9 +806,9 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 		`"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},"upstreams":[{"dial":"gw:8081"}]}]` {
 		t.Errorf("unexpected strip: %s", h)
 	}
-	// A path with regexp characters is matched literally.
-	q, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "h", Path: "/v1.0", PathRewrite: "/v", Dial: "a:1"}}}})
-	if !strings.Contains(string(q), `"find": "^/v1\\.0"`) {
-		t.Errorf("want the path quoted in the regexp: %s", q)
+	// `$` in the new prefix is a character of the path, not a regexp group.
+	q, _ := Config([]Fragment{{App: "a", Routes: []Route{{Host: "h", Path: "/v1.0", PathRewrite: "/v$1", Dial: "a:1"}}}})
+	if !strings.Contains(string(q), `"replace": "/v$$1/"`) || !strings.Contains(string(q), `"uri": "/v$1"`) {
+		t.Errorf("want $ literal in the rewrite: %s", q)
 	}
 }
