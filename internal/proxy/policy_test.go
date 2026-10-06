@@ -164,3 +164,17 @@ func TestSetPolicyWritesTheFilesForAProxyThatIsNotRunning(t *testing.T) {
 		t.Errorf("want files only: %v", d.calls)
 	}
 }
+
+// A stop-first deploy asks Caddy about the config it will load, policy included: asked without it,
+// the check would pass a config the reload then assembles differently.
+func TestValidateAsksWithThePolicy(t *testing.T) {
+	d := newDisk()
+	d.files[ServerDir+"/policy.json"] = string(marshal(habsida))
+	d.fail["rm -f "+Dir+"/caddy.check.json"] = errors.New("kept for the test")
+	if err := Validate(context.Background(), d, "demo", web); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.files[Dir+"/caddy.check.json"], `"status_code": 403`) {
+		t.Errorf("want the policy in the config Caddy is asked about: %s", d.files[Dir+"/caddy.check.json"])
+	}
+}
