@@ -597,6 +597,8 @@ func TestParsePortRouting(t *testing.T) {
 		port("headers: {request: {x-forwarded-proto: x}}"):                                              "set by the proxy",
 		port("headers: {request: {forwarded: ''}}"):                                                     "set by the proxy",
 		port("headers: {response: {X-Forwarded-For: x}}"):                                               "set by the proxy",
+		port("headers: {request: {X-Gw: \"images\\n\"}}"):                                               "control character",
+		port("headers: {response: {X-A: \"a\\rb\"}}"):                                                   "control character",
 		app + "ports: [{name: a, port: 1, host: h, path: /x}, {name: b, port: 2, host: H, path: /X}]\n": "duplicate host",
 		app + "ports: [{name: a, port: 1, host: 'a.*.example.com'}]\n":                                  "wildcard",
 		app + "ports: [{name: a, port: 1, host: '*.*.example.com'}]\n":                                  "wildcard",
@@ -611,6 +613,10 @@ func TestParsePortRouting(t *testing.T) {
 	// A certificate covers a host whatever the case of either.
 	if _, err := Parse([]byte(app + "tls: true\ncert: {domains: ['*.Example.com'], dns: cloudflare, email: a@b.c}\nports: [{name: w, port: 1, host: '*.EXAMPLE.com'}]\n")); err != nil {
 		t.Errorf("a covered wildcard in other letters must parse: %v", err)
+	}
+	// A tab is allowed in a header value.
+	if _, err := Parse([]byte(port("headers: {response: {X-A: \"a\\tb\"}}"))); err != nil {
+		t.Errorf("a tab in a header value must parse: %v", err)
 	}
 	// A dot inside a segment is a name, not a dot segment.
 	if _, err := Parse([]byte(port("path: /.well-known/x..y, path_rewrite: /v1.0"))); err != nil {

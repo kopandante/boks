@@ -87,6 +87,12 @@ type Fragment struct {
 	Routes []Route `json:"routes"`
 }
 
+// FragmentFormat opens every fragment file boks writes, a number on its own line before the routes. The
+// boks of C1 reads the fragments as one stream of route objects and stops at the number with an error:
+// it would otherwise drop the paths, rewrites and header rules it does not know and reload the proxy
+// without them. A boks that finds a format newer than its own refuses the same way.
+const FragmentFormat = 2
+
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
 // appliedPath is the config the proxy runs: written only once Caddy has taken it, and loaded by a
@@ -488,10 +494,23 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 	var fs []Fragment
 	d := json.NewDecoder(strings.NewReader(out))
 	for {
-		var f Fragment
-		if err := d.Decode(&f); errors.Is(err, io.EOF) {
+		var v json.RawMessage
+		if err := d.Decode(&v); errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
+			return nil, fmt.Errorf("reading the proxy's routes: %w", err)
+		}
+		// The format a fragment opens with; one written before it was introduced has none.
+		var format int
+		if json.Unmarshal(v, &format) == nil {
+			if format > FragmentFormat {
+				return nil, fmt.Errorf("reading the proxy's routes: a route file has format %d, newer than this boks (%d) knows; "+
+					"update boks before changing this server", format, FragmentFormat)
+			}
+			continue
+		}
+		var f Fragment
+		if err := json.Unmarshal(v, &f); err != nil {
 			return nil, fmt.Errorf("reading the proxy's routes: %w", err)
 		}
 		fs = append(fs, f)
@@ -580,7 +599,7 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 		} else {
 			var frag []byte
 			if frag, err = json.MarshalIndent(Fragment{App: app, Routes: routes}, "", "  "); err == nil {
-				err = remote.UploadAtomic(ctx, r, append(frag, '\n'), fragmentPath(app))
+				err = remote.UploadAtomic(ctx, r, append(fmt.Appendf(nil, "%d\n", FragmentFormat), append(frag, '\n')...), fragmentPath(app))
 			}
 		}
 		if err != nil {

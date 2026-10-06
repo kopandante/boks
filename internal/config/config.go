@@ -735,9 +735,15 @@ func (p Port) validate() error {
 	}
 	if h := p.Headers; h != nil {
 		for side, m := range map[string]map[string]string{"request": h.Request, "response": h.Response} {
-			for name := range m {
+			for name, value := range m {
 				if !headerRe.MatchString(name) {
 					return fmt.Errorf("ports[%s]: headers.%s: %q is not a header name", p.Name, side, name)
+				}
+				// A line break, the usual one being what a YAML block scalar (`|`, `>`) keeps at the end,
+				// cannot go on the wire: Go refuses such a request (502 on every one) and drops such a
+				// response header over HTTP/2.
+				if strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 && r != '\t' || r == 0x7f }) {
+					return fmt.Errorf("ports[%s]: headers.%s.%s holds a control character, such as the line break a YAML block scalar ends with (use |- or >-)", p.Name, side, name)
 				}
 				// The proxy owns these (#48): a port that set them would hand the app what the visitor claims.
 				if l := strings.ToLower(name); strings.HasPrefix(l, "x-forwarded-") || l == "forwarded" {

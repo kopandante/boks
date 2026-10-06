@@ -737,6 +737,11 @@ func TestConfigOrdersRoutesSoTheMostSpecificWins(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("routes in this order:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
+	// Without a TLS host the last route on 80 is still the 404 for a host no route names.
+	routes := dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)
+	if last, _ := json.Marshal(routes[len(routes)-1]); string(last) != `{"handle":[{"handler":"static_response","status_code":404}],"terminal":true}` {
+		t.Errorf("want the 404 last on a plain-only server: %s", last)
+	}
 	// Host and path are unique together, across apps.
 	if _, err := Config([]Fragment{
 		{App: "a", Routes: []Route{{Host: "h.example.com", Path: "/x", Dial: "a:1"}}},
@@ -880,5 +885,38 @@ func TestUncleanPathFoldsLikeTheMatcher(t *testing.T) {
 		if l := strings.ToLower(string(r)); l != string(r) && strings.IndexFunc(l, func(c rune) bool { return c < 0x80 }) >= 0 && !re.MatchString("/"+string(r)) {
 			t.Errorf("%U lowercases to %q, which the strip would not fold, and is let through", r, l)
 		}
+	}
+}
+
+// A fragment file opens with its format, which the boks of C1 cannot read as routes and stops at —
+// rather than reload the proxy without the paths and header rules it does not know. Files written
+// before the format are read as they are; a newer format is refused.
+func TestFragmentsCarryTheirFormat(t *testing.T) {
+	d := newDisk()
+	routed := []Route{{Host: "demo.example.com", Path: "/api", PathRewrite: "/img", Dial: "demo:3000"}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "demo", routed); err != nil {
+		t.Fatal(err)
+	}
+	written := d.files[Dir+"/routes/demo.json"]
+	if !strings.HasPrefix(written, fmt.Sprintf("%d\n{", FragmentFormat)) {
+		t.Fatalf("want the format first: %q", written)
+	}
+	// What C1 does with it: decode the stream as fragments.
+	type c1Fragment struct {
+		App    string            `json:"app"`
+		Routes []json.RawMessage `json:"routes"`
+	}
+	var f c1Fragment
+	if err := json.NewDecoder(strings.NewReader(written)).Decode(&f); err == nil {
+		t.Errorf("an older boks must stop at the format, read %+v", f)
+	}
+	d.files[Dir+"/routes/old.json"] = `{"app": "old", "routes": [{"host": "old.example.com", "dial": "old:1", "tls": false}]}` + "\n"
+	fs, err := Fragments(context.Background(), d)
+	if err != nil || len(fs) != 2 || fs[0].App != "demo" || !reflect.DeepEqual(fs[0].Routes, routed) || fs[1].App != "old" {
+		t.Fatalf("want both fragments, with and without a format: %+v %v", fs, err)
+	}
+	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", FragmentFormat+1)
+	if _, err := Fragments(context.Background(), d); err == nil || !strings.Contains(err.Error(), "newer than this boks") {
+		t.Errorf("want a newer format refused, got %v", err)
 	}
 }
