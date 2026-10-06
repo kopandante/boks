@@ -48,21 +48,62 @@ func ApplyServer(ctx context.Context, r remote.Runner, log io.Writer, next proxy
 	})
 }
 
+// CheckApply asks a server, before anything changes on any server of the file, whether it takes next.
+func CheckApply(ctx context.Context, r remote.Runner, next proxy.Policy) error {
+	if _, err := policyProxy(ctx, r); err != nil {
+		return err
+	}
+	cur, err := proxy.ReadPolicy(ctx, r)
+	if err != nil {
+		return err
+	}
+	return CheckRevision(cur, next)
+}
+
 // RollbackServer puts back the policy of an earlier revision from the server's history. The floor
 // stays: a file of a revision the rollback undid is still refused, and the next edit is the one
 // after the highest ever applied.
 func RollbackServer(ctx context.Context, r remote.Runner, log io.Writer, rev int, o Options) error {
 	return withServer(ctx, r, log, o, "server rollback", func(cur proxy.Policy) (proxy.Policy, error) {
-		p, ok, err := proxy.History(ctx, r, rev)
+		p, err := policyOfRevision(ctx, r, rev)
 		if err != nil {
 			return p, err
-		}
-		if !ok {
-			return p, fmt.Errorf("this server never applied revision %d; nothing was changed", rev)
 		}
 		p.Revision, p.Floor = rev, cur.Floor
 		return p, nil
 	})
+}
+
+// CheckServerRollback asks a server, before anything changes on any server of the file, whether it has rev
+// to go back to: a server that joined the fleet later never applied it.
+func CheckServerRollback(ctx context.Context, r remote.Runner, rev int) error {
+	if _, err := policyProxy(ctx, r); err != nil {
+		return err
+	}
+	_, err := policyOfRevision(ctx, r, rev)
+	return err
+}
+
+func policyOfRevision(ctx context.Context, r remote.Runner, rev int) (proxy.Policy, error) {
+	p, ok, err := proxy.History(ctx, r, rev)
+	if err == nil && !ok {
+		err = fmt.Errorf("this server never applied revision %d; nothing was changed", rev)
+	}
+	return p, err
+}
+
+// policyProxy says whether the server's proxy runs. A policy is refused where kamal-proxy still serves:
+// it would be written for a Caddy that is not there and reported applied while no request is filtered.
+// Where no proxy runs yet, the policy is what Caddy loads when it starts.
+func policyProxy(ctx context.Context, r remote.Runner) (running bool, err error) {
+	state, kind, err := proxy.State(ctx, r)
+	if err != nil {
+		return false, err
+	}
+	if state != "" && kind != proxy.Kind {
+		return false, fmt.Errorf("%w; nothing was changed", proxy.NotCaddy())
+	}
+	return state == "running", nil
 }
 
 // withServer runs one change of the server's policy: under the admission lock, between a journal
@@ -76,6 +117,10 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 		return err
 	}
 	defer adm.release(ctx)
+	running, err := policyProxy(ctx, r)
+	if err != nil {
+		return err
+	}
 	cur, err := proxy.ReadPolicy(ctx, r)
 	if err != nil {
 		return err
@@ -98,6 +143,9 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	}
 	finish(ctx, r, log, serverJournal, op, "ok", o.Now())
 	fmt.Fprintf(log, "server policy: revision %d (%d blocks, %d allows)\n", next.Revision, len(next.Block), len(next.Allow))
+	if !running {
+		fmt.Fprintf(log, "  %s is not running on this server: nothing is filtered until it starts and loads this policy\n", proxy.Container)
+	}
 	return nil
 }
 

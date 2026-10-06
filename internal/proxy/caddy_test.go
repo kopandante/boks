@@ -21,14 +21,34 @@ type disk struct {
 	files map[string]string
 	ps    string // what `docker ps` prints for the proxy: "<state>\t<label>"
 	fail  map[string]error
+	// lost acts as asked and then answers with the error, once: an answer lost after the command ran.
+	lost  map[string]error
 	calls []string
 }
 
 func newDisk() *disk {
-	return &disk{files: map[string]string{}, ps: "running\tcaddy", fail: map[string]error{}}
+	return &disk{files: map[string]string{}, ps: "running\tcaddy", fail: map[string]error{}, lost: map[string]error{}}
 }
 
-func (d *disk) Run(_ context.Context, args ...string) (string, error) {
+func (d *disk) Run(ctx context.Context, args ...string) (string, error) {
+	out, err := d.run(ctx, args...)
+	if err == nil {
+		err = d.lose(strings.Join(args, " "))
+	}
+	return out, err
+}
+
+func (d *disk) lose(cmd string) error {
+	for prefix, err := range d.lost {
+		if strings.HasPrefix(cmd, prefix) {
+			delete(d.lost, prefix)
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *disk) run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	d.calls = append(d.calls, cmd)
 	for prefix, err := range d.fail {
@@ -67,7 +87,8 @@ func (d *disk) Run(_ context.Context, args ...string) (string, error) {
 	return "", nil
 }
 
-// Pipe takes an atomic upload: the destination is the last quoted token after `mv`.
+// Pipe takes an atomic upload: the destination is the last quoted token after `mv`. A lost answer
+// is keyed as the call is recorded: "upload <path>".
 func (d *disk) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
 	for prefix, err := range d.fail {
@@ -79,7 +100,7 @@ func (d *disk) Pipe(ctx context.Context, content []byte, args ...string) (string
 	_, dest, _ := strings.Cut(tail, "' '")
 	d.files[strings.Trim(dest, "'")] = string(content)
 	d.calls = append(d.calls, "upload "+strings.Trim(dest, "'"))
-	return "", nil
+	return "", d.lose("upload " + strings.Trim(dest, "'"))
 }
 
 func (d *disk) ran(prefix string) bool {

@@ -123,3 +123,58 @@ func TestRollbackServerRefusesARevisionNeverApplied(t *testing.T) {
 		t.Errorf("want a refusal before any write, got %v %v", err, f.uploads)
 	}
 }
+
+// A server whose boks-proxy is still kamal-proxy refuses a policy before anything changes: written for
+// a Caddy that is not there, it would be reported applied while no request is filtered.
+func TestApplyServerRefusesKamalProxy(t *testing.T) {
+	f := serverFake(t, proxy.Policy{})
+	f.out["docker ps -a --filter name=^boks-proxy$"] = "running\t"
+	err := ApplyServer(context.Background(), f, io.Discard, proxy.Policy{Revision: 1, Block: crawlers}, fixed)
+	if err == nil || !strings.Contains(err.Error(), "boks proxy migrate") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("want the kamal-proxy refusal, got %v", err)
+	}
+	if len(f.uploads) > 0 || len(f.appends) > 0 {
+		t.Errorf("want nothing written: %v %v", f.uploads, f.appends)
+	}
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 1}); err == nil {
+		t.Errorf("want the check before any server changes to refuse it too")
+	}
+	if err := CheckServerRollback(context.Background(), f, 1); err == nil {
+		t.Errorf("want the rollback check to refuse it too")
+	}
+}
+
+// Where no proxy runs yet the policy is written for Caddy to load when it starts, and the run says
+// that nothing is filtered until then.
+func TestApplyServerSaysWhenNoProxyRuns(t *testing.T) {
+	f := serverFake(t, proxy.Policy{})
+	f.out["docker ps -a --filter name=^boks-proxy$"] = ""
+	var log strings.Builder
+	if err := ApplyServer(context.Background(), f, &log, proxy.Policy{Revision: 1, Block: crawlers}, fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.uploads[policyFile] == "" || !strings.Contains(log.String(), "nothing is filtered until it starts") {
+		t.Errorf("want the policy written and the run to say it is not served yet: %s", log.String())
+	}
+	g := serverFake(t, proxy.Policy{})
+	log.Reset()
+	if err := ApplyServer(context.Background(), g, &log, proxy.Policy{Revision: 1, Block: crawlers}, fixed); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(log.String(), "not running") {
+		t.Errorf("a running proxy is not reported as stopped: %s", log.String())
+	}
+}
+
+// The check before any server changes refuses a rollback to a revision the server never applied.
+func TestCheckServerRollback(t *testing.T) {
+	f := serverFake(t, proxy.Policy{Revision: 5, Floor: 5})
+	if err := CheckServerRollback(context.Background(), f, 3); err == nil || !strings.Contains(err.Error(), "never applied revision 3") {
+		t.Errorf("want a refusal, got %v", err)
+	}
+	old, _ := json.Marshal(proxy.Policy{Revision: 3, Block: crawlers})
+	f.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(old)
+	if err := CheckServerRollback(context.Background(), f, 3); err != nil {
+		t.Errorf("want revision 3 taken: %v", err)
+	}
+}

@@ -34,3 +34,26 @@ func TestServerApplyAsksEveryServerFirst(t *testing.T) {
 		t.Errorf("a was changed before b was asked: %v", a.calls)
 	}
 }
+
+// A rollback asks every server too: b joined the fleet after revision 4, so a is not rolled back to it.
+func TestServerRollbackAsksEveryServerFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hist := "sh -c if [ -f '.boks/_server/history/4.json' ]"
+	a := &recorder{server: server{policyRead: "present\n{\"revision\":5,\"floor\":5}", hist: "present\n{\"revision\":4}"}}
+	b := &recorder{server: server{policyRead: "present\n{\"revision\":5,\"floor\":5}"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "rollback", path, "4"}, io.Discard, &errw); code != 1 {
+		t.Fatalf("want a refusal, got %d", code)
+	}
+	if !strings.Contains(errw.String(), "b: this server never applied revision 4") {
+		t.Errorf("want b named: %s", errw.String())
+	}
+	if a.ran("ln -sn") || len(a.stdin) > 0 {
+		t.Errorf("a was changed before b was asked: %v", a.calls)
+	}
+}

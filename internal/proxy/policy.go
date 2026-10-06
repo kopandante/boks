@@ -143,8 +143,8 @@ func domainsPattern(domains []string) string {
 // recorded before the reload: a run cut after Caddy took the config would otherwise leave the old
 // policy on disk, and the next run of any app would assemble from it and drop the filter without a
 // word. Recorded first, a cut run leaves the policy the proxy is moving to, and the next converge of
-// any run takes it there. A failed reload puts the previous policy back and reloads it by force — the
-// answer may have been lost after Caddy took the new one. The history is written last: it holds only
+// any run takes it there. A failed write or reload puts the previous policy back and reloads it by
+// force — the answer may have been lost after the file was replaced or Caddy took the new config. The history is written last: it holds only
 // revisions that were applied. The caller holds the server's admission lock.
 func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) error {
 	prevBody, prevPresent, err := readFile(ctx, r, policyPath())
@@ -161,10 +161,15 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", FragmentFormat), policyMarker()); err != nil {
 		return fmt.Errorf("marking the server's routes for this boks: %w", err)
 	}
-	if err := remote.UploadAtomic(ctx, r, marshal(p), policyPath()); err != nil {
-		return fmt.Errorf("recording the server's policy: %w", err)
+	// A failed write is put back as a failed reload is: its answer can be lost after the file was
+	// replaced, and left there the next run of any app would load the policy this run reported failed.
+	err = remote.UploadAtomic(ctx, r, marshal(p), policyPath())
+	if err != nil {
+		err = fmt.Errorf("recording the server's policy: %w", err)
+	} else {
+		_, err = converge(ctx, r, log, fs, false, fmt.Sprintf("the server's policy, revision %d", p.Revision))
 	}
-	if _, err := converge(ctx, r, log, fs, false, fmt.Sprintf("the server's policy, revision %d", p.Revision)); err != nil {
+	if err != nil {
 		back := context.WithoutCancel(ctx)
 		if prevPresent {
 			err = errors.Join(err, remote.UploadAtomic(back, r, []byte(prevBody), policyPath()))
@@ -172,7 +177,7 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 			err = errors.Join(err, rmErr)
 		}
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
-		return fmt.Errorf("the proxy did not take the policy; the previous one is back: %w", errors.Join(err, backErr))
+		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))
 	}
 	h := p
 	h.Floor = 0

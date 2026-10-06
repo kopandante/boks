@@ -387,26 +387,31 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return nil
 	}
+	// Every server is asked before any changes: a refusal halfway down the list would leave the fleet
+	// on two policies.
+	askAll := func(ask action) error {
+		for _, s := range sc.Servers {
+			if err := ask(ctx, connect(s)); err != nil {
+				return fmt.Errorf("%s: %w", s, err)
+			}
+		}
+		return nil
+	}
 	o := deploy.Options{Now: now}
 	switch {
 	case args[0] == "apply" && len(args) == 2:
 		next := policyOf(sc)
-		// Every server is asked before any changes: a refusal halfway down the list would leave
-		// the fleet on two policies.
-		for _, s := range sc.Servers {
-			cur, err := proxy.ReadPolicy(ctx, connect(s))
-			if err == nil {
-				err = deploy.CheckRevision(cur, next)
-			}
-			if err != nil {
-				return fmt.Errorf("%s: %w", s, err)
-			}
+		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next) }); err != nil {
+			return err
 		}
 		return on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) })
 	case args[0] == "rollback" && len(args) == 3:
 		rev, err := strconv.Atoi(args[2])
 		if err != nil || rev < 1 {
 			return fmt.Errorf("rollback needs a revision, a whole number from 1; `boks server status` shows the current one")
+		}
+		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckServerRollback(ctx, r, rev) }); err != nil {
+			return err
 		}
 		return on(func(ctx context.Context, r remote.Runner) error { return deploy.RollbackServer(ctx, r, out, rev, o) })
 	case args[0] == "status" && len(args) == 2:
