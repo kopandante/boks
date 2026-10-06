@@ -93,14 +93,8 @@ func Reshape(ctx context.Context, r remote.Runner, log io.Writer, next Policy) e
 	if err != nil {
 		return err
 	}
-	if next.Egress != nil {
-		mods, err := r.Run(ctx, "docker", "exec", Container, "caddy", "list-modules")
-		if err != nil {
-			return fmt.Errorf("asking the proxy for its modules: %w", err)
-		}
-		if !slices.Contains(strings.Fields(mods), "http.handlers.forward_proxy") {
-			return fmt.Errorf("the proxy runs %s, which has no forward proxy; `boks proxy upgrade` with boks's own image first, then apply again", image)
-		}
+	if err := CheckEgress(ctx, r, next); err != nil {
+		return err
 	}
 	if err := checkIdle(ctx, r); err != nil {
 		return err
@@ -121,6 +115,81 @@ func Reshape(ctx context.Context, r remote.Runner, log io.Writer, next Policy) e
 	}
 	fmt.Fprintf(log, "proxy: creating %s again for the egress port and hosts file — 80 and 443 are down until it answers\n", Container)
 	return swapProxy(ctx, r, log, image, image, abs, fs, want)
+}
+
+// CheckEgress refuses, before anything changes, an egress this server cannot run: a hosts file that is
+// not there — docker would refuse the new container after the old one stopped — a login the server
+// keeps no password for, and a running proxy without the forward proxy. `server apply` and `server
+// rollback` ask it of every server of the file before any changes, as they ask the revision.
+func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
+	e := p.Egress
+	if e == nil {
+		return nil
+	}
+	if e.HostsFile != "" {
+		out, err := r.Run(ctx, "sh", "-c", "[ -f "+remote.Quote(e.HostsFile)+" ] && echo file; true")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(out) != "file" {
+			return fmt.Errorf("egress: hosts_file %s is not a file on this server; nothing was changed", e.HostsFile)
+		}
+	}
+	if err := loadSecret(ctx, r, &p); err != nil {
+		return err
+	}
+	state, kind, err := State(ctx, r)
+	if err != nil || state != "running" || kind != Kind {
+		return err
+	}
+	mods, err := r.Run(ctx, "docker", "exec", Container, "caddy", "list-modules")
+	if err != nil {
+		return fmt.Errorf("asking the proxy for its modules: %w", err)
+	}
+	if !slices.Contains(strings.Fields(mods), "http.handlers.forward_proxy") {
+		image, err := Image(ctx, r)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("the proxy runs %s, which has no forward proxy; `boks proxy upgrade` with boks's own image first, then apply again", image)
+	}
+	return nil
+}
+
+// Drift is what of the running proxy the policy on the server does not see: a container in another
+// shape — a swap went through and the policy after it failed, or something other than boks made it —
+// and a hosts file replaced rather than written in place, which the proxy's mount still holds the old
+// copy of. Each is a line to warn with; a proxy that is not running drifts from nothing.
+func Drift(ctx context.Context, r remote.Runner, p Policy) ([]string, error) {
+	state, kind, err := State(ctx, r)
+	if err != nil || state != "running" || kind != Kind {
+		return nil, err
+	}
+	var out []string
+	want := ShapeOf(p)
+	have, err := currentShape(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if have != want {
+		out = append(out, fmt.Sprintf("the proxy publishes egress port %d and mounts hosts file %q, the policy needs %d and %q; "+
+			"`boks proxy upgrade` creates it again", have.EgressPort, have.HostsFile, want.EgressPort, want.HostsFile))
+	}
+	if want.HostsFile != "" && have.HostsFile == want.HostsFile {
+		host, err := r.Run(ctx, "stat", "-c", "%i", want.HostsFile)
+		if err != nil {
+			return out, err
+		}
+		inside, err := r.Run(ctx, "docker", "exec", Container, "stat", "-c", "%i", "/etc/hosts")
+		if err != nil {
+			return out, err
+		}
+		if strings.TrimSpace(host) != strings.TrimSpace(inside) {
+			out = append(out, fmt.Sprintf("%s was replaced, not written in place: the proxy resolves through the old copy until "+
+				"`docker restart %s` (80 and 443 are down meanwhile)", want.HostsFile, Container))
+		}
+	}
+	return out, nil
 }
 
 // validate asks the running Caddy whether it takes the config p and fs make, changing nothing.

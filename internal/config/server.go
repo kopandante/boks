@@ -239,8 +239,13 @@ func (e *Egress) validate() error {
 			return fmt.Errorf("ports: %d is not a TCP port", p)
 		}
 	}
-	if e.HostsFile != "" && !path.IsAbs(e.HostsFile) {
-		return fmt.Errorf("hosts_file: %q must be an absolute path on the server", e.HostsFile)
+	if e.HostsFile != "" {
+		if !path.IsAbs(e.HostsFile) {
+			return fmt.Errorf("hosts_file: %q must be an absolute path on the server", e.HostsFile)
+		}
+		// As docker records the mount's source: written otherwise, the proxy would never look like the
+		// container the policy needs, and every apply would create it again.
+		e.HostsFile = path.Clean(e.HostsFile)
 	}
 	return nil
 }

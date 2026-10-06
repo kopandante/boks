@@ -305,3 +305,15 @@ func TestApplyServerMakesTheProxyForEgressFirst(t *testing.T) {
 		t.Errorf("log: %s", log.String())
 	}
 }
+
+// An egress the server cannot run is refused when every server of the file is asked, before any changes:
+// found only by the swap, it would leave the servers before it on the new policy.
+func TestCheckApplyRefusesAnEgressTheProxyCannotRun(t *testing.T) {
+	f := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
+	f.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy"
+	f.out[proxyImage] = "caddy:2.11.7-alpine"
+	next := proxy.Policy{Revision: 2, Egress: &proxy.Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}}}
+	if err := CheckApply(context.Background(), f, next); err == nil || !strings.Contains(err.Error(), "no forward proxy") {
+		t.Errorf("want the stock image refused: %v", err)
+	}
+}

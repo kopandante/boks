@@ -230,3 +230,133 @@ func TestBootCreatesTheProxyInTheAppliedShape(t *testing.T) {
 		}
 	}
 }
+
+// A policy whose ports were lost is refused rather than given to the plugin, which reads no ports as
+// every port.
+func TestConfigEgressRefusesNoPorts(t *testing.T) {
+	noPorts := *encar
+	noPorts.Ports = nil
+	if _, err := Config(Policy{Revision: 1, Egress: &noPorts}, nil); err == nil || !strings.Contains(err.Error(), "no ports") {
+		t.Errorf("no ports: %v", err)
+	}
+}
+
+// A policy that failed to apply takes the previous password back with it: a rotation that did not go
+// through leaves the login the proxy still runs.
+func TestSetPolicyPutsTheSecretBack(t *testing.T) {
+	d := newDisk()
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: encar}); err != nil {
+		t.Fatal(err)
+	}
+	rotated := *encar
+	rotated.Password = "n3w"
+	d.fail[reloadNext] = errors.New("refused")
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: &rotated}); err == nil {
+		t.Fatal("want the failed reload reported")
+	}
+	if got := d.files[ServerDir+"/egress.secret"]; got != "encar:s3cret\n" {
+		t.Errorf("want the previous secret back, got %q", got)
+	}
+}
+
+// A policy without egress makes the proxy again without the port and the hosts file — and asks the
+// image for no forward proxy it no longer needs.
+func TestReshapeDropsTheEgress(t *testing.T) {
+	s := reshapeServer()
+	s.out["docker inspect -f {{range"] = "3128/tcp 443/tcp 80/tcp |/etc/hosts"
+	if err := Reshape(context.Background(), s, io.Discard, Policy{Revision: 2}); err != nil {
+		t.Fatal(err)
+	}
+	create := s.at("docker create --name " + Container)
+	if create < 0 || strings.Contains(s.calls[create], "3128") || strings.Contains(s.calls[create], "--mount") {
+		t.Errorf("want the proxy made again without egress: %v", s.calls)
+	}
+	if s.at("docker exec "+Container+" caddy list-modules") >= 0 {
+		t.Errorf("asked for the forward proxy without egress: %v", s.calls)
+	}
+}
+
+// An upgrade to the image the proxy runs already still makes it again when its shape is not the one
+// the policy needs; in that shape, it changes nothing.
+func TestUpgradeMakesTheProxyInTheAppliedShape(t *testing.T) {
+	pol, _ := json.Marshal(openEgress)
+	s := newSwap(newImage)
+	s.out["sh -c if [ -f '.boks/_server/policy.json'"] = "present\n" + string(pol)
+	s.out["docker inspect -f {{range"] = "443/tcp 80/tcp |"
+	if _, err := s.upgrade(t); err != nil {
+		t.Fatal(err)
+	}
+	create := s.at("docker create --name " + Container)
+	if create < 0 || !strings.Contains(s.calls[create], "-p 3128:3128") || !strings.Contains(s.calls[create], " "+newImage+" caddy run") {
+		t.Errorf("want the proxy made again with the egress port: %v", s.calls)
+	}
+	s = newSwap(newImage)
+	s.out["sh -c if [ -f '.boks/_server/policy.json'"] = "present\n" + string(pol)
+	s.out["docker inspect -f {{range"] = "3128/tcp 443/tcp 80/tcp |"
+	if out, err := s.upgrade(t); err != nil || s.at("docker stop") >= 0 || !strings.Contains(out, "already runs") {
+		t.Errorf("in shape: err %v, log %s, calls %v", err, out, s.calls)
+	}
+}
+
+// CheckEgress refuses what would fail only after the proxy stopped, or after another server of the file
+// changed: a hosts file that is not there, a login without its password, an image without the plugin.
+func TestCheckEgress(t *testing.T) {
+	withHosts := Policy{Revision: 1, Egress: &Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}, HostsFile: "/etc/hosts"}}
+	noPass := *encar
+	noPass.Password = ""
+	for want, c := range map[string]struct {
+		p     Policy
+		setup func(s *swap)
+	}{
+		"not a file":                       {withHosts, func(s *swap) {}},
+		"no password for the egress login": {Policy{Revision: 1, Egress: &noPass}, func(s *swap) {}},
+		"no forward proxy":                 {openEgress, func(s *swap) { s.out["docker exec "+Container+" caddy list-modules"] = "http.handlers.reverse_proxy" }},
+		"":                                 {withHosts, func(s *swap) { s.out["sh -c [ -f '/etc/hosts' ]"] = "file" }},
+		"stopped: the boot makes it anew": {openEgress, func(s *swap) {
+			s.boxes[Container] = box{"exited", oldImage, Kind}
+			s.out["docker exec "+Container+" caddy list-modules"] = ""
+		}},
+	} {
+		s := reshapeServer()
+		c.setup(s)
+		err := CheckEgress(context.Background(), s, c.p)
+		if strings.Contains(want, ":") || want == "" {
+			if err != nil {
+				t.Errorf("%q: %v", want, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q, got %v", want, err)
+		}
+		if s.at("docker stop") >= 0 || s.at("docker create") >= 0 {
+			t.Errorf("%q: changed the proxy: %v", want, s.calls)
+		}
+	}
+	if err := CheckEgress(context.Background(), reshapeServer(), Policy{Revision: 1}); err != nil {
+		t.Errorf("no egress: %v", err)
+	}
+}
+
+// Drift names a proxy in another shape than the policy, and a hosts file replaced under its mount.
+func TestDrift(t *testing.T) {
+	withHosts := Policy{Revision: 1, Egress: &Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}, HostsFile: "/etc/hosts"}}
+	s := reshapeServer()
+	if d, err := Drift(context.Background(), s, withHosts); err != nil || len(d) != 1 || !strings.Contains(d[0], "proxy upgrade") {
+		t.Errorf("another shape: %v %v", d, err)
+	}
+	s = reshapeServer()
+	s.out["docker inspect -f {{range"] = "3128/tcp 443/tcp 80/tcp |/etc/hosts"
+	s.out["stat -c %i /etc/hosts"] = "1041"
+	s.out["docker exec "+Container+" stat -c %i /etc/hosts"] = "1041"
+	if d, err := Drift(context.Background(), s, withHosts); err != nil || len(d) != 0 {
+		t.Errorf("in shape, same file: %v %v", d, err)
+	}
+	s.out["stat -c %i /etc/hosts"] = "2077"
+	if d, err := Drift(context.Background(), s, withHosts); err != nil || len(d) != 1 || !strings.Contains(d[0], "replaced, not written in place") {
+		t.Errorf("a replaced hosts file: %v %v", d, err)
+	}
+	s = reshapeServer()
+	s.boxes[Container] = box{"exited", oldImage, Kind}
+	if d, err := Drift(context.Background(), s, withHosts); err != nil || len(d) != 0 {
+		t.Errorf("a stopped proxy: %v %v", d, err)
+	}
+}

@@ -461,7 +461,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		return on(func(ctx context.Context, r remote.Runner) error { return deploy.RollbackServer(ctx, r, out, rev, o) })
 	case args[0] == "status" && len(args) == 2:
 		return on(func(ctx context.Context, r remote.Runner) error {
-			p, open, err := deploy.ServerStatus(ctx, r)
+			p, open, drift, err := deploy.ServerStatus(ctx, r)
 			if err != nil {
 				return err
 			}
@@ -476,6 +476,9 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 					login = "login " + e.User
 				}
 				fmt.Fprintf(out, "  egress proxy on port %d for %s, %s\n", e.Port, strings.Join(e.Allow, ", "), login)
+			}
+			for _, d := range drift {
+				fmt.Fprintf(out, "  ! %s\n", d)
 			}
 			if open != nil {
 				fmt.Fprintf(out, "  ! %s started %s and never finished; run it again\n", open.Action, open.StartedAt.Format(time.RFC3339))

@@ -58,7 +58,10 @@ func CheckApply(ctx context.Context, r remote.Runner, next proxy.Policy) error {
 	if err != nil {
 		return err
 	}
-	return CheckRevision(cur, next)
+	if err := CheckRevision(cur, next); err != nil {
+		return err
+	}
+	return proxy.CheckEgress(ctx, r, next)
 }
 
 // RollbackServer puts back the policy of an earlier revision from the server's history. The floor
@@ -81,8 +84,11 @@ func CheckServerRollback(ctx context.Context, r remote.Runner, rev int) error {
 	if _, err := policyProxy(ctx, r); err != nil {
 		return err
 	}
-	_, err := policyOfRevision(ctx, r, rev)
-	return err
+	p, err := policyOfRevision(ctx, r, rev)
+	if err != nil {
+		return err
+	}
+	return proxy.CheckEgress(ctx, r, p)
 }
 
 func policyOfRevision(ctx context.Context, r remote.Runner, rev int) (proxy.Policy, error) {
@@ -165,12 +171,17 @@ func beginServer(ctx context.Context, r remote.Runner, log io.Writer, o Options,
 	return release.Begin(ctx, r, serverJournal, action, from, to, o.Now())
 }
 
-// ServerStatus is what a server applies, and the run that changed it and never finished, if any.
-func ServerStatus(ctx context.Context, r remote.Runner) (proxy.Policy, *release.Entry, error) {
+// ServerStatus is what a server applies, the run that changed it and never finished, if any, and what
+// of the running proxy the policy does not see (proxy.Drift).
+func ServerStatus(ctx context.Context, r remote.Runner) (proxy.Policy, *release.Entry, []string, error) {
 	p, err := proxy.ReadPolicy(ctx, r)
 	if err != nil {
-		return p, nil, err
+		return p, nil, nil, err
 	}
 	open, err := release.Unfinished(ctx, r, serverJournal)
-	return p, open, err
+	if err != nil {
+		return p, nil, nil, err
+	}
+	drift, err := proxy.Drift(ctx, r, p)
+	return p, open, drift, err
 }

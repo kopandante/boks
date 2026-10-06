@@ -103,6 +103,10 @@ func TestParseServerEgress(t *testing.T) {
 	if err != nil || len(s.Egress.Ports) != 1 || s.Egress.Ports[0] != 443 || s.Egress.User != "" {
 		t.Errorf("defaults: %+v, %v", s.Egress, err)
 	}
+	// As docker records a mount's source, or the proxy would never look like the one the policy needs.
+	if s, err := ParseServer([]byte("servers: [a]\nrevision: 1\negress: {allow: [10.0.0.1], hosts_file: /etc//hosts/}\n")); err != nil || s.Egress.HostsFile != "/etc/hosts" {
+		t.Errorf("hosts_file not cleaned: %+v, %v", s, err)
+	}
 	t.Setenv("ENCAR_EGRESS_PROXY_PASSWORD", "")
 	if _, err := e.Password(); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("an empty password: %v", err)

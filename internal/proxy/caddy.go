@@ -429,6 +429,10 @@ type (
 // proxy's name out of what it sends on. No logs: a log line per tunnel would carry every target the
 // services reach, and the login, when given, travels in a header a log could keep.
 func egressServer(e Egress) (*server, error) {
+	// The plugin takes no ports for every port: none here is a policy that lost them, not that.
+	if len(e.Ports) == 0 {
+		return nil, errors.New("egress: no ports to let clients reach")
+	}
 	fp := handler{Handler: "forward_proxy", HideIP: true, HideVia: true, AllowedPorts: e.Ports}
 	if e.User != "" {
 		if e.Password == "" {
