@@ -56,7 +56,15 @@ R4 (`20261002-small-box-reality.md`) и G3 (`20261006-shchr-gaps.md`).
       bytes» (1 MiB + `done\n` из stderr), `end exit=5`, `jobs/big.out` нет; второе расписание
       `echo step1; sleep 20; echo step2; exit 3` — `step1` в `jobs/slow.log` через 7 с после
       старта, во время сна
-- [ ] **B1** — idna
+- [x] **B1. Хосты, как их сравнивает Caddy** (PR feat/idna-hosts, #73): `internal/hostname.Canonical`
+      — `idna.ToASCII`, затем нижний регистр, у wildcard `*.` сохраняется; через неё идут дубликаты
+      маршрутов в boks.yml и при сборке конфига прокси (значит, и в фрагментах, записанных раньше),
+      TLS одного хоста, порядок маршрутов, исключения wildcard и `Cert.Covers`. Заглавные вне ASCII в
+      `host` — отказ конфига: Caddy переводит в punycode до смены регистра, браузер — после.
+      `go test ./internal/hostname ./internal/config ./internal/proxy`. На boks-lab2: приложение
+      `traefik/whoami` с `host: тест.lab2.test` отвечает 200 на `Host: xn--e1aybc.lab2.test` и на
+      `XN--E1AYBC.lab2.test`, 404 на чужой хост; второе приложение с `host: XN--E1AYBC.lab2.test` —
+      «routed by both idn1 and idn2» до запуска контейнера
 - [ ] **G3** — `boks proxy upgrade`
 - [ ] **B9** — подтверждение reload через admin API
 - [ ] **A** — `boks server install`
