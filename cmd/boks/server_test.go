@@ -67,7 +67,7 @@ func TestServerInstallAsksDockerInANewLogin(t *testing.T) {
 		dir := t.TempDir()
 		t.Chdir(dir)
 		facts := "user=deploy\nuid=1000\nsudo=yes\nos=ubuntu\nversion=24.04\nsystemd=yes\nmigratereq=yes\ndockerd=yes\ncrontab=yes\n" +
-			"flock=yes\ndockerenabled=enabled\ncronactive=active\ndockerup=yes\napi=1.47\nswarm=inactive\nrunning=1\n"
+			"flock=yes\ndockerenabled=enabled\ncronactive=active\ncronenabled=enabled\ndockerup=yes\napi=1.47\nswarm=inactive\nrunning=1\n"
 		log := filepath.Join(dir, "calls")
 		script := "#!/bin/sh\nprintf '%s\\n' \"$*\" | tr '\\n' ' ' >> " + log + "\necho >> " + log + "\n" +
 			"case \"$*\" in *'id -un'*) cat " + filepath.Join(dir, "facts") + " ;; esac\nexit 0\n"

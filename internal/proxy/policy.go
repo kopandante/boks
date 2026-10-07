@@ -228,18 +228,29 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if _, err := Config(p, fs); err != nil {
 		return err
 	}
-	// The secret goes in before the policy that needs it, and comes back with the previous policy.
+	// The marker first: alone, it only stops an older boks. Then the secret, before the policy that
+	// needs it; from here on any failure puts the previous secret back — or removes the one written
+	// — with the previous policy: a secret left changed under the old policy would be taken by the
+	// next deploy's reload, and clients on the old password refused.
+	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", FragmentFormat), policyMarker()); err != nil {
+		return fmt.Errorf("marking the server's routes for this boks: %w", err)
+	}
 	prevSecret, secretPresent, err := readFile(ctx, r, egressSecretPath())
 	if err != nil {
 		return err
 	}
+	restoreSecret := func(back context.Context) error {
+		if secretPresent {
+			return remote.UploadAtomic(back, r, []byte(prevSecret), egressSecretPath())
+		}
+		_, err := r.Run(back, "rm", "-f", egressSecretPath())
+		return err
+	}
 	if e := p.Egress; e != nil && e.User != "" && prevSecret != e.User+":"+e.Password+"\n" {
 		if err := remote.UploadAtomic(ctx, r, []byte(e.User+":"+e.Password+"\n"), egressSecretPath()); err != nil {
-			return fmt.Errorf("recording the egress login: %w", err)
+			// Its answer may be lost after the file was replaced.
+			return fmt.Errorf("recording the egress login: %w", errors.Join(err, restoreSecret(context.WithoutCancel(ctx))))
 		}
-	}
-	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", FragmentFormat), policyMarker()); err != nil {
-		return fmt.Errorf("marking the server's routes for this boks: %w", err)
 	}
 	// A failed write is put back as a failed reload is: its answer can be lost after the file was
 	// replaced, and left there the next run of any app would load the policy this run reported failed.
@@ -260,9 +271,7 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 		} else if _, rmErr := r.Run(back, "rm", "-f", policyPath()); rmErr != nil {
 			err = errors.Join(err, rmErr)
 		}
-		if secretPresent {
-			err = errors.Join(err, remote.UploadAtomic(back, r, []byte(prevSecret), egressSecretPath()))
-		}
+		err = errors.Join(err, restoreSecret(back))
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
 		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))
 	}

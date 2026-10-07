@@ -50,6 +50,7 @@ command -v flock >/dev/null && echo flock=yes
 id -nG "$(id -un)" | tr ' ' '\n' | grep -qx docker && echo indocker=yes
 echo "dockerenabled=$(systemctl is-enabled docker 2>/dev/null)"
 echo "cronactive=$(systemctl is-active cron 2>/dev/null)"
+echo "cronenabled=$(systemctl is-enabled cron 2>/dev/null)"
 if ! command -v dockerd >/dev/null; then
   echo "candidate=$(apt-cache policy docker.io 2>/dev/null | awk '/Candidate:/{print $2}')"
   echo "clicandidate=$(apt-cache policy docker-cli 2>/dev/null | awk '/Candidate:/{print $2}')"
@@ -103,10 +104,10 @@ type hostFacts struct {
 	dockerCLI    bool
 	// dockerdCmd is the command line dockerd runs with — of the running daemon, so flags from a drop-in
 	// or an environment file count — or, with none running, the ExecStart systemd would run.
-	dockerdCmd                                              string
-	uid, running                                            int
-	sudo, systemd, migrateReq, dockerd, crontab, flock      bool
-	inDocker, dockerUp, rootless, dockerEnabled, cronActive bool
+	dockerdCmd                                                           string
+	uid, running                                                         int
+	sudo, systemd, migrateReq, dockerd, crontab, flock                   bool
+	inDocker, dockerUp, rootless, dockerEnabled, cronActive, cronEnabled bool
 	// proxyState and proxyKind are the boks-proxy container's state and boks.proxy label, empty without one.
 	proxyState, proxyKind               string
 	networks, publish, listen, nftFlush []string
@@ -155,6 +156,8 @@ func parseFacts(out string) (hostFacts, error) {
 			f.dockerEnabled = v == "enabled"
 		case "cronactive":
 			f.cronActive = v == "active"
+		case "cronenabled":
+			f.cronEnabled = v == "enabled"
 		case "candidate":
 			f.candidate = v
 		case "dockerup":
@@ -294,7 +297,8 @@ func planInstall(f hostFacts) (installPlan, error) {
 	if !f.dockerEnabled {
 		p.enableDocker = true
 	}
-	if !f.cronActive || !f.crontab {
+	// Running now and gone after a reboot is not enough: schedules need cron for good.
+	if !f.cronActive || !f.cronEnabled || !f.crontab {
 		p.enableCron = true
 	}
 	if f.uid != 0 && !f.inDocker {

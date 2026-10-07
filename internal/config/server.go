@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -76,6 +77,11 @@ func (e *Egress) Password() (string, error) {
 	}
 	if v == "" {
 		return "", fmt.Errorf("egress.password_env: %s is set but empty", e.PasswordEnv)
+	}
+	// The server keeps it in a file whose reading trims the ends: a space there would be lost, and
+	// every client refused. A newline would break the file.
+	if strings.TrimSpace(v) != v || strings.ContainsAny(v, "\r\n") {
+		return "", fmt.Errorf("egress.password_env: %s starts or ends with whitespace, or holds a line break; use a password without", e.PasswordEnv)
 	}
 	return v, nil
 }

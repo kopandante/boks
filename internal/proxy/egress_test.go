@@ -360,3 +360,36 @@ func TestDrift(t *testing.T) {
 		t.Errorf("a stopped proxy: %v %v", d, err)
 	}
 }
+
+// A secret whose write answered with an error — the answer lost after the file was replaced — is put
+// back at once: the policy stays the old one, and the next deploy must not load the new password.
+func TestSetPolicyPutsTheSecretBackWhenItsOwnWriteIsLost(t *testing.T) {
+	d := newDisk()
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: encar}); err != nil {
+		t.Fatal(err)
+	}
+	rotated := *encar
+	rotated.Password = "n3w"
+	d.lost["upload "+ServerDir+"/egress.secret"] = errors.New("connection reset")
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: &rotated}); err == nil {
+		t.Fatal("want the lost write reported")
+	}
+	if got := d.files[ServerDir+"/egress.secret"]; got != "encar:s3cret\n" {
+		t.Errorf("want the previous secret back, got %q", got)
+	}
+}
+
+// The first policy with a login that fails leaves no secret behind, and the marker goes before it.
+func TestSetPolicyRemovesASecretItWroteFirst(t *testing.T) {
+	d := newDisk()
+	d.fail[reloadNext] = errors.New("refused")
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: encar}); err == nil {
+		t.Fatal("want the failed reload reported")
+	}
+	if _, left := d.files[ServerDir+"/egress.secret"]; left {
+		t.Errorf("a secret left without its policy: %v", d.calls)
+	}
+	if mark, sec := index(d.calls, "upload "+Dir+"/routes/_server.json"), index(d.calls, "upload "+ServerDir+"/egress.secret"); mark < 0 || sec < mark {
+		t.Errorf("want the marker before the secret: %v", d.calls)
+	}
+}
