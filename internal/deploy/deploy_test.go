@@ -1613,6 +1613,20 @@ func TestPruneRemovesATagBeforeItsUntaggedRow(t *testing.T) {
 	}
 }
 
+// A pull and a prune can both write one image down; the list keeps it once.
+func TestPruneWritesEachImageOnce(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	a2 := `{"image":"` + depot + `","tag":"a2","digest":"sha256:a2"}` + "\n"
+	f.files[appImages] = a2 + a2
+	f.out[depotImages] = "a3 sha256:a3 id-a3\na2 sha256:a2 id-a2\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(f.files[appImages], `"tag":"a2"`); n != 1 {
+		t.Errorf("want a2 once on the list, got %d in %q", n, f.files[appImages])
+	}
+}
+
 // One image pushed under two tags, one for each app: when the other app's release names its digest,
 // demo's dropped tag stays too, since removing it may remove the image the other app rolls back to.
 func TestPruneKeepsADigestAnotherAppRecorded(t *testing.T) {

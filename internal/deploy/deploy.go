@@ -1358,37 +1358,36 @@ func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 		fmt.Fprintf(log, "warning: no image pruned: %v\n", err)
 		return
 	}
+	byRepo := map[string][]release.Image{}
 	var repos []string
 	for _, img := range imgs {
-		if !slices.Contains(repos, img.Image) {
+		if byRepo[img.Image] == nil {
 			repos = append(repos, img.Image)
 		}
+		byRepo[img.Image] = append(byRepo[img.Image], img)
 	}
-	var left []release.Image
+	// What each repository still holds afterwards; nil where it could not be listed, which says
+	// nothing is gone.
+	after := map[string][]imageRow{}
 	for _, repo := range repos {
-		var mine []release.Image
-		for _, img := range imgs {
-			if img.Image == repo {
-				mine = append(mine, img)
-			}
-		}
 		rows, err := imageRows(ctx, r, repo)
-		if err == nil && removeUnnamed(ctx, r, log, repo, rows, mine, recorded, cfg.Image, current) {
+		if err == nil && removeUnnamed(ctx, r, log, repo, rows, byRepo[repo], recorded, cfg.Image, current) {
 			rows, err = imageRows(ctx, r, repo)
 		}
 		if err != nil {
 			fmt.Fprintf(log, "warning: could not list images: %v\n", err)
-			left = append(left, mine...)
 			continue
 		}
-		for _, img := range mine {
-			if slices.ContainsFunc(rows, func(w imageRow) bool { return isImage(img, w) }) {
-				left = append(left, img)
-			}
-		}
+		after[repo] = rows
 	}
-	if slices.Equal(left, imgs) {
-		return
+	// The list is rewritten in its own order, each image once, so lines a pull and a prune both
+	// wrote for one image do not pile up.
+	var left []release.Image
+	for _, img := range imgs {
+		rows, listed := after[img.Image]
+		if !listed || slices.ContainsFunc(rows, func(w imageRow) bool { return isImage(img, w) }) {
+			left = append(left, img)
+		}
 	}
 	if err := release.SetImages(ctx, r, cfg.App, left); err != nil {
 		fmt.Fprintf(log, "warning: could not update the app's images: %v\n", err)
