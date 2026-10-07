@@ -1402,8 +1402,8 @@ func TestPruneLeavesOtherAppsOfTheRepositoryAlone(t *testing.T) {
 }
 
 // A moving tag leaves the image it used to name untagged; the copy of a dropped release's digest
-// goes, the copies a kept release or nobody's release names stay, and so does the tag itself, which
-// the kept releases still name.
+// goes, copies whose digests are not on the app's list stay, and so does the tag itself, which the
+// kept releases still name.
 func TestPruneRemovesTheUntaggedCopyOfADroppedRelease(t *testing.T) {
 	f, cfg := sharedRepo(t)
 	f.out["sh -c ls -1 '.boks/demo/releases'"] = "demo-latest-1.json\ndemo-latest-2.json\ndemo-latest-1700000000.json\n"
@@ -1537,6 +1537,52 @@ func TestPruneNeverRemovesTheTagJustDeployed(t *testing.T) {
 	}
 	if len(f.rmis()) != 0 {
 		t.Errorf("the image just deployed must never be pruned: %v", f.rmis())
+	}
+}
+
+// The previous image of a moving tag is on the app's list from its pull and untagged now; while a
+// kept release names its digest it is a rollback target and stays.
+func TestPruneKeepsTheUntaggedCopyAKeptReleaseNames(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out["sh -c ls -1 '.boks/demo/releases'"] = ""
+	f.files[appImages] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:mid"}` + "\n"
+	f.out["find .boks"] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:new"}` + "\n" +
+		`{"image":"` + depot + `","tag":"latest","digest":"sha256:mid"}`
+	f.out[depotImages] = "latest sha256:new id-new\n<none> sha256:mid id-mid\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("a kept release's image must stay: %v", f.rmis())
+	}
+	if !strings.Contains(f.files[appImages], `"digest":"sha256:mid"`) {
+		t.Errorf("an image kept back stays on the list, got %q", f.files[appImages])
+	}
+}
+
+// A release recorded without a digest (before the field, or from an image with no registry digest)
+// names its tag alone, and the tag stays for it.
+func TestPruneKeepsATagARecordedReleaseNamesWithoutADigest(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out["find .boks"] += "\n" + `{"image":"` + depot + `","tag":"a1"}`
+	f.out[depotImages] = "a1 sha256:a1 id-a1\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("a tag a release names must stay: %v", f.rmis())
+	}
+}
+
+// A listing that fails says nothing about what is still there: the app's images stay on its list.
+func TestPruneKeepsTheListWhenTheImagesCannotBeListed(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.fail[depotImages] = errors.New("connection reset")
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.has("docker rmi") || !strings.Contains(f.files[appImages], `"tag":"a1"`) || !strings.Contains(f.files[appImages], `"tag":"a3"`) {
+		t.Errorf("want nothing removed and the list kept, got %q: %v", f.files[appImages], f.calls)
 	}
 }
 
