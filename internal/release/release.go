@@ -43,8 +43,10 @@ import (
 // Version 9 lets a port carry a path, a path rewrite and header changes: a boks that drops them
 // would route a rolled-back release's paths to the whole host, without its header rules.
 // Version 10 added the ports published on private addresses of the host (listen): a boks that drops
-// them would bring a database back unreachable from the servers of its clients.
-const FormatVersion = 10
+// them would bring a database back unreachable from the servers of its clients. Version 11 added the
+// memory reservation: a boks that drops it would admit the next deploys beside a rolled-back release
+// as if it could still grow to its whole limit, and the release would run without its soft limit.
+const FormatVersion = 11
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -74,6 +76,9 @@ type Snapshot struct {
 	EnvPath string `json:"env_path,omitempty"`
 	// Memory is the hard limit the release ran with, in the config's format; empty is none.
 	Memory string `json:"memory,omitempty"`
+	// MemoryReservation is the soft limit the release ran with, which the memory check counts in place
+	// of the limit; empty when it had none, and before version 11.
+	MemoryReservation string `json:"memory_reservation,omitempty"`
 	// Replace is the replace mode the release itself asks for — its config's, with the shape filled
 	// in, so an app without routes records stop-first. It is not how the release was put in place:
 	// a release deployed over a stop-first one was put in place stop-first and may still record

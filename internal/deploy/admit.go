@@ -203,17 +203,26 @@ func unlockAdmission(ctx context.Context, r remote.Runner, app string) (bool, er
 	return strings.TrimSpace(out) == "freed", err
 }
 
-// checkMemory is the preliminary memory check: will the new copy's limit fit on this server? It is
+// checkMemory is the preliminary memory check: will the new copy fit on this server? It is
 // conservative and still not a guarantee against OOM — a container without a limit can grow past
 // anything measured here, and so can the host's own processes.
 //
-// What is free is MemAvailable, less what running containers with a limit may still grow into (one
-// admitted a moment ago has not taken its memory yet, and MemAvailable alone would hand it to the
-// next deploy), less the reserve. In stop-first the copies about to be stopped give back what they
-// use, and their own growth no longer counts; in overlap the old copy keeps running beside the new
-// one, growth included. replacing names those copies, nil in overlap.
+// What the copy needs is its reservation when it has one, its limit otherwise: like a Kubernetes
+// request and limit, the reservation is what it usually uses, and the limit only caps a spike.
+// What is free is MemAvailable, less what running containers may still grow into (one admitted a
+// moment ago has not taken its memory yet, and MemAvailable alone would hand it to the next deploy),
+// less the reserve. A container grows into its reservation when it has one, into its limit
+// otherwise: limits set at each app's peak add up to the whole server long before the server is
+// full, and counting them would admit nothing. A spike above a reservation is not counted — that is
+// the price of the reservation, and why it is a choice in boks.yml. In stop-first the copies about to
+// be stopped give back what they use, and their own growth no longer counts; in overlap the old copy
+// keeps running beside the new one, growth included. replacing names those copies, nil in overlap.
 func checkMemory(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, replacing []string) error {
-	need, err := config.MemoryBytes(cfg.Memory)
+	key, amount := "memory", cfg.Memory
+	if cfg.MemoryReservation != "" {
+		key, amount = "memory_reservation", cfg.MemoryReservation
+	}
+	need, err := config.MemoryBytes(amount)
 	if err != nil || need == 0 {
 		return err
 	}
@@ -228,24 +237,36 @@ func checkMemory(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 	if err != nil {
 		return fmt.Errorf("preliminary memory check: %w", err)
 	}
-	var promised, freed int64
+	var toLimit, toReservation, freed int64
+	reserved := false
 	for _, c := range running {
 		if slices.Contains(replacing, c.name) {
 			freed += c.used
 			continue
 		}
-		if c.limit > c.used {
-			promised += c.limit - c.used
+		if c.reservation > 0 {
+			reserved = true
+			toReservation += max(c.reservation-c.used, 0)
+		} else if c.limit > c.used {
+			toLimit += c.limit - c.used
 		}
 	}
-	free := avail + freed - promised - memoryReserve
-	terms := fmt.Sprintf("MemAvailable %s + %s used by the copies being stopped − %s other containers may still grow into − %s reserve",
-		size(avail), size(freed), size(promised), size(memoryReserve))
+	free := avail + freed - toLimit - toReservation - memoryReserve
+	growth := fmt.Sprintf("%s other containers may still grow into", size(toLimit))
+	if reserved {
+		growth = fmt.Sprintf("%s other containers may still grow into up to their limits − %s up to their reservations", size(toLimit), size(toReservation))
+	}
+	terms := fmt.Sprintf("MemAvailable %s + %s used by the copies being stopped − %s − %s reserve",
+		size(avail), size(freed), growth, size(memoryReserve))
+	asked := amount
+	if key != "memory" {
+		asked = amount + " (its memory_reservation)"
+	}
 	if need > free {
 		return fmt.Errorf("preliminary memory check: %s needs %s but %s is free (%s); this is a preliminary check, not a guarantee against OOM; "+
-			"lower `memory`, or free memory on the server", cfg.App, cfg.Memory, size(max(free, 0)), terms)
+			"lower `%s`, or free memory on the server", cfg.App, asked, size(max(free, 0)), terms, key)
 	}
-	fmt.Fprintf(log, "memory: %s of %s free by the preliminary check (%s)\n", cfg.Memory, size(free), terms)
+	fmt.Fprintf(log, "memory: %s of %s free by the preliminary check (%s)\n", asked, size(free), terms)
 	return nil
 }
 
@@ -271,15 +292,16 @@ func memAvailable(ctx context.Context, r remote.Runner) (int64, error) {
 	return 0, fmt.Errorf("/proc/meminfo has no MemAvailable")
 }
 
-// usage is a running container's memory: its limit (0 for none) and what it uses now.
+// usage is a running container's memory: its limit and its reservation (0 for none) and what it
+// uses now.
 type usage struct {
-	name        string
-	limit, used int64
+	name                     string
+	limit, reservation, used int64
 }
 
-// containerMemory lists the running containers with their limits and use, matched by id. A container
-// docker stats does not report counts as using nothing, which is the conservative side: its whole
-// limit is still to come, and a copy being stopped gives back nothing.
+// containerMemory lists the running containers with their limits, reservations and use, matched by
+// id. A container docker stats does not report counts as using nothing, which is the conservative
+// side: its whole reservation or limit is still to come, and a copy being stopped gives back nothing.
 func containerMemory(ctx context.Context, r remote.Runner) ([]usage, error) {
 	out, err := containerLimits(ctx, r)
 	if err != nil {
@@ -292,15 +314,19 @@ func containerMemory(ctx context.Context, r remote.Runner) ([]usage, error) {
 			continue
 		}
 		f := strings.Split(strings.TrimSpace(line), "\t")
-		if len(f) != 3 {
+		if len(f) != 4 {
 			return nil, fmt.Errorf("unreadable container limit %q", line)
 		}
 		limit, err := strconv.ParseInt(f[2], 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("unreadable container limit %q", line)
 		}
+		reservation, err := strconv.ParseInt(f[3], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("unreadable container reservation %q", line)
+		}
 		byID[f[0]] = len(list)
-		list = append(list, usage{name: strings.TrimPrefix(f[1], "/"), limit: limit})
+		list = append(list, usage{name: strings.TrimPrefix(f[1], "/"), limit: limit, reservation: reservation})
 	}
 	out, err = r.Run(ctx, "docker", "stats", "--no-stream", "--no-trunc", "--format", "{{.ID}}\t{{.MemUsage}}")
 	if err != nil {
@@ -317,7 +343,7 @@ func containerMemory(ctx context.Context, r remote.Runner) ([]usage, error) {
 		}
 		used, _, _ := strings.Cut(mem, " / ")
 		// docker prints `--` for a container whose stats it has none of (one stuck restarting). Its use
-		// stays unknown, which counts as nothing: its whole limit is still to come.
+		// stays unknown, which counts as nothing: its whole reservation or limit is still to come.
 		if strings.TrimSpace(used) == "--" {
 			continue
 		}
@@ -330,7 +356,7 @@ func containerMemory(ctx context.Context, r remote.Runner) ([]usage, error) {
 	return list, nil
 }
 
-// containerLimits lists the running containers with their limits. Listing and inspecting are two
+// containerLimits lists the running containers with their limits and reservations. Listing and inspecting are two
 // calls, and another app's deploy may remove a container in between — it retires its old copies
 // after it has let go of admission — which fails the inspect for a container that no longer uses
 // anything. That is asked again, a few times, before it counts as a failure.
@@ -345,7 +371,7 @@ func containerLimits(ctx context.Context, r remote.Runner) (string, error) {
 		if len(ids) == 0 {
 			return "", nil
 		}
-		if out, err = r.Run(ctx, append([]string{"docker", "container", "inspect", "--format", "{{.Id}}\t{{.Name}}\t{{.HostConfig.Memory}}"}, ids...)...); err == nil {
+		if out, err = r.Run(ctx, append([]string{"docker", "container", "inspect", "--format", "{{.Id}}\t{{.Name}}\t{{.HostConfig.Memory}}\t{{.HostConfig.MemoryReservation}}"}, ids...)...); err == nil {
 			return out, nil
 		}
 	}
