@@ -272,12 +272,20 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 		} else {
 			_, undo = r.Run(back, "rm", "-f", policyPath())
 		}
-		// The secret follows the policy back, never ahead of it: beside the new policy left in place,
-		// the previous secret — or none — would refuse its clients, or every deploy.
-		if undo == nil {
-			undo = restoreSecret(back)
-		}
 		err = errors.Join(err, undo)
+		// The secret follows the policy on disk, never ahead of it: beside a new policy left in place,
+		// the previous secret — or none — would refuse its clients, or every deploy. A failed undo
+		// says nothing of which one is there — the new policy may never have got there, or the undo's
+		// answer was lost after it acted — so the file decides.
+		restore := undo == nil
+		if !restore {
+			body, present, readErr := readFile(back, r, policyPath())
+			err = errors.Join(err, readErr)
+			restore = readErr == nil && present == prevPresent && body == prevBody
+		}
+		if restore {
+			err = errors.Join(err, restoreSecret(back))
+		}
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
 		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))
 	}

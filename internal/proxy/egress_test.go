@@ -394,39 +394,65 @@ func TestSetPolicyRemovesASecretItWroteFirst(t *testing.T) {
 	}
 }
 
-// failNth refuses the nth atomic upload to path, before it acts; the others go through to the disk.
-type failNth struct {
+// uploadFault answers every atomic upload to path from the nth on with an error: before it acts, or
+// — lost — after it acted. The others go through to the disk.
+type uploadFault struct {
 	*disk
-	path string
-	n    int
+	path       string
+	from, seen int
+	lost       bool
 }
 
-func (f *failNth) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+func (f *uploadFault) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
 	if strings.HasSuffix(args[len(args)-1], " '"+f.path+"'") {
-		if f.n--; f.n == 0 {
-			return "", errors.New("no space left on device")
+		if f.seen++; f.seen >= f.from {
+			if f.lost {
+				f.disk.Pipe(ctx, content, args...)
+			}
+			return "", errors.New("connection reset")
 		}
 	}
 	return f.disk.Pipe(ctx, content, args...)
 }
 
-// The secret goes back only with the policy: a policy that could not be put back stays the new one,
-// and its login keeps the secret it needs rather than losing it to the previous state.
-func TestSetPolicyKeepsTheSecretOfAPolicyThatStayed(t *testing.T) {
-	d := newDisk()
+// The secret follows the policy on disk when the policy cannot be put back by the book: a new policy
+// left in place keeps the secret it needs, and a previous one still there — the new never got there,
+// or the undo's answer was lost — gets its own back.
+func TestSetPolicyKeepsTheSecretWithThePolicyOnDisk(t *testing.T) {
 	open := *encar
 	open.User, open.Password = "", ""
-	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: &open}); err != nil {
-		t.Fatal(err)
-	}
-	d.fail[reloadNext] = errors.New("refused")
-	if err := SetPolicy(context.Background(), &failNth{disk: d, path: policyPath(), n: 2}, io.Discard, Policy{Revision: 2, Egress: encar}); err == nil {
-		t.Fatal("want the failed reload reported")
-	}
-	if !strings.Contains(d.files[policyPath()], `"revision": 2,`) {
-		t.Fatalf("want the new policy left in place: %q", d.files[policyPath()])
-	}
-	if got := d.files[egressSecretPath()]; got != "encar:s3cret\n" {
-		t.Errorf("want the new policy's secret kept, got %q: %v", got, d.calls)
+	rotated := *encar
+	rotated.Password = "n3w"
+	for _, c := range []struct {
+		name     string
+		prev     *Egress
+		fault    uploadFault
+		revision string
+		secret   string
+	}{
+		{"the undo refused, the new policy stays", &open, uploadFault{from: 2}, `"revision": 2,`, "encar:s3cret\n"},
+		{"neither write acted", encar, uploadFault{from: 1}, `"revision": 1,`, "encar:s3cret\n"},
+		{"the undo's answer lost", encar, uploadFault{from: 2, lost: true}, `"revision": 1,`, "encar:s3cret\n"},
+	} {
+		d := newDisk()
+		if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: c.prev}); err != nil {
+			t.Fatal(err)
+		}
+		d.fail[reloadNext] = errors.New("refused")
+		next := encar
+		if c.prev == encar {
+			next = &rotated
+		}
+		f := c.fault
+		f.disk, f.path = d, policyPath()
+		if err := SetPolicy(context.Background(), &f, io.Discard, Policy{Revision: 2, Egress: next}); err == nil {
+			t.Fatalf("%s: want the failure reported", c.name)
+		}
+		if !strings.Contains(d.files[policyPath()], c.revision) {
+			t.Errorf("%s: want %s on disk: %q", c.name, c.revision, d.files[policyPath()])
+		}
+		if got := d.files[egressSecretPath()]; got != c.secret {
+			t.Errorf("%s: want the secret %q, got %q: %v", c.name, c.secret, got, d.calls)
+		}
 	}
 }
