@@ -38,7 +38,7 @@ func checkListen(ctx context.Context, r remote.Runner, cfg *config.Config, boxes
 			return fmt.Errorf("listen[%d]: %w", l.Port, err)
 		}
 		if _, ok := held[a]; !ok {
-			return fmt.Errorf("listen[%d]: %s is not an address of this server (`ip -o addr` shows %s): docker could not publish on it — "+
+			return fmt.Errorf("listen[%d]: %s is not an address of this server (its private addresses by `ip -o addr`: %s): docker could not publish on it — "+
 				"check servers in boks.yml, or bring the interface up (WireGuard: `systemctl start wg-quick@wg0`); nothing was changed",
 				l.Port, a, listAddrs(held))
 		}
@@ -102,11 +102,13 @@ func hostAddrs(ctx context.Context, r remote.Runner) (map[netip.Addr]string, err
 	return held, nil
 }
 
-// listAddrs writes the server's addresses for an error, in a stable order.
+// listAddrs writes the server's addresses listen could publish on, for an error, in a stable order.
 func listAddrs(held map[netip.Addr]string) string {
 	var out []string
 	for a, dev := range held {
-		out = append(out, a.String()+" on "+dev)
+		if _, err := (config.Listen{Address: a.String()}).ListenAddr(); err == nil {
+			out = append(out, a.String()+" on "+dev)
+		}
 	}
 	if len(out) == 0 {
 		return "none"
