@@ -317,6 +317,8 @@ func TestRunHappyPath(t *testing.T) {
 		boxesQuery,
 		// The image comes before the proxy: a pull the registry refuses leaves the server as it was.
 		"docker pull ghcr.io/x/y:v2",
+		// Its digest goes on the app's list of images with it.
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
 		// The proxy and its networks are every app's, so booting it takes the server's admission lock.
 		admitTake("demo"),
 		"docker network inspect boks",
@@ -461,6 +463,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		netOwnerQuery("boks-bot"),
 		boxesQuery,
 		"docker pull ghcr.io/x/bot:v2",
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
 		// Whether the app has routes to drop is its fragment's to say, not the proxy's.
 		frags + `; do [ -f "$f" ] && cat "$f"; done; true`,
@@ -1441,6 +1444,33 @@ func TestPruneRemovesTheImageOfAFailedDeploy(t *testing.T) {
 	}
 	if want := []string{"docker rmi " + depot + ":bad", "docker rmi " + depot + ":a1"}; !slices.Equal(f.rmis(), want) {
 		t.Errorf("want the failed deploy's image and a1 removed, got %v", f.rmis())
+	}
+}
+
+// A moving tag pulled by a deploy that fails, then pulled again, leaves the failed image untagged:
+// its digest, written down at the pull, is what lets the next deploy remove it.
+func TestPruneRemovesTheUntaggedImageOfAFailedDeployOfAMovingTag(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out["sh -c ls -1 '.boks/demo/releases'"] = ""
+	inspect := "docker inspect --type image --format {{json .RepoDigests}} " + depot + ":latest"
+	f.out[inspect] = `["` + depot + `@sha256:failed"]`
+	f.fail["docker run -d --name demo-latest-"] = errors.New("exec format error")
+	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err == nil {
+		t.Fatal("want the deploy refused")
+	}
+	delete(f.fail, "docker run -d --name demo-latest-")
+	f.out[inspect] = `["` + depot + `@sha256:good"]`
+	f.out["find .boks"] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:good"}`
+	f.out[depotImages] = "latest sha256:good id-good\n<none> sha256:failed id-failed\n"
+	f.listsAfter("docker rmi id-failed", "latest sha256:good id-good\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"docker rmi id-failed"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("want the failed deploy's image removed, got %v", f.rmis())
+	}
+	if got, want := f.files[appImages], `{"image":"`+depot+`","tag":"latest","digest":"sha256:good"}`+"\n"; got != want {
+		t.Errorf("want the list %q, got %q", want, got)
 	}
 }
 

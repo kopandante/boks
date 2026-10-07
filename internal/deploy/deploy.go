@@ -144,8 +144,12 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	}
 	// A deploy brings its image to the server, and the image is this app's to remove once no release
 	// names it — also when the deploy goes no further than the pull, or its copy never comes up.
+	// With its digest: a moving tag pulled again leaves the image untagged, and only the digest still
+	// names it then. A digest that cannot be read leaves the tag to go by.
 	if l.pull {
-		if err := release.AddImage(ctx, r, cfg.App, release.Image{Image: cfg.Image, Tag: l.tag}); err != nil {
+		img := release.Image{Image: cfg.Image, Tag: l.tag}
+		img.Digest, _ = digestOf(ctx, r, cfg.Image, l.tag)
+		if err := release.AddImage(ctx, r, cfg.App, img); err != nil {
 			fmt.Fprintf(log, "warning: could not write down the image pulled: %v\n", err)
 		}
 	}
