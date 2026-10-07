@@ -19,9 +19,11 @@ var (
 )
 
 const (
-	memInfo  = "cat /proc/meminfo"
-	psIDs    = "docker ps -q --no-trunc"
-	limits   = "docker container inspect --format {{.Id}}"
+	memInfo = "cat /proc/meminfo"
+	psIDs   = "docker ps -q --no-trunc"
+	// limits is the whole format the check asks for: a fake answering four columns to a format that
+	// asks for three would hide a reservation the real docker never printed.
+	limits   = "docker container inspect --format {{.Id}}\t{{.Name}}\t{{.HostConfig.Memory}}\t{{.HostConfig.MemoryReservation}}"
 	memStats = "docker stats --no-stream"
 	newCopy  = "demo-v2-1700000000"
 )
