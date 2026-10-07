@@ -155,6 +155,9 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	if e := next.Egress; e != nil {
 		fmt.Fprintf(log, "  egress proxy on port %d for %s\n", e.Port, strings.Join(e.Allow, ", "))
 	}
+	if len(next.TrustedProxies) > 0 {
+		fmt.Fprintf(log, "  X-Forwarded-For trusted from %s\n", strings.Join(next.TrustedProxies, ", "))
+	}
 	if !running {
 		fmt.Fprintf(log, "  %s is not running on this server: nothing is filtered until it starts and loads this policy\n", proxy.Container)
 	}

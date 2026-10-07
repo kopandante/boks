@@ -102,7 +102,10 @@ type Fragment struct {
 //
 // Format 4 is the egress proxy: a boks of format 3 would assemble the config without its server, and
 // create the proxy without its port on a boot or an upgrade.
-const FragmentFormat = 4
+//
+// Format 5 is the trusted proxies: a boks of format 4 would assemble the config without them, and
+// every app would be handed the proxy's address in place of the visitor's without a word.
+const FragmentFormat = 5
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -124,8 +127,9 @@ func nextPath() string { return path.Join(Dir, "caddy.next.json") }
 // TLS go to a server on 80, as kamal-proxy served them, where boks's own route redirects plain HTTP
 // for the TLS hosts (Caddy's redirects are off) and a 404 answers any host no route names.
 //
-// There is no trusted_proxies: nothing trusted stands in front of boks, so Caddy sets X-Forwarded-For
-// to the address of the connection and drops what the visitor sent (#48) — its default.
+// Without the policy's trusted proxies Caddy trusts no one: it sets X-Forwarded-For to the address of
+// the connection and drops what the visitor sent (#48) — its default. With them, the servers on 80 and
+// 443 trust those ranges (see trustProxies); the egress server never does.
 func Config(p Policy, fragments []Fragment) ([]byte, error) {
 	type entry struct {
 		app string
@@ -284,6 +288,13 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 	for _, s := range servers {
 		s.Routes = append(s.Routes, caddyRoute{Handle: []handler{{Handler: "static_response", StatusCode: 404}}, Terminal: true})
 	}
+	// The apps' servers only: the egress server, which joins them below, has its clients connect to it
+	// directly.
+	if len(p.TrustedProxies) > 0 {
+		for _, s := range servers {
+			trustProxies(s, p.TrustedProxies)
+		}
+	}
 	if p.Egress != nil {
 		s, err := egressServer(*p.Egress)
 		if err != nil {
@@ -331,6 +342,16 @@ type (
 		Logs      *struct{}    `json:"logs,omitempty"`
 		// Errors are the routes for an error a handler returned rather than a response it wrote.
 		Errors *serverErrors `json:"errors,omitempty"`
+		// TrustedProxies are the connections whose forwarded headers Caddy keeps; ClientIPHeaders, read
+		// right to left when TrustedProxiesStrict is set, are where it finds the client behind them.
+		TrustedProxies       *ipSource `json:"trusted_proxies,omitempty"`
+		ClientIPHeaders      []string  `json:"client_ip_headers,omitempty"`
+		TrustedProxiesStrict int       `json:"trusted_proxies_strict,omitempty"`
+	}
+	// ipSource is Caddy's static source of IP ranges (http.ip_sources.static).
+	ipSource struct {
+		Source string   `json:"source"`
+		Ranges []string `json:"ranges"`
 	}
 	serverErrors struct {
 		Routes []caddyRoute `json:"routes"`
@@ -469,6 +490,18 @@ func egressServer(e Egress) (*server, error) {
 			Terminal: true,
 		}}},
 	}, nil
+}
+
+// trustProxies has s keep the X-Forwarded-For of a request whose connection comes from ranges: Caddy's
+// reverse_proxy then passes what the proxy sent with the proxy's address after it, and keeps its
+// X-Forwarded-Proto and -Host (2.11.7, reverseproxy.go, addForwardedHeaders). A connection from
+// anywhere else still has the header replaced by its own address. Strict, Caddy's own idea of the
+// client — its logs — is read from the right, the first address outside ranges: from the left it
+// would be whatever the visitor wrote before the proxy added to it.
+func trustProxies(s *server, ranges []string) {
+	s.TrustedProxies = &ipSource{Source: "static", Ranges: ranges}
+	s.ClientIPHeaders = []string{"X-Forwarded-For"}
+	s.TrustedProxiesStrict = 1
 }
 
 // hasHost tells whether hosts names h in any case: Caddy matches hosts without regard to case, and
