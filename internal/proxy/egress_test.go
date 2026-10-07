@@ -303,6 +303,11 @@ func TestUpgradeMakesTheProxyInTheAppliedShape(t *testing.T) {
 	}
 }
 
+// portsQuery asks for the host ports docker bound for every running container; proxyPorts is the
+// proxy's answer, publishing the egress port on every address.
+const portsQuery = `sh -c ids=$(docker ps -q --no-trunc) || exit 1; [ -z "$ids" ] || exec docker inspect --format '{"name":{{json .Name}},"ports":{{json (index .NetworkSettings "Ports")}}}' $ids`
+const proxyPorts = `{"name":"/` + Container + `","ports":{"3128/tcp":[{"HostIp":"0.0.0.0","HostPort":"3128"},{"HostIp":"::","HostPort":"3128"}]}}`
+
 // CheckEgress refuses what would fail only after the proxy stopped, or after another server of the file
 // changed: a hosts file that is not there, a login without its password, an image without the plugin.
 func TestCheckEgress(t *testing.T) {
@@ -317,11 +322,15 @@ func TestCheckEgress(t *testing.T) {
 		"no password for the egress login": {Policy{Revision: 1, Egress: &noPass}, func(s *swap) {}},
 		"no forward proxy":                 {openEgress, func(s *swap) { s.out["docker exec "+Container+" caddy list-modules"] = "http.handlers.reverse_proxy" }},
 		"":                                 {withHosts, func(s *swap) { s.out["sh -c [ -f '/etc/hosts' ]"] = "file" }},
-		// An app's listen on a private address holds the host port the proxy would publish everywhere.
+		// An app's listen on a private address holds the host port the proxy would publish everywhere —
+		// as host_port, whatever the container's own port is.
 		"port 3128 is published on this server by db-v1-1": {openEgress, func(s *swap) {
-			s.out["docker ps --filter publish=3128/tcp"] = Container + "\ndb-v1-1"
+			s.out[portsQuery] = proxyPorts + "\n" + `{"name":"/db-v1-1","ports":{"6379/tcp":[{"HostIp":"10.88.0.3","HostPort":"3128"}]}}`
 		}},
-		"published: the proxy itself": {openEgress, func(s *swap) { s.out["docker ps --filter publish=3128/tcp"] = Container }},
+		"published: the proxy itself, and 3128 as another container's own port": {openEgress, func(s *swap) {
+			s.out[portsQuery] = proxyPorts + "\n" + `{"name":"/sq-v1-1","ports":{"3128/tcp":[{"HostIp":"10.88.0.3","HostPort":"13128"}],"3128/udp":null}}` +
+				"\n" + `{"name":"/udp-v1-1","ports":{"53/udp":[{"HostIp":"","HostPort":"3128"}]}}` + "\n" + `{"name":"/x","ports":null}`
+		}},
 		"stopped: the boot makes it anew": {openEgress, func(s *swap) {
 			s.boxes[Container] = box{"exited", oldImage, Kind}
 			s.out["docker exec "+Container+" caddy list-modules"] = ""
@@ -464,5 +473,19 @@ func TestSetPolicyKeepsTheSecretWithThePolicyOnDisk(t *testing.T) {
 		if got := d.files[egressSecretPath()]; got != c.secret {
 			t.Errorf("%s: want the secret %q, got %q: %v", c.name, c.secret, got, d.calls)
 		}
+	}
+}
+
+// A listing that fails or cannot be read is a refusal, not an answer that the port is free.
+func TestCheckEgressRefusesAnUnreadablePortListing(t *testing.T) {
+	s := reshapeServer()
+	s.out[portsQuery] = "not json"
+	if err := CheckEgress(context.Background(), s, openEgress); err == nil || !strings.Contains(err.Error(), "reading which containers publish port 3128") {
+		t.Errorf("want a refusal, got %v", err)
+	}
+	s = reshapeServer()
+	s.fail = map[string]error{portsQuery: errors.New("connection lost")}
+	if err := CheckEgress(context.Background(), s, openEgress); err == nil || !strings.Contains(err.Error(), "asking which containers publish port 3128") {
+		t.Errorf("want a refusal, got %v", err)
 	}
 }
