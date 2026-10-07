@@ -303,8 +303,10 @@ func TestSaveWritesTheFormatVersion(t *testing.T) {
 	// 9 is the first format with a port's path, rewrite and headers: a boks reading 8 must refuse
 	// such a release rather than route its paths to the whole host. 10 is the first with listen: a
 	// boks reading 9 must refuse such a release rather than bring a database back unreachable.
-	if FormatVersion < 10 {
-		t.Errorf("format %d cannot carry listen", FormatVersion)
+	// 11 is the first with the memory reservation: a boks reading 10 must refuse such a release rather
+	// than admit deploys beside it as if it could grow to its whole limit.
+	if FormatVersion < 11 {
+		t.Errorf("format %d cannot carry the memory reservation", FormatVersion)
 	}
 	f := newFake()
 	if err := Save(context.Background(), f, Snapshot{ID: "demo-v1-1", App: "demo"}); err != nil {
@@ -432,5 +434,25 @@ func TestSnapshotKeepsListen(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Listen, want) {
 		t.Errorf("listen lost:\n got %+v\nwant %+v", got.Listen, want)
+	}
+}
+
+// A rollback runs the release with the reservation it ran with, and the memory check counts it.
+func TestSnapshotKeepsTheMemoryReservation(t *testing.T) {
+	f := newFake()
+	if err := Save(context.Background(), f, Snapshot{ID: "web-v2-2", App: "web", Memory: "1g", MemoryReservation: "128m"}); err != nil {
+		t.Fatal(err)
+	}
+	body := f.writes[".boks/web/releases/web-v2-2.json"]
+	if !strings.Contains(body, `"memory_reservation": "128m"`) {
+		t.Errorf("the snapshot must name the reservation by its json field: %s", body)
+	}
+	f.out["cat .boks/web/releases/web-v2-2.json"] = body
+	got, err := Load(context.Background(), f, "web", "web-v2-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Memory != "1g" || got.MemoryReservation != "128m" {
+		t.Errorf("reservation lost: %+v", got)
 	}
 }

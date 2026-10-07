@@ -288,6 +288,12 @@ type Config struct {
 	DrainTimeout string `yaml:"drain_timeout"`
 	// Memory is the container's hard memory limit in docker's format (512m, 1g); empty means none.
 	Memory string `yaml:"memory"`
+	// MemoryReservation is what the container is expected to use, in the same format: the request to
+	// Memory's limit. The preliminary memory check admits the copy on it, and counts what a running copy
+	// may still grow into up to it rather than up to its limit, so limits set at a spike's peak do not
+	// add up to the whole server. Docker passes it on as a soft limit (memory.low). It needs Memory and
+	// cannot exceed it; empty means the check counts the limit.
+	MemoryReservation string `yaml:"memory_reservation"`
 	// Healthcheck is the container's health check; nil leaves the image's HEALTHCHECK, if any.
 	Healthcheck *Healthcheck `yaml:"healthcheck"`
 	// Command replaces the image's CMD, in exec form: the program, then its arguments, passed as they
@@ -376,6 +382,41 @@ func (c *Config) ReplaceMode() string {
 		return ReplaceStopFirst
 	}
 	return ReplaceOverlap
+}
+
+// CheckMemory checks the limit and the reservation, alone and together. It is exported for a
+// rollback, whose snapshot holds both and passed no validation of its own.
+//
+// A reservation without a limit is refused: the check would admit the copy on what it is expected to
+// use while nothing stops it from growing past any amount, and an app without a limit is not checked
+// at all — the reservation would only look like a promise.
+func (c *Config) CheckMemory() error {
+	limit, err := MemoryBytes(c.Memory)
+	if err != nil {
+		return fmt.Errorf("memory: %w", err)
+	}
+	if c.Memory != "" && limit < minMemory {
+		return fmt.Errorf("memory: %q is below docker's minimum of 6m", c.Memory)
+	}
+	if c.MemoryReservation == "" {
+		return nil
+	}
+	reservation, err := MemoryBytes(c.MemoryReservation)
+	if err != nil {
+		return fmt.Errorf("memory_reservation: %w", err)
+	}
+	if reservation < minMemory {
+		return fmt.Errorf("memory_reservation: %q is below docker's minimum of 6m", c.MemoryReservation)
+	}
+	if c.Memory == "" {
+		return fmt.Errorf("memory_reservation: %s needs memory, the limit it is reserved under; "+
+			"a container without a limit can grow past any reservation", c.MemoryReservation)
+	}
+	if reservation > limit {
+		return fmt.Errorf("memory_reservation: %s is above memory %s; the reservation is what the app usually uses, "+
+			"the limit the peak it may reach", c.MemoryReservation, c.Memory)
+	}
+	return nil
 }
 
 // MemoryBytes reads a limit written in the format Memory accepts. Empty is no limit, and 0.
@@ -582,12 +623,8 @@ func (c *Config) validate() error {
 }
 
 func (c *Config) validateResources() error {
-	n, err := MemoryBytes(c.Memory)
-	if err != nil {
-		return fmt.Errorf("memory: %w", err)
-	}
-	if c.Memory != "" && n < minMemory {
-		return fmt.Errorf("memory: %q is below docker's minimum of 6m", c.Memory)
+	if err := c.CheckMemory(); err != nil {
+		return err
 	}
 	switch c.Replace {
 	case "", ReplaceStopFirst:

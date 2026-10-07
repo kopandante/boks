@@ -46,6 +46,10 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 		fmt.Fprintf(log, "warning: release %s was recorded without a memory limit, so it runs without one and without the memory check; "+
 			"today's config asks for %s\n", id, cfg.Memory)
 	}
+	if cfg.MemoryReservation != "" && target.MemoryReservation == "" && target.Memory != "" {
+		fmt.Fprintf(log, "warning: release %s was recorded without a memory_reservation, so it runs without that soft limit, "+
+			"and the memory check counts its whole limit %s, not the %s today's config reserves\n", id, target.Memory, cfg.MemoryReservation)
+	}
 	// The release runs as it was recorded, not with today's command: say so when that falls back to
 	// the image's own. The command itself is not printed — it can carry a secret.
 	if len(cfg.Command) > 0 && len(target.Command) == 0 {
@@ -99,7 +103,9 @@ func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	// And so are the apps it used: their checks are the release's, not today's config's.
 	target.Uses = snapshot.Uses
 	// The limit is the release's too, absence included: a release recorded without one ran without one.
+	// So is the reservation under it.
 	target.Memory = snapshot.Memory
+	target.MemoryReservation = snapshot.MemoryReservation
 	// So is the health check: one the release did not record ran with the image's own.
 	target.Healthcheck = snapshot.Healthcheck
 	// And the command and stop signal: one the release did not record ran with the image's own.
@@ -209,6 +215,14 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 	// damaged, or edited by hand — is not published past the firewall.
 	if err := restored(cfg, snapshot).CheckListen(); err != nil {
 		return "", nil, fmt.Errorf("release %s cannot be reproduced: %w", id, err)
+	}
+	// The reservation and the limit are checked together as a deploy checks them: docker refuses a
+	// reservation above the limit only at `docker run`, after a stop-first rollback stopped the running
+	// copy. A snapshot without a reservation is left as it ran.
+	if snapshot.MemoryReservation != "" {
+		if err := restored(cfg, snapshot).CheckMemory(); err != nil {
+			return "", nil, fmt.Errorf("release %s cannot be reproduced: %w", id, err)
+		}
 	}
 	// A connection that drops is not a missing file: only an answer from the server says it is gone.
 	if snapshot.EnvPath != "" {

@@ -19,9 +19,11 @@ var (
 )
 
 const (
-	memInfo  = "cat /proc/meminfo"
-	psIDs    = "docker ps -q --no-trunc"
-	limits   = "docker container inspect --format {{.Id}}"
+	memInfo = "cat /proc/meminfo"
+	psIDs   = "docker ps -q --no-trunc"
+	// limits is the whole format the check asks for: a fake answering four columns to a format that
+	// asks for three would hide a reservation the real docker never printed.
+	limits   = "docker container inspect --format {{.Id}}\t{{.Name}}\t{{.HostConfig.Memory}}\t{{.HostConfig.MemoryReservation}}"
 	memStats = "docker stats --no-stream"
 	newCopy  = "demo-v2-1700000000"
 )
@@ -35,12 +37,21 @@ func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
 // server sets the containers running on it: name → limit and use, in MiB (limit 0 for none).
 func (f *fake) server(availMiB int, running map[string][2]int) {
+	reserved := map[string][3]int{}
+	for name, m := range running {
+		reserved[name] = [3]int{m[0], m[1], 0}
+	}
+	f.reserved(availMiB, reserved)
+}
+
+// reserved sets the containers running on it: name → limit, use and reservation, in MiB (0 for none).
+func (f *fake) reserved(availMiB int, running map[string][3]int) {
 	f.out[memInfo] = meminfo(availMiB)
 	var ids, lims, stats []string
 	for name, m := range running {
 		id := "id-" + name
 		ids = append(ids, id)
-		lims = append(lims, id+"\t/"+name+"\t"+itoa(m[0]<<20))
+		lims = append(lims, id+"\t/"+name+"\t"+itoa(m[0]<<20)+"\t"+itoa(m[2]<<20))
 		stats = append(stats, id+"\t"+itoa(m[1])+"MiB / "+itoa(max(m[0], 2000))+"MiB")
 	}
 	f.out[psIDs] = strings.Join(ids, "\n")
@@ -171,6 +182,108 @@ func TestTheCheckCountsWhatAdmittedContainersMayStillTake(t *testing.T) {
 	f.server(1100, map[string][2]int{"other-v1-1": {512, 512}})
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed); err != nil {
 		t.Errorf("a container at its limit promises nothing more: %v", err)
+	}
+}
+
+// The reservation reaches `docker run` beside the limit, and the snapshot records both.
+func TestDeployRunsAndRecordsTheReservation(t *testing.T) {
+	f := routedFake(t)
+	f.server(1500, nil)
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 1g\nmemory_reservation: 128m\n"), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	run := f.calls[f.callAt("docker run")]
+	if !strings.Contains(run, " --memory 1g ") || !strings.Contains(run, " --memory-reservation 128m ") {
+		t.Errorf("the limit and the reservation must reach docker run: %s", run)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/"+newCopy+".json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.Memory != "1g" || snap.MemoryReservation != "128m" {
+		t.Errorf("snapshot must keep the limit and the reservation: %+v", snap)
+	}
+}
+
+// Limits set at each app's spike add up to the whole server long before it is full. With
+// reservations the same server admits the deploy: 1500 − (256−200) − (256−100) − 256 reserve leaves
+// 1032 for a copy that reserves 512 under a 2g limit. Counted by their limits, the same containers
+// leave nothing: (1024−200) + (1024−100) is already more than MemAvailable.
+func TestReservationsAdmitWhereLimitsWouldNot(t *testing.T) {
+	const reserving = onePort + "memory: 2g\nmemory_reservation: 512m\n"
+	f := routedFake(t)
+	f.reserved(1500, map[string][3]int{"a-v1-1": {1024, 200, 256}, "b-v1-1": {1024, 100, 256}})
+	var log strings.Builder
+	if err := Run(context.Background(), f, &log, parse(t, reserving), "v2", fixed); err != nil {
+		t.Fatalf("reservations leave room: %v", err)
+	}
+	if !strings.Contains(log.String(), "512m (its memory_reservation) of 1032MiB free") ||
+		!strings.Contains(log.String(), "212MiB up to their reservations") {
+		t.Errorf("the check must say it counted reservations: %q", log.String())
+	}
+
+	// The same containers without reservations: their limits leave nothing, reservation or not.
+	g := routedFake(t)
+	g.server(1500, map[string][2]int{"a-v1-1": {1024, 200}, "b-v1-1": {1024, 100}})
+	err := Run(context.Background(), g, io.Discard, parse(t, reserving), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "needs 512m (its memory_reservation) but 0MiB is free") ||
+		!strings.Contains(err.Error(), "lower `memory_reservation` only if the app really uses less") {
+		t.Fatalf("limits without reservations still count whole: %v", err)
+	}
+	if g.has("docker run") {
+		t.Errorf("nothing may start: %v", g.calls)
+	}
+
+	// Without a reservation of its own, the new copy needs its whole limit: 2048 > 1032.
+	h := routedFake(t)
+	h.reserved(1500, map[string][3]int{"a-v1-1": {1024, 200, 256}, "b-v1-1": {1024, 100, 256}})
+	err = Run(context.Background(), h, io.Discard, parse(t, onePort+"memory: 2g\n"), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "needs 2g but 1032MiB is free") || !strings.Contains(err.Error(), "lower `memory`,") {
+		t.Fatalf("the new copy without a reservation needs its limit: %v", err)
+	}
+}
+
+// A container with a reservation grows into it, one without into its limit, and one past its
+// reservation promises nothing more: 1500 − (256−200) − (1024−100) − 0 − 256 leaves 264.
+func TestReservedAndUnreservedContainersMix(t *testing.T) {
+	running := map[string][3]int{"a-v1-1": {1024, 200, 256}, "b-v1-1": {1024, 100, 0}, "c-v1-1": {1024, 400, 256}}
+	f := routedFake(t)
+	f.reserved(1500, running)
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 1g\nmemory_reservation: 300m\n"), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "264MiB is free") ||
+		!strings.Contains(err.Error(), "924MiB other containers may still grow into up to their limits − 56MiB up to their reservations") {
+		t.Fatalf("want 264 free with both terms named, got %v", err)
+	}
+	g := routedFake(t)
+	g.reserved(1500, running)
+	if err := Run(context.Background(), g, io.Discard, parse(t, onePort+"memory: 1g\nmemory_reservation: 264m\n"), "v2", fixed); err != nil {
+		t.Errorf("264m fits in 264MiB: %v", err)
+	}
+}
+
+// Stop-first gives back what the stopped copy uses whatever it reserved, and its reservation no
+// longer counts: 700 + 300 − 256 = 744 for a copy reserving 600 under 1g.
+func TestStopFirstIgnoresTheReservationOfTheStoppedCopy(t *testing.T) {
+	f := stopFirstFake(t)
+	f.reserved(700, map[string][3]int{"demo-v1-1": {1024, 300, 900}})
+	f.onRun = func(cmd string) {
+		if cmd == "docker stop demo-v1-1" {
+			f.server(1000, nil)
+		}
+	}
+	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst+"memory: 1g\nmemory_reservation: 600m\n"), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An inspect answer whose reservation is not a number is unreadable, not a container that reserves nothing.
+func TestTheCheckRefusesAnUnreadableReservation(t *testing.T) {
+	f := routedFake(t)
+	f.reserved(4000, map[string][3]int{"other-v1-1": {512, 10, 128}})
+	f.out[limits] = "id-other-v1-1\t/other-v1-1\t536870912\tlots"
+	err := Run(context.Background(), f, io.Discard, parse(t, onePort+"memory: 512m\n"), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "unreadable container reservation") {
+		t.Fatalf("want a refusal, got %v", err)
 	}
 }
 
@@ -865,6 +978,53 @@ func TestCheckRollbackAsksTheMemoryCheck(t *testing.T) {
 	g.server(4000, nil)
 	if id, err := CheckRollback(context.Background(), g, parse(t, onePort), ""); err != nil || id != "demo-v1-1" {
 		t.Errorf("a release that fits passes: %q %v", id, err)
+	}
+}
+
+// The reservation belongs to the release like its limit: a rollback runs it with the one it ran
+// with, the memory check counts it, and a release recorded without one runs without one.
+func TestRollbackRestoresTheReservationOfTheRelease(t *testing.T) {
+	f := demoReleases(t, `{`+v1Release+`,"memory":"1g","memory_reservation":"128m"}`)
+	f.server(400, nil)
+	var log strings.Builder
+	if err := Rollback(context.Background(), f, &log, parse(t, onePort+"memory: 2g\nmemory_reservation: 512m\n"), "", fixed); err != nil {
+		t.Fatalf("128m of 144MiB fits: %v", err)
+	}
+	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, " --memory 1g ") || !strings.Contains(run, " --memory-reservation 128m ") {
+		t.Errorf("want the release's limit and reservation: %s", run)
+	}
+	if !strings.Contains(log.String(), "128m (its memory_reservation)") {
+		t.Errorf("the check must count the release's reservation: %q", log.String())
+	}
+
+	g := demoReleases(t, `{`+v1Release+`,"memory":"256m"}`)
+	g.server(4000, nil)
+	log.Reset()
+	if err := Rollback(context.Background(), g, &log, parse(t, onePort+"memory: 1g\nmemory_reservation: 128m\n"), "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if run := g.calls[g.callAt("docker run")]; strings.Contains(run, "--memory-reservation") {
+		t.Errorf("a release recorded without a reservation runs without one: %s", run)
+	}
+	if !strings.Contains(log.String(), "recorded without a memory_reservation, so it runs without that soft limit") {
+		t.Errorf("want the dropped reservation named: %q", log.String())
+	}
+}
+
+// A snapshot whose reservation is above its limit — damaged, or edited by hand — is refused before
+// anything changes, not by docker after the running copy stopped.
+func TestRollbackRefusesARecordedReservationAboveTheLimit(t *testing.T) {
+	f := demoReleases(t, `{`+v1Release+`,"memory":"256m","memory_reservation":"512m"}`)
+	f.server(4000, nil)
+	err := Rollback(context.Background(), f, io.Discard, parse(t, onePort), "", fixed)
+	if err == nil || !strings.Contains(err.Error(), "cannot be reproduced") || !strings.Contains(err.Error(), "above memory") {
+		t.Fatalf("want a refusal, got %v", err)
+	}
+	if f.has("docker stop") || f.has("docker run") {
+		t.Errorf("nothing may change: %v", f.calls)
+	}
+	if _, err := CheckRollback(context.Background(), f, parse(t, onePort), ""); err == nil || !strings.Contains(err.Error(), "above memory") {
+		t.Errorf("the fleet check refuses it too: %v", err)
 	}
 }
 

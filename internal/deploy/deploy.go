@@ -733,7 +733,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	snapshot := release.Snapshot{
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
 		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(), Uses: cfg.Uses,
-		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, Replace: cfg.ReplaceMode(),
+		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, MemoryReservation: cfg.MemoryReservation, Replace: cfg.ReplaceMode(),
 		Healthcheck: cfg.Healthcheck, Files: files, Command: cfg.Command, StopSignal: cfg.StopSignal,
 		Previous: op.from, CreatedAt: now,
 	}
@@ -1099,6 +1099,9 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string, binds []stri
 		"--label", "boks.ports="+portLabel(cfg.Ports), "--label", "boks.replace="+cfg.ReplaceMode())
 	if cfg.Memory != "" {
 		a = append(a, "--memory", cfg.Memory)
+	}
+	if cfg.MemoryReservation != "" {
+		a = append(a, "--memory-reservation", cfg.MemoryReservation)
 	}
 	if h := cfg.Healthcheck; h != nil {
 		// The start period is the deploy's wait: docker calls a copy unhealthy after three failed checks
