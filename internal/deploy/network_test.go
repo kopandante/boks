@@ -25,7 +25,7 @@ func boxLine(name, app, hostname, aliases string) string {
 func changedNothing(f *fake) bool {
 	return !f.has("docker pull") && !f.has("docker network create") && !f.has("docker network connect") &&
 		!f.has("docker run") && !f.has("docker stop") && !f.has("docker exec boks-proxy kamal-proxy deploy") &&
-		!f.has("docker ps -a --filter name=^boks-proxy$") && !f.appended()
+		!f.has("docker ps -a --filter name=^boks-proxy$") && len(f.appends) == 0
 }
 
 // A name on the app's network that a container of another owner already answers to would split the
@@ -318,7 +318,7 @@ func TestCheckRollbackAsksTheNetwork(t *testing.T) {
 	if _, err := CheckRollback(context.Background(), f, parse(t, onePort), ""); err == nil || !strings.Contains(err.Error(), "answers to demo") {
 		t.Fatalf("want the conflict, got %v", err)
 	}
-	if f.has("docker network") || f.has("docker run") || f.appended() {
+	if f.has("docker network") || f.has("docker run") || len(f.appends) != 0 {
 		t.Errorf("a check changes nothing: %v", f.calls)
 	}
 	// The container's name is not known yet, and an empty one is nobody's name.

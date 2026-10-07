@@ -62,7 +62,7 @@ func TestRollbackRefusesWhenTheReleaseEnvIsGone(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cannot be reproduced") {
 		t.Fatalf("want a refusal about the missing environment, got %v", err)
 	}
-	if f.has("docker") || f.appended() {
+	if f.has("docker") || len(f.appends) > 0 {
 		t.Errorf("the refusal must come before anything on the server changes: %v", f.calls)
 	}
 
@@ -329,7 +329,7 @@ func TestCheckRollbackChangesNothing(t *testing.T) {
 			t.Errorf("a check must not change the server (%s): %v", change, f.calls)
 		}
 	}
-	if len(f.uploads) > 0 || f.appended() {
+	if len(f.uploads) > 0 || len(f.appends) > 0 {
 		t.Errorf("a check must not change the server: %v %v", f.uploads, f.appends)
 	}
 }

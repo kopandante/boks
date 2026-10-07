@@ -858,7 +858,7 @@ func TestCheckRollbackAsksTheMemoryCheck(t *testing.T) {
 	if _, err := CheckRollback(context.Background(), f, parse(t, onePort), ""); err == nil || !strings.Contains(err.Error(), "preliminary memory check") {
 		t.Fatalf("want the memory refusal, got %v", err)
 	}
-	if f.has("docker stop") || f.has("docker run") || f.has("ln -sn") || f.appended() || len(f.uploads) != 0 {
+	if f.has("docker stop") || f.has("docker run") || f.has("ln -sn") || len(f.appends) != 0 || len(f.uploads) != 0 {
 		t.Errorf("a check changes nothing: %v", f.calls)
 	}
 	g := demoReleases(t, `{`+v1Release+`,"memory":"256m"}`)

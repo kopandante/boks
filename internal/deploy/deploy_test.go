@@ -36,7 +36,7 @@ type fake struct {
 	// stdin is what each command that is not a file write was given on its standard input.
 	stdin map[string]string
 	// files is what the writes left in each file, appends added to what was there: a read of the
-	// list of dropped images answers from it, so what a prune writes down the next step reads.
+	// app's list of images answers from it, so what a pull or a prune writes down the next step reads.
 	files map[string]string
 	// hang is the commands that never answer: they return only when their context ends, as an SSH
 	// call over a connection that stalled does once it is cut off.
@@ -252,6 +252,7 @@ func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string
 
 // appended is whether anything was appended to other than the list of the app's images: the list
 // records the image a pull brought to the server, which a deploy refused after the pull leaves there.
+// Only a refusal after the pull asks this; one before it asks that nothing was appended at all.
 func (f *fake) appended() bool {
 	for p := range f.appends {
 		if !strings.HasSuffix(p, "/images.jsonl") {
@@ -376,7 +377,8 @@ func TestRunHappyPath(t *testing.T) {
 		"docker rm -v demo-v1-1",
 		// keep applies once the old copy is gone; within it nothing is dropped, so no image goes.
 		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
-		// The image just pulled is on the app's list; a release names it, so it stays.
+		// The image just pulled is on the app's list, so the releases recorded and the images listed
+		// are read; here neither names anything, and nothing goes.
 		"sh -c cat '.boks/demo/images.jsonl' 2>/dev/null || true",
 		"find .boks -mindepth 3 -maxdepth 3 -path .boks/*/releases/*.json -type f -exec cat {} +",
 		"docker images --digests ghcr.io/x/y --format {{.Tag}} {{.Digest}} {{.ID}}",
@@ -1427,7 +1429,7 @@ func TestPruneRemovesTheUntaggedCopyOfADroppedRelease(t *testing.T) {
 }
 
 // A deploy whose copy never starts leaves its image pulled and no release naming it: the next
-// deploy of the app removes it, as an image beyond keep.
+// deploy of the app removes it, since no release names it.
 func TestPruneRemovesTheImageOfAFailedDeploy(t *testing.T) {
 	f, cfg := sharedRepo(t)
 	f.fail["docker run -d --name demo-bad-"] = errors.New("exec format error")
@@ -1475,8 +1477,8 @@ func TestPruneRemovesTheUntaggedImageOfAFailedDeployOfAMovingTag(t *testing.T) {
 }
 
 // An image a release still names stays on the list, and goes once no release names it: with keep 1,
-// v1 and v2 of one build share a digest, so dropping v1 cannot remove it; dropping v2 later must
-// remove both tags.
+// a1 and a2 of one build share a digest, so a1, dropped by an earlier deploy, was kept back while a2
+// named the digest and is still on the list; dropping a2 must remove both tags.
 func TestPruneComesBackToAnImageOnceNoReleaseNamesIt(t *testing.T) {
 	f, cfg := sharedRepo(t)
 	f.out["sh -c ls -1 '.boks/demo/releases'"] = "demo-a2-2.json\ndemo-a3-1700000000.json\n"
@@ -1509,6 +1511,32 @@ func TestPruneKeepsATagWhoseImageCarriesARecordedDigest(t *testing.T) {
 	}
 	if !strings.Contains(f.files[appImages], `"tag":"a1"`) {
 		t.Errorf("an image kept back stays on the list, got %q", f.files[appImages])
+	}
+}
+
+// An untagged copy goes by ID, and an ID is the whole image: when another row of it stays (here
+// a tag of another app no release names, which this app has no claim to), the copy stays too.
+func TestPruneKeepsAnUntaggedCopyOfAnImageThatStaysUnderATag(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[depotImages] = "b5 sha256:b5 id-x\n<none> sha256:a1 id-x\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("an image listed under a tag that stays must stay: %v", f.rmis())
+	}
+}
+
+// The tag just put in place never goes, even while no recorded release names it yet.
+func TestPruneNeverRemovesTheTagJustDeployed(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out["find .boks"] = `{"image":"` + depot + `","tag":"b2","digest":"sha256:b2"}`
+	f.out[depotImages] = "a3 sha256:a3 id-a3\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("the image just deployed must never be pruned: %v", f.rmis())
 	}
 }
 
