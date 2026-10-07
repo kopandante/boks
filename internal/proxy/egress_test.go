@@ -393,3 +393,40 @@ func TestSetPolicyRemovesASecretItWroteFirst(t *testing.T) {
 		t.Errorf("want the marker before the secret: %v", d.calls)
 	}
 }
+
+// failNth refuses the nth atomic upload to path, before it acts; the others go through to the disk.
+type failNth struct {
+	*disk
+	path string
+	n    int
+}
+
+func (f *failNth) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	if strings.HasSuffix(args[len(args)-1], " '"+f.path+"'") {
+		if f.n--; f.n == 0 {
+			return "", errors.New("no space left on device")
+		}
+	}
+	return f.disk.Pipe(ctx, content, args...)
+}
+
+// The secret goes back only with the policy: a policy that could not be put back stays the new one,
+// and its login keeps the secret it needs rather than losing it to the previous state.
+func TestSetPolicyKeepsTheSecretOfAPolicyThatStayed(t *testing.T) {
+	d := newDisk()
+	open := *encar
+	open.User, open.Password = "", ""
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: &open}); err != nil {
+		t.Fatal(err)
+	}
+	d.fail[reloadNext] = errors.New("refused")
+	if err := SetPolicy(context.Background(), &failNth{disk: d, path: policyPath(), n: 2}, io.Discard, Policy{Revision: 2, Egress: encar}); err == nil {
+		t.Fatal("want the failed reload reported")
+	}
+	if !strings.Contains(d.files[policyPath()], `"revision": 2,`) {
+		t.Fatalf("want the new policy left in place: %q", d.files[policyPath()])
+	}
+	if got := d.files[egressSecretPath()]; got != "encar:s3cret\n" {
+		t.Errorf("want the new policy's secret kept, got %q: %v", got, d.calls)
+	}
+}

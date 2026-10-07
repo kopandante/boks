@@ -229,9 +229,9 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 		return err
 	}
 	// The marker first: alone, it only stops an older boks. Then the secret, before the policy that
-	// needs it; from here on any failure puts the previous secret back — or removes the one written
-	// — with the previous policy: a secret left changed under the old policy would be taken by the
-	// next deploy's reload, and clients on the old password refused.
+	// needs it; until the policy is applied, a failure puts the previous secret back — or removes the
+	// one written — with the previous policy: a secret left changed under the old policy would be
+	// taken by the next deploy's reload, and clients on the old password refused.
 	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", FragmentFormat), policyMarker()); err != nil {
 		return fmt.Errorf("marking the server's routes for this boks: %w", err)
 	}
@@ -266,12 +266,18 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	}
 	if err != nil {
 		back := context.WithoutCancel(ctx)
+		var undo error
 		if prevPresent {
-			err = errors.Join(err, remote.UploadAtomic(back, r, []byte(prevBody), policyPath()))
-		} else if _, rmErr := r.Run(back, "rm", "-f", policyPath()); rmErr != nil {
-			err = errors.Join(err, rmErr)
+			undo = remote.UploadAtomic(back, r, []byte(prevBody), policyPath())
+		} else {
+			_, undo = r.Run(back, "rm", "-f", policyPath())
 		}
-		err = errors.Join(err, restoreSecret(back))
+		// The secret follows the policy back, never ahead of it: beside the new policy left in place,
+		// the previous secret — or none — would refuse its clients, or every deploy.
+		if undo == nil {
+			undo = restoreSecret(back)
+		}
+		err = errors.Join(err, undo)
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
 		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))
 	}
