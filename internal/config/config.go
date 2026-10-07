@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
@@ -114,6 +115,103 @@ type Network struct {
 	Aliases []string `json:"aliases,omitempty"`
 }
 
+// Listen publishes a port of the container on one private address of the host — `docker run -p
+// address:host_port:port` — for clients on another server, over a private network such as WireGuard:
+// Postgres or Redis on one server, the apps that use them on another. Only a private address is
+// taken (CheckListen), because Docker's DNAT goes around the host's own INPUT rules: a port published
+// on a public address, or on all of them, is open to the internet whatever the firewall says. The
+// json tags are load-bearing: a release snapshot stores the publications verbatim, and a rollback
+// publishes them again.
+type Listen struct {
+	// Port is the container's port, TCP.
+	Port int `yaml:"port" json:"port"`
+	// Address is the host's address the port is published on; it must be on one of its interfaces.
+	Address string `yaml:"address" json:"address"`
+	// HostPort is the port on the host; 0 is Port.
+	HostPort int `yaml:"host_port" json:"host_port,omitempty"`
+}
+
+// Published is the host's port of l.
+func (l Listen) Published() int {
+	if l.HostPort == 0 {
+		return l.Port
+	}
+	return l.HostPort
+}
+
+// Bind is the host side of `docker run -p`: the address, in brackets when it is IPv6, and the port.
+func (l Listen) Bind() string {
+	return net.JoinHostPort(l.Address, strconv.Itoa(l.Published()))
+}
+
+// cgnat is 100.64.0.0/10, the shared address space of RFC 6598 that Tailscale and some VPNs number
+// their peers from; netip's IsPrivate leaves it out.
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// privateAddr reads an address listen may publish on: RFC 1918, 100.64.0.0/10 or an IPv6 ULA
+// (fc00::/7), written plainly. An IPv4 address written as IPv6 (::ffff:10.0.0.1) and an address with
+// a zone are refused rather than interpreted: what docker binds and what the host's interfaces show
+// must be the same thing.
+func privateAddr(s string) (netip.Addr, error) {
+	a, err := netip.ParseAddr(s)
+	switch {
+	case s == "":
+		return a, errors.New("address is required: the private address of this server to publish on, such as its WireGuard address 10.88.0.3")
+	case err != nil:
+		return a, fmt.Errorf("address %q is not an IP address", s)
+	case a.Zone() != "" || a.Is4In6():
+		return a, fmt.Errorf("address %q — write the address plainly, without a zone or an IPv4-in-IPv6 form", s)
+	case a.IsUnspecified():
+		return a, fmt.Errorf("address %s is every address of the server, the public one included: docker publishes past the host's firewall, "+
+			"so the port would be open to the internet; give the server's private address, such as its WireGuard address", s)
+	case !a.IsPrivate() && !cgnat.Contains(a):
+		return a, fmt.Errorf("address %s is not private (RFC 1918, 100.64.0.0/10 or an IPv6 ULA): docker publishes past the host's firewall, "+
+			"so the port would be reachable by whoever reaches that address; give the server's private address, such as its WireGuard address", s)
+	}
+	return a, nil
+}
+
+// ListenAddr is the address l publishes on, or why it may not.
+func (l Listen) ListenAddr() (netip.Addr, error) { return privateAddr(l.Address) }
+
+// CheckListen refuses a publication that is not on a private address, or that two copies of the app
+// would both ask for. A rollback asks it too, of the release's publications with today's servers.
+func (c *Config) CheckListen() error {
+	if len(c.Listen) == 0 {
+		return nil
+	}
+	seen := map[netip.AddrPort]bool{}
+	for _, l := range c.Listen {
+		if l.Port <= 0 || l.Port > 65535 {
+			return fmt.Errorf("listen: port %d out of range", l.Port)
+		}
+		if l.HostPort < 0 || l.HostPort > 65535 {
+			return fmt.Errorf("listen[%d]: host_port %d out of range", l.Port, l.HostPort)
+		}
+		a, err := l.ListenAddr()
+		if err != nil {
+			return fmt.Errorf("listen[%d]: %w", l.Port, err)
+		}
+		ap := netip.AddrPortFrom(a, uint16(l.Published()))
+		if seen[ap] {
+			return fmt.Errorf("listen: %s is published twice", ap)
+		}
+		seen[ap] = true
+	}
+	// One host port on one address takes one container. Overlap would start the new copy beside the
+	// old one, and its `docker run` would fail on the port the old one holds.
+	if c.ReplaceMode() != ReplaceStopFirst {
+		return errors.New("listen: a port published on the host is held by one container at a time, so two copies cannot overlap; " +
+			"add `replace: stop-first` (the app is down for the length of the swap)")
+	}
+	// The address is one server's: on any other, docker would have nothing to bind.
+	if len(c.Servers) > 1 {
+		return fmt.Errorf("listen: %s is on %d servers, and an address belongs to one of them; an app with listen lives on one server — "+
+			"one app per server, each with its own address", c.App, len(c.Servers))
+	}
+	return nil
+}
+
 // AppNetwork is the network an app's containers are started on. The app's name is their alias in
 // it, so whoever shares the network reaches the app by name across deploys, while the container's
 // own name changes with every one.
@@ -219,6 +317,9 @@ type Config struct {
 	// each pull and logs out once the pull is over. Nil means the image is public and pulled without a
 	// login, as before.
 	Registry *Registry `yaml:"registry"`
+	// Listen publishes ports of the container on private addresses of the host, for clients on other
+	// servers; none by default, so the proxy's 80 and 443 stay the only ports open on the host.
+	Listen []Listen `yaml:"listen"`
 	// Attach overrides Networks with what a recorded release joined; never read from boks.yml.
 	Attach []Network `yaml:"-"`
 	Dir    string    `yaml:"-"`
@@ -472,6 +573,9 @@ func (c *Config) validate() error {
 		return err
 	}
 	if err := c.validateRegistry(); err != nil {
+		return err
+	}
+	if err := c.CheckListen(); err != nil {
 		return err
 	}
 	return c.validateLists()

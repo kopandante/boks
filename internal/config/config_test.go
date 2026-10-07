@@ -664,3 +664,65 @@ func TestAppNameFitsTheCopysName(t *testing.T) {
 		t.Errorf("an app of %d: %v", MaxAppLen+1, err)
 	}
 }
+
+// listen publishes on a private address only, and only in the shape one host port allows: Docker
+// publishes past the host's firewall, so the address is the whole of the protection.
+func TestParseListen(t *testing.T) {
+	const db = "app: db\nimage: postgres:18\nservers: [pool]\nhealthcheck: {cmd: pg_isready}\n"
+	for _, addr := range []string{"10.88.0.3", "172.16.0.1", "172.31.255.254", "192.168.1.1", "100.64.0.1", "100.127.255.254", "fd00::3", "fc00::1"} {
+		cfg, err := Parse([]byte(db + "listen: [{port: 5432, address: \"" + addr + "\"}]\n"))
+		if err != nil {
+			t.Errorf("%s: want it taken, got %v", addr, err)
+			continue
+		}
+		if l := cfg.Listen[0]; l.Published() != 5432 || l.Address != addr {
+			t.Errorf("%s: want port 5432 on it, got %+v", addr, l)
+		}
+	}
+	cfg, err := Parse([]byte(db + "listen: [{port: 6379, address: 10.88.0.5, host_port: 6390}, {port: 5432, address: \"fd00::5\"}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := cfg.Listen[0].Bind(); b != "10.88.0.5:6390" {
+		t.Errorf("host_port is the host's side: %s", b)
+	}
+	if b := cfg.Listen[1].Bind(); b != "[fd00::5]:5432" {
+		t.Errorf("an IPv6 address is bracketed for docker: %s", b)
+	}
+	// A routed app overlaps by default, and says stop-first to publish.
+	routed := "app: web\nimage: x\nservers: [a]\nports: [{name: w, port: 3000, host: w.example.com}]\n"
+	if _, err := Parse([]byte(routed + "replace: stop-first\nlisten: [{port: 3000, address: 10.88.0.1}]\n")); err != nil {
+		t.Errorf("a routed app with stop-first may publish: %v", err)
+	}
+	rejects := map[string]string{
+		db + "listen: [{port: 5432, address: 0.0.0.0}]\n":                                                      "every address of the server",
+		db + "listen: [{port: 5432, address: \"::\"}]\n":                                                       "every address of the server",
+		db + "listen: [{port: 5432, address: 136.234.12.162}]\n":                                               "is not private",
+		db + "listen: [{port: 5432, address: 8.8.8.8}]\n":                                                      "is not private",
+		db + "listen: [{port: 5432, address: 172.32.0.1}]\n":                                                   "is not private",
+		db + "listen: [{port: 5432, address: 100.128.0.1}]\n":                                                  "is not private",
+		db + "listen: [{port: 5432, address: 127.0.0.1}]\n":                                                    "is not private",
+		db + "listen: [{port: 5432, address: 169.254.1.1}]\n":                                                  "is not private",
+		db + "listen: [{port: 5432, address: \"2a01:4f8::1\"}]\n":                                              "is not private",
+		db + "listen: [{port: 5432, address: \"fe80::1\"}]\n":                                                  "is not private",
+		db + "listen: [{port: 5432}]\n":                                                                        "address is required",
+		db + "listen: [{port: 5432, address: \"\"}]\n":                                                         "address is required",
+		db + "listen: [{port: 5432, address: db.internal}]\n":                                                  "not an IP address",
+		db + "listen: [{port: 5432, address: 10.88.0.3/24}]\n":                                                 "not an IP address",
+		db + "listen: [{port: 5432, address: \"::ffff:10.88.0.3\"}]\n":                                         "plainly",
+		db + "listen: [{port: 5432, address: \"fd00::1%wg0\"}]\n":                                              "plainly",
+		db + "listen: [{port: 0, address: 10.88.0.3}]\n":                                                       "out of range",
+		db + "listen: [{port: 70000, address: 10.88.0.3}]\n":                                                   "out of range",
+		db + "listen: [{port: 5432, address: 10.88.0.3, host_port: 70000}]\n":                                  "out of range",
+		db + "listen: [{port: 5432, address: 10.88.0.3, host_port: -1}]\n":                                     "out of range",
+		db + "listen: [{port: 5432, address: 10.88.0.3}, {port: 5433, address: 10.88.0.3, host_port: 5432}]\n": "published twice",
+		routed + "listen: [{port: 3000, address: 10.88.0.1}]\n":                                                "replace: stop-first",
+		routed + "replace: overlap\nlisten: [{port: 3000, address: 10.88.0.1}]\n":                              "replace: stop-first",
+		strings.Replace(db, "[pool]", "[pool, pool2]", 1) + "listen: [{port: 5432, address: 10.88.0.3}]\n":     "lives on one server",
+	}
+	for in, want := range rejects {
+		if _, err := Parse([]byte(in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+}

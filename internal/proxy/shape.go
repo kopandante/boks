@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -118,13 +119,24 @@ func Reshape(ctx context.Context, r remote.Runner, log io.Writer, next Policy) e
 }
 
 // CheckEgress refuses, before anything changes, an egress this server cannot run: a hosts file that is
-// not there — docker would refuse the new container after the old one stopped — a login the server
-// keeps no password for, and a running proxy without the forward proxy. `server apply` and `server
-// rollback` ask it of every server of the file before any changes, as they ask the revision.
+// not there or a port another container publishes — docker would refuse the new container after the
+// old one stopped — a login the server keeps no password for, and a running proxy without the forward
+// proxy. `server apply` and `server rollback` ask it of every server of the file before any changes,
+// as they ask the revision.
 func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
 	e := p.Egress
 	if e == nil {
 		return nil
+	}
+	// The proxy publishes the egress port on every address, so an app's `listen` on any one of them
+	// takes it.
+	holder, err := hostPortHolder(ctx, r, e.Port)
+	if err != nil {
+		return err
+	}
+	if holder != "" {
+		return fmt.Errorf("egress: port %d is published on this server by %s (an app's listen, or a container outside boks), "+
+			"and the proxy publishes it on every address; choose another egress port or move that one; nothing was changed", e.Port, holder)
 	}
 	if e.HostsFile != "" {
 		out, err := r.Run(ctx, "sh", "-c", "[ -f "+remote.Quote(e.HostsFile)+" ] && echo file; true")
@@ -154,6 +166,57 @@ func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
 		return fmt.Errorf("the proxy runs %s, which has no forward proxy; `boks proxy upgrade` with boks's own image first, then apply again", image)
 	}
 	return nil
+}
+
+// portsFormat prints a running container's name and the ports docker bound for it on the host, as one
+// JSON object a line. NetworkSettings, not HostConfig: a range or an empty host port asked for is one
+// port once bound, and the bound one is what a new `-p` collides with. Read with index, as the deploy's
+// inventory reads it, so a container without the key prints null rather than failing the inspect.
+const portsFormat = `{"name":{{json .Name}},"ports":{{json (index .NetworkSettings "Ports")}}}`
+
+// hostPortHolder names a running container other than the proxy that publishes port/tcp on the host,
+// on any address, or "" when none does. Read from what docker bound rather than through `docker ps
+// --filter publish=`, whose match — host port or container port — this need not depend on.
+func hostPortHolder(ctx context.Context, r remote.Runner, port int) (string, error) {
+	script := "ids=$(docker ps -q --no-trunc) || exit 1; " +
+		`[ -z "$ids" ] || exec docker inspect --format ` + remote.Quote(portsFormat) + " $ids"
+	// A container removed between the listing and the inspect — a deploy retiring its old copy, which
+	// nothing here keeps out — fails the call; it is asked again, as the deploy's inventory is.
+	var out string
+	var err error
+	for try := 0; try < 3; try++ {
+		if out, err = r.Run(ctx, "sh", "-c", script); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("asking which containers publish port %d: %w", port, err)
+	}
+	want := strconv.Itoa(port)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var c struct {
+			Name  string
+			Ports map[string][]struct{ HostPort string }
+		}
+		if err := json.Unmarshal([]byte(line), &c); err != nil {
+			return "", fmt.Errorf("reading which containers publish port %d: %w", port, err)
+		}
+		name := strings.TrimPrefix(c.Name, "/")
+		if name == Container {
+			continue
+		}
+		for spec, bs := range c.Ports {
+			for _, b := range bs {
+				if strings.HasSuffix(spec, "/tcp") && b.HostPort == want {
+					return name, nil
+				}
+			}
+		}
+	}
+	return "", nil
 }
 
 // Drift is what of the running proxy the policy on the server does not see: a container in another
