@@ -31,7 +31,10 @@ type box struct {
 	// image without a HEALTHCHECK.
 	running bool
 	health  string
-	// ports are the ports docker publishes on the host for it, by container port (`6379/tcp`).
+	// ports are the ports docker has published on the host for it, by container port (`6379/tcp`):
+	// NetworkSettings rather than HostConfig, because what was asked for is not what was bound — a
+	// range (`6390-6391`) or no host port at all is allocated one port when the container starts. A
+	// container that is not running holds none.
 	ports map[string][]binding
 }
 
@@ -60,7 +63,7 @@ func hasName(names []string, name string) bool {
 // container). index answers a missing key with nothing.
 const boxFormat = `{"id":{{json .Id}},"name":{{json .Name}},"hostname":{{json .Config.Hostname}},` +
 	`"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}},` +
-	`"ports":{{json (index .HostConfig "PortBindings")}},"running":{{json .State.Running}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}""{{end}}}`
+	`"ports":{{json (index .NetworkSettings "Ports")}},"running":{{json .State.Running}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}""{{end}}}`
 
 // inventory lists every container on the server, stopped ones too: a stopped copy comes back with
 // its aliases. All of them rather than those docker's network filter returns, which is documented

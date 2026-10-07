@@ -20,7 +20,8 @@ const hostAddrsOut = `1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft f
 9: wg0    inet 10.88.0.5/24 scope global wg0\       valid_lft forever preferred_lft forever
 9: wg0    inet6 fd00::5/64 scope global \       valid_lft forever preferred_lft forever`
 
-// published is one container of the inventory, on no network, publishing ports as docker records them.
+// published is one container of the inventory, on no network, publishing ports as docker records them
+// once they are bound (NetworkSettings.Ports: a range asked for is one port here).
 func published(name, app string, running bool, ports string) string {
 	r := "false"
 	if running {
@@ -119,6 +120,7 @@ func TestListenRefusesAPortAnotherContainerPublishes(t *testing.T) {
 		"another port":        published("x", "other", true, `{"6379/tcp":[{"HostIp":"10.88.0.5","HostPort":"6379"}]}`),
 		"udp":                 published("x", "other", true, `{"6390/udp":[{"HostIp":"10.88.0.5","HostPort":"6390"}]}`),
 		"no bindings":         published("x", "other", true, `null`),
+		"an exposed port":     published("x", "other", true, `{"6390/tcp":null}`),
 	} {
 		f := listenFake()
 		f.out[boxes] = line

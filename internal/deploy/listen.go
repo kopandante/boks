@@ -12,8 +12,8 @@ import (
 	"github.com/kopandante/boks/internal/remote"
 )
 
-// binding is a port docker publishes on the host for a container, as its HostConfig.PortBindings
-// names it: an empty HostIp is every address.
+// binding is a port docker has published on the host for a container, as its NetworkSettings.Ports
+// names it: docker writes every address as 0.0.0.0 and ::, and an empty HostIp is read the same way.
 type binding struct {
 	HostIP   string `json:"HostIp"`
 	HostPort string `json:"HostPort"`

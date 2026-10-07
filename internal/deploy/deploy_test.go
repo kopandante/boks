@@ -421,7 +421,7 @@ const proxyProbe = "docker ps -a --filter name=^boks-proxy$ --format {{.State}}\
 
 const boxesQuery = boxes + ` || exit 1; [ -z "$ids" ] || exec docker inspect --format '{"id":{{json .Id}},"name":{{json .Name}},` +
 	`"hostname":{{json .Config.Hostname}},"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}},` +
-	`"ports":{{json (index .HostConfig "PortBindings")}},"running":{{json .State.Running}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}""{{end}}}' $ids`
+	`"ports":{{json (index .NetworkSettings "Ports")}},"running":{{json .State.Running}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}""{{end}}}' $ids`
 
 func netOwnerQuery(network string) string {
 	return netOwner + ` --format '{{json .Labels}}' '` + network + `' 2>&1) && echo "$out" || ` +
