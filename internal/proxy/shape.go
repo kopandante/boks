@@ -118,13 +118,26 @@ func Reshape(ctx context.Context, r remote.Runner, log io.Writer, next Policy) e
 }
 
 // CheckEgress refuses, before anything changes, an egress this server cannot run: a hosts file that is
-// not there — docker would refuse the new container after the old one stopped — a login the server
-// keeps no password for, and a running proxy without the forward proxy. `server apply` and `server
-// rollback` ask it of every server of the file before any changes, as they ask the revision.
+// not there or a port another container publishes — docker would refuse the new container after the
+// old one stopped — a login the server keeps no password for, and a running proxy without the forward
+// proxy. `server apply` and `server rollback` ask it of every server of the file before any changes,
+// as they ask the revision.
 func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
 	e := p.Egress
 	if e == nil {
 		return nil
+	}
+	// The proxy publishes the egress port on every address, so an app's `listen` on any one of them
+	// takes it. The filter matches the host's port, not the container's.
+	out, err := r.Run(ctx, "docker", "ps", "--filter", "publish="+strconv.Itoa(e.Port)+"/tcp", "--format", "{{.Names}}")
+	if err != nil {
+		return fmt.Errorf("asking which containers publish port %d: %w", e.Port, err)
+	}
+	for _, name := range strings.Fields(out) {
+		if name != Container {
+			return fmt.Errorf("egress: port %d is published on this server by %s (an app's listen, or a container outside boks), "+
+				"and the proxy publishes it on every address; choose another egress port or move that one; nothing was changed", e.Port, name)
+		}
 	}
 	if e.HostsFile != "" {
 		out, err := r.Run(ctx, "sh", "-c", "[ -f "+remote.Quote(e.HostsFile)+" ] && echo file; true")

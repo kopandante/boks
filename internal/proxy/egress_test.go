@@ -317,6 +317,11 @@ func TestCheckEgress(t *testing.T) {
 		"no password for the egress login": {Policy{Revision: 1, Egress: &noPass}, func(s *swap) {}},
 		"no forward proxy":                 {openEgress, func(s *swap) { s.out["docker exec "+Container+" caddy list-modules"] = "http.handlers.reverse_proxy" }},
 		"":                                 {withHosts, func(s *swap) { s.out["sh -c [ -f '/etc/hosts' ]"] = "file" }},
+		// An app's listen on a private address holds the host port the proxy would publish everywhere.
+		"port 3128 is published on this server by db-v1-1": {openEgress, func(s *swap) {
+			s.out["docker ps --filter publish=3128/tcp"] = Container + "\ndb-v1-1"
+		}},
+		"published: the proxy itself": {openEgress, func(s *swap) { s.out["docker ps --filter publish=3128/tcp"] = Container }},
 		"stopped: the boot makes it anew": {openEgress, func(s *swap) {
 			s.boxes[Container] = box{"exited", oldImage, Kind}
 			s.out["docker exec "+Container+" caddy list-modules"] = ""
