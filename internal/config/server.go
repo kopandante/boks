@@ -198,6 +198,13 @@ func (s *Server) validate() error {
 	if err := checkRanges(s.TrustedProxies, "proxies in front of boks"); err != nil {
 		return fmt.Errorf("trusted_proxies: %w", err)
 	}
+	// An IPv4 proxy connects as an IPv4 address, and Caddy compares it with IPv4 ranges only: written
+	// as IPv6 (::ffff:a.b.c.d), the entry would be applied and trust no one.
+	for _, p := range s.TrustedPrefixes() {
+		if p.Addr().Is4In6() {
+			return fmt.Errorf("trusted_proxies: %s is an IPv4 range written as IPv6; write it as IPv4", p)
+		}
+	}
 	names := map[string]bool{}
 	for i, b := range s.Bots.Block {
 		if !nameRe.MatchString(b.Name) {
