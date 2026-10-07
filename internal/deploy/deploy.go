@@ -281,7 +281,8 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if id == "" {
 		id = name
 	}
-	prune(ctx, r, log, cfg, l.tag, pruneReleases(ctx, r, log, cfg, id))
+	pruneReleases(ctx, r, log, cfg, id)
+	prune(ctx, r, log, cfg, l.tag)
 	return nil
 }
 
@@ -740,14 +741,12 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	return serving(ctx, r, cfg.App, name, name, op.id, now)
 }
 
-// pruneReleases applies keep to the recorded releases once current is id, and returns the ones it
-// removed. A failure costs disk, not the operation.
-func pruneReleases(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, id string) []release.Snapshot {
-	removed, err := release.Prune(ctx, r, cfg.App, id, cfg.Keep)
-	if err != nil {
+// pruneReleases applies keep to the recorded releases once current is id. A failure costs disk,
+// not the operation.
+func pruneReleases(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, id string) {
+	if err := release.Prune(ctx, r, cfg.App, id, cfg.Keep); err != nil {
 		fmt.Fprintf(log, "warning: could not prune old releases: %v\n", err)
 	}
-	return removed
 }
 
 // serving points `current` at release id and closes the operation that put it there, in that order,
@@ -1326,32 +1325,22 @@ func retire(ctx context.Context, r remote.Runner, log io.Writer, old []string) {
 	}
 }
 
-// prune removes the images of the releases keep dropped, and nothing else. Many apps can share one
-// image repository and differ only by tag (a Depot project keeps an organisation's images in one),
-// so `docker images <repo>` lists other apps' images too, their rollback targets among them: what
-// goes is a tag one of this app's dropped releases ran, and the untagged copy of a digest one of
-// them ran (re-pulling a moving tag leaves it behind), and only while no release still recorded on
-// the server, this app's or another's, names that tag or digest. current, the tag just put in
-// place, never goes. Docker refuses to remove an image a container still uses, and a failure costs
-// disk, not the operation.
-func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, current string, dropped []release.Snapshot) {
-	var repos []string
-	tags, digests := map[string]bool{}, map[string]bool{}
-	for _, s := range dropped {
-		if s.Image == "" {
-			continue
-		}
-		if !slices.Contains(repos, s.Image) {
-			repos = append(repos, s.Image)
-		}
-		if s.Tag != "" {
-			tags[s.Image+":"+s.Tag] = true
-		}
-		if s.Digest != "" {
-			digests[s.Image+"@"+s.Digest] = true
-		}
+// prune removes the images of the releases keep dropped, as release.Prune listed them, and nothing
+// else. Many apps can share one image repository and differ only by tag (a Depot project keeps an
+// organisation's images in one), so `docker images <repo>` lists other apps' images too, their
+// rollback targets among them: what goes is a tag a dropped release of this app ran, and the
+// untagged copy of a digest one ran (re-pulling a moving tag leaves it behind), and only while no
+// release still recorded on the server, this app's or another's, names that tag or digest. current,
+// the tag just put in place, never goes. What is still there afterwards — kept for a release that
+// names it, used by a container, a failed removal — stays on the list for the next deploy. A failure
+// costs disk, not the operation.
+func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, current string) {
+	dropped, err := release.Dropped(ctx, r, cfg.App)
+	if err != nil {
+		fmt.Fprintf(log, "warning: could not read the dropped images: %v\n", err)
+		return
 	}
-	if len(repos) == 0 {
+	if len(dropped) == 0 {
 		return
 	}
 	recorded, err := release.RecordedImages(ctx, r)
@@ -1359,49 +1348,112 @@ func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 		fmt.Fprintf(log, "warning: no image pruned: %v\n", err)
 		return
 	}
+	var repos []string
+	for _, img := range dropped {
+		if !slices.Contains(repos, img.Image) {
+			repos = append(repos, img.Image)
+		}
+	}
+	var left []release.Image
 	for _, repo := range repos {
-		out, err := r.Run(ctx, "docker", "images", "--digests", repo, "--format", "{{.Tag}} {{.Digest}} {{.ID}}")
+		var mine []release.Image
+		for _, img := range dropped {
+			if img.Image == repo {
+				mine = append(mine, img)
+			}
+		}
+		rows, err := imageRows(ctx, r, repo)
+		if err == nil {
+			removeDropped(ctx, r, log, repo, rows, mine, recorded, cfg.Image, current)
+			rows, err = imageRows(ctx, r, repo)
+		}
 		if err != nil {
 			fmt.Fprintf(log, "warning: could not list images: %v\n", err)
+			left = append(left, mine...)
 			continue
 		}
-		type row struct{ tag, digest, id string }
-		var rows []row
-		for _, line := range strings.Split(out, "\n") {
-			if f := strings.Fields(line); len(f) == 3 {
-				rows = append(rows, row{f[0], f[1], f[2]})
+		for _, img := range mine {
+			if slices.ContainsFunc(rows, func(w imageRow) bool { return ranBy(img, w) }) {
+				left = append(left, img)
 			}
 		}
-		// An image listed under anything that stays, a tag or a digest, stays whole: its untagged
-		// rows are the same image.
-		stays := map[string]bool{}
-		goes := func(w row) bool {
-			if recorded.Digests[w.digest] {
-				return false
-			}
-			if w.tag == "<none>" {
-				return digests[repo+"@"+w.digest]
-			}
-			ref := repo + ":" + w.tag
-			return tags[ref] && !recorded.Refs[ref] && !(repo == cfg.Image && w.tag == current)
+	}
+	if err := release.SetDropped(ctx, r, cfg.App, left); err != nil {
+		fmt.Fprintf(log, "warning: could not update the dropped images: %v\n", err)
+	}
+}
+
+// imageRow is one line of `docker images --digests`: an image under one tag and one digest of the
+// repository, either of which may be <none>.
+type imageRow struct{ tag, digest, id string }
+
+// ranBy says whether row is the image a dropped release ran: by its digest when the release recorded
+// one, since a tag may since have moved to an image a later release runs; by its tag otherwise.
+func ranBy(img release.Image, w imageRow) bool {
+	if img.Digest != "" {
+		return w.digest == img.Digest
+	}
+	return w.tag == img.Tag
+}
+
+func imageRows(ctx context.Context, r remote.Runner, repo string) ([]imageRow, error) {
+	out, err := r.Run(ctx, "docker", "images", "--digests", repo, "--format", "{{.Tag}} {{.Digest}} {{.ID}}")
+	if err != nil {
+		return nil, err
+	}
+	var rows []imageRow
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) == 3 {
+			rows = append(rows, imageRow{f[0], f[1], f[2]})
 		}
-		for _, w := range rows {
-			if !goes(w) {
-				stays[w.id] = true
-			}
+	}
+	return rows, nil
+}
+
+// removeDropped removes from repo what the dropped images name and no recorded release does. A tag
+// stays whole when any of its rows carries a digest a release names: removing the last tag of an
+// image takes all of its digests with it. An untagged copy goes by ID, so only when nothing else
+// listed under that ID stays.
+func removeDropped(ctx context.Context, r remote.Runner, log io.Writer, repo string, rows []imageRow, dropped []release.Image,
+	recorded release.Recorded, image, current string) {
+	tags, digests, held := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, img := range dropped {
+		if img.Tag != "" {
+			tags[img.Tag] = true
 		}
-		removed := map[string]bool{}
-		for _, w := range rows {
-			switch {
-			case !goes(w):
-			case w.tag != "<none>":
-				fmt.Fprintf(log, "prune %s:%s\n", repo, w.tag)
-				best(ctx, r, log, "docker", "rmi", repo+":"+w.tag)
-			case !stays[w.id] && !removed[w.id]:
-				removed[w.id] = true
-				fmt.Fprintf(log, "prune %s (untagged %s)\n", w.id, repo)
-				best(ctx, r, log, "docker", "rmi", w.id)
-			}
+		if img.Digest != "" {
+			digests[img.Digest] = true
+		}
+	}
+	for _, w := range rows {
+		if recorded.Digests[w.digest] {
+			held[w.tag] = true
+		}
+	}
+	goes := func(w imageRow) bool {
+		if w.tag == "<none>" {
+			return digests[w.digest] && !recorded.Digests[w.digest]
+		}
+		return tags[w.tag] && !held[w.tag] && !recorded.Refs[repo+":"+w.tag] && !(repo == image && w.tag == current)
+	}
+	stays := map[string]bool{}
+	for _, w := range rows {
+		if !goes(w) {
+			stays[w.id] = true
+		}
+	}
+	done := map[string]bool{}
+	for _, w := range rows {
+		switch {
+		case !goes(w):
+		case w.tag != "<none>" && !done[w.tag]:
+			done[w.tag] = true
+			fmt.Fprintf(log, "prune %s:%s\n", repo, w.tag)
+			best(ctx, r, log, "docker", "rmi", repo+":"+w.tag)
+		case w.tag == "<none>" && !stays[w.id] && !done[w.id]:
+			done[w.id] = true
+			fmt.Fprintf(log, "prune %s (untagged %s)\n", w.id, repo)
+			best(ctx, r, log, "docker", "rmi", w.id)
 		}
 	}
 }

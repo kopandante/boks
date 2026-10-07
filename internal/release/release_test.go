@@ -133,7 +133,7 @@ func TestUnfinishedIsNilWhenEverythingClosed(t *testing.T) {
 func TestPruneKeepsTheNewest(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
-	if _, err := Prune(context.Background(), f, "demo", "", 2); err != nil {
+	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.removed) != 4 || !strings.Contains(f.removed[0], "demo-v1-1.json") || f.removed[2] != ".boks/demo/files/demo-v1-1" || f.removed[3] != ".boks/demo/jobs/demo-v1-1" {
@@ -144,18 +144,35 @@ func TestPruneKeepsTheNewest(t *testing.T) {
 	}
 }
 
-// The image a removed release ran is named by its snapshot alone, so Prune reads it before the
-// snapshot goes and hands it back.
-func TestPruneReturnsWhatItRemoved(t *testing.T) {
+// The image a removed release ran is named by its snapshot alone, so Prune writes it down before
+// the snapshot goes; a snapshot that names no image (written before the field) adds nothing.
+func TestPruneWritesDownTheImagesItDrops(t *testing.T) {
 	f := newFake()
-	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
-	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","image":"r/p","tag":"v1","digest":"sha256:one"}`
-	removed, err := Prune(context.Background(), f, "demo", "", 2)
-	if err != nil {
+	f.out["sh -c ls -1"] = "demo-v0-0.json\ndemo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","image":"r/p","tag":"v1","digest":"sha256:one","ports":[]}`
+	f.out["cat .boks/demo/releases/demo-v0-0.json"] = `{"id":"demo-v0-0"}`
+	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
-	if len(removed) != 1 || removed[0].ID != "demo-v1-1" || removed[0].Image != "r/p" || removed[0].Tag != "v1" || removed[0].Digest != "sha256:one" {
-		t.Errorf("want v1 with its image, got %+v", removed)
+	if got := f.appends[".boks/demo/dropped-images.jsonl"]; got != `{"image":"r/p","tag":"v1","digest":"sha256:one"}`+"\n" {
+		t.Errorf("want v1's image written down, got %q", got)
+	}
+	if len(f.removed) != 8 {
+		t.Errorf("want v0 and v1 removed, got %v", f.removed)
+	}
+}
+
+// The list round-trips, and a line an append cut short is skipped rather than failing the rest.
+func TestDroppedReadsWhatSetDroppedWrote(t *testing.T) {
+	f := newFake()
+	imgs := []Image{{Image: "r/p", Tag: "v1", Digest: "sha256:one"}, {Image: "r/p", Tag: "v2"}}
+	if err := SetDropped(context.Background(), f, "demo", imgs); err != nil {
+		t.Fatal(err)
+	}
+	f.out["sh -c cat '.boks/demo/dropped-images.jsonl'"] = f.writes[".boks/demo/dropped-images.jsonl"] + `{"image":"r/p","ta`
+	got, err := Dropped(context.Background(), f, "demo")
+	if err != nil || !reflect.DeepEqual(got, imgs) {
+		t.Errorf("want %v, got %v (%v)", imgs, got, err)
 	}
 }
 
@@ -164,7 +181,7 @@ func TestPruneKeepsASnapshotItCannotRead(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
 	f.fail = map[string]error{"cat .boks/demo/releases/demo-v1-1.json": fmt.Errorf("connection reset")}
-	if _, err := Prune(context.Background(), f, "demo", "", 1); err == nil || len(f.removed) != 0 {
+	if err := Prune(context.Background(), f, "demo", "", 1); err == nil || len(f.removed) != 0 {
 		t.Errorf("want an error and nothing removed, got %v, %v", err, f.removed)
 	}
 }
@@ -204,7 +221,7 @@ func TestBeginWritesAnOpenEntry(t *testing.T) {
 func TestPruneGoesByAgeNotByTag(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-0a1b2c3-400.json\ndemo-c1d2e3f-100.json\ndemo-d4e5f6a-200.json\ndemo-e7f8a9b-300.json\n"
-	if _, err := Prune(context.Background(), f, "demo", "", 3); err != nil {
+	if err := Prune(context.Background(), f, "demo", "", 3); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{".boks/demo/releases/demo-c1d2e3f-100.json", ".boks/demo/demo-c1d2e3f-100.env", ".boks/demo/files/demo-c1d2e3f-100", ".boks/demo/jobs/demo-c1d2e3f-100"}
@@ -233,7 +250,7 @@ func TestIDsAreOldestFirstAcrossTags(t *testing.T) {
 func TestPruneKeepsEverythingWithinKeep(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
-	if _, err := Prune(context.Background(), f, "demo", "", 2); err != nil {
+	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.removed) != 0 {
@@ -325,7 +342,7 @@ func TestPruneKeepsWhatARollbackReaches(t *testing.T) {
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\ndemo-v4-4.json\n"
 	f.out["cat .boks/demo/releases/demo-v4-4.json"] = `{"id":"demo-v4-4","previous":"demo-v1-1"}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1"}`
-	if _, err := Prune(context.Background(), f, "demo", "demo-v4-4", 3); err != nil {
+	if err := Prune(context.Background(), f, "demo", "demo-v4-4", 3); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{".boks/demo/releases/demo-v2-2.json", ".boks/demo/demo-v2-2.env", ".boks/demo/files/demo-v2-2", ".boks/demo/jobs/demo-v2-2"}
