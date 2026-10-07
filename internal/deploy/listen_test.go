@@ -84,7 +84,8 @@ func TestListenRefusesAnAddressTheServerLacks(t *testing.T) {
 	}
 	f := listenFake()
 	f.fail["ip -o addr show"] = io.ErrUnexpectedEOF
-	if err := Run(context.Background(), f, io.Discard, parse(t, withListen), "v2", quick()); err == nil || !changedNothing(f) {
+	err := Run(context.Background(), f, io.Discard, parse(t, withListen), "v2", quick())
+	if err == nil || !strings.Contains(err.Error(), "listing the server's addresses") || !changedNothing(f) {
 		t.Errorf("a failed listing is a refusal, not an answer: %v %v", err, f.calls)
 	}
 }
