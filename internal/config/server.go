@@ -64,10 +64,11 @@ func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
 // TrustedPrefixes are TrustedProxies as CIDR ranges, as Prefixes are Allow.
 func (s *Server) TrustedPrefixes() []netip.Prefix { return prefixes(s.TrustedProxies) }
 
-// rangeOf is an address or a CIDR range as a range, an address alone the range of that one address.
+// rangeOf is an address or a CIDR range as a range, an address alone the range of that one address;
+// the bits past the prefix stay as written.
 func rangeOf(a string) (netip.Prefix, bool) {
 	if p, err := netip.ParsePrefix(a); err == nil {
-		return p.Masked(), true
+		return p, true
 	}
 	if ip, err := netip.ParseAddr(a); err == nil {
 		return netip.PrefixFrom(ip, ip.BitLen()), true
@@ -79,7 +80,7 @@ func prefixes(list []string) []netip.Prefix {
 	var out []netip.Prefix
 	for _, a := range list {
 		if p, ok := rangeOf(a); ok {
-			out = append(out, p)
+			out = append(out, p.Masked())
 		}
 	}
 	return out
@@ -199,10 +200,11 @@ func (s *Server) validate() error {
 		return fmt.Errorf("trusted_proxies: %w", err)
 	}
 	// An IPv4 proxy connects as an IPv4 address, and Caddy compares it with IPv4 ranges only: written
-	// as IPv6 (::ffff:a.b.c.d), the entry would be applied and trust no one.
-	for _, p := range s.TrustedPrefixes() {
-		if p.Addr().Is4In6() {
-			return fmt.Errorf("trusted_proxies: %s is an IPv4 range written as IPv6; write it as IPv4", p)
+	// as IPv6 (::ffff:a.b.c.d), the entry would be applied and trust no one. Told by the address as
+	// written: masked to a short prefix, it would lose the ::ffff.
+	for _, a := range s.TrustedProxies {
+		if p, _ := rangeOf(a); p.Addr().Is4In6() {
+			return fmt.Errorf("trusted_proxies: %q is an IPv4 address written as IPv6; write it as IPv4", a)
 		}
 	}
 	names := map[string]bool{}

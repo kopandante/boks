@@ -182,8 +182,10 @@ func TestParseServerTrustedProxiesRejects(t *testing.T) {
 		{trusted(`[traefik]`), "trusted_proxies: \"traefik\" is neither an address nor a CIDR range"},
 		{trusted(`[10.0.0.1/33]`), "neither an address"},
 		{trusted(`[""]`), "neither an address"},
-		{trusted(`["::ffff:87.228.113.239"]`), "trusted_proxies: ::ffff:87.228.113.239/128 is an IPv4 range written as IPv6"},
+		{trusted(`["::ffff:87.228.113.239"]`), "trusted_proxies: \"::ffff:87.228.113.239\" is an IPv4 address written as IPv6"},
 		{trusted(`["::ffff:10.0.0.0/104"]`), "written as IPv6"},
+		// Masked to /80, the address would be ::, an IPv6 range that never holds the proxy.
+		{trusted(`["::ffff:87.228.113.239/80"]`), "written as IPv6"},
 	} {
 		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc), c.want, err)
