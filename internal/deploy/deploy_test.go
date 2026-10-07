@@ -1336,9 +1336,17 @@ func TestContainerNameFitsOneDNSLabel(t *testing.T) {
 	if a, b := ContainerName("glavdoroga-convex", sha, time.Unix(1, 0)), ContainerName("glavdoroga-convex", sha, time.Unix(2, 0)); a == b {
 		t.Errorf("two deploys share %s", a)
 	}
-	// The cut never leaves a separator at the end of the tag.
-	if got := ContainerName("glavdoroga-convex", strings.Repeat("a", 29)+"-b", time.Unix(1791336560, 0)); strings.Contains(got, "--") || len(got) > 63 {
-		t.Errorf("got %s", got)
+	// The cut never leaves a separator at the end of the tag: 34 characters fit, the 34th is a "-".
+	if got, want := ContainerName("glavdoroga-convex", strings.Repeat("a", 33)+"-b", time.Unix(1791336560, 0)),
+		"glavdoroga-convex-"+strings.Repeat("a", 33)+"-1791336560"; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+	// An app name that leaves no room for the tag drops it rather than failing, even an empty one.
+	long := strings.Repeat("a", 52)
+	for _, tag := range []string{"", "v1"} {
+		if got, want := ContainerName(long, tag, time.Unix(1791336560, 0)), long+"--1791336560"; got != want {
+			t.Errorf("tag %q: got %s, want %s", tag, got, want)
+		}
 	}
 }
 

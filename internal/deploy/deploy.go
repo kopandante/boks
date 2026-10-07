@@ -58,7 +58,7 @@ func ContainerName(app, tag string, now time.Time) string {
 	stamp := strconv.FormatInt(now.Unix(), 10)
 	tag = unsafe.ReplaceAllString(tag, "-")
 	if room := maxNameLen - len(app) - len(stamp) - 2; len(tag) > room {
-		tag = strings.TrimRight(tag[:max(room, 1)], "-.")
+		tag = strings.TrimRight(tag[:max(room, 0)], "-.")
 	}
 	return app + "-" + tag + "-" + stamp
 }
