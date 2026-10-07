@@ -227,7 +227,7 @@ func TestReservationsAdmitWhereLimitsWouldNot(t *testing.T) {
 	g.server(1500, map[string][2]int{"a-v1-1": {1024, 200}, "b-v1-1": {1024, 100}})
 	err := Run(context.Background(), g, io.Discard, parse(t, reserving), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "needs 512m (its memory_reservation) but 0MiB is free") ||
-		!strings.Contains(err.Error(), "lower `memory_reservation`") {
+		!strings.Contains(err.Error(), "lower `memory_reservation` only if the app really uses less") {
 		t.Fatalf("limits without reservations still count whole: %v", err)
 	}
 	if g.has("docker run") {
@@ -1006,7 +1006,7 @@ func TestRollbackRestoresTheReservationOfTheRelease(t *testing.T) {
 	if run := g.calls[g.callAt("docker run")]; strings.Contains(run, "--memory-reservation") {
 		t.Errorf("a release recorded without a reservation runs without one: %s", run)
 	}
-	if !strings.Contains(log.String(), "recorded without a memory_reservation") {
+	if !strings.Contains(log.String(), "recorded without a memory_reservation, so it runs without that soft limit") {
 		t.Errorf("want the dropped reservation named: %q", log.String())
 	}
 }

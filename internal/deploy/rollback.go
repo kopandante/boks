@@ -47,8 +47,8 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 			"today's config asks for %s\n", id, cfg.Memory)
 	}
 	if cfg.MemoryReservation != "" && target.MemoryReservation == "" && target.Memory != "" {
-		fmt.Fprintf(log, "warning: release %s was recorded without a memory_reservation, so the memory check counts its whole limit %s, "+
-			"not the %s today's config reserves\n", id, target.Memory, cfg.MemoryReservation)
+		fmt.Fprintf(log, "warning: release %s was recorded without a memory_reservation, so it runs without that soft limit, "+
+			"and the memory check counts its whole limit %s, not the %s today's config reserves\n", id, target.Memory, cfg.MemoryReservation)
 	}
 	// The release runs as it was recorded, not with today's command: say so when that falls back to
 	// the image's own. The command itself is not printed — it can carry a secret.

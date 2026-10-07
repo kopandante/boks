@@ -218,9 +218,12 @@ func unlockAdmission(ctx context.Context, r remote.Runner, app string) (bool, er
 // be stopped give back what they use, and their own growth no longer counts; in overlap the old copy
 // keeps running beside the new one, growth included. replacing names those copies, nil in overlap.
 func checkMemory(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, replacing []string) error {
-	key, amount := "memory", cfg.Memory
+	// The hint is the way out that keeps the check honest: a reservation lowered below what the app
+	// uses would let it in by understating it, and undercount it for every deploy after.
+	amount, asked, hint := cfg.Memory, cfg.Memory, "lower `memory`"
 	if cfg.MemoryReservation != "" {
-		key, amount = "memory_reservation", cfg.MemoryReservation
+		amount, asked = cfg.MemoryReservation, cfg.MemoryReservation+" (its memory_reservation)"
+		hint = "lower `memory_reservation` only if the app really uses less"
 	}
 	need, err := config.MemoryBytes(amount)
 	if err != nil || need == 0 {
@@ -258,13 +261,9 @@ func checkMemory(ctx context.Context, r remote.Runner, log io.Writer, cfg *confi
 	}
 	terms := fmt.Sprintf("MemAvailable %s + %s used by the copies being stopped − %s − %s reserve",
 		size(avail), size(freed), growth, size(memoryReserve))
-	asked := amount
-	if key != "memory" {
-		asked = amount + " (its memory_reservation)"
-	}
 	if need > free {
 		return fmt.Errorf("preliminary memory check: %s needs %s but %s is free (%s); this is a preliminary check, not a guarantee against OOM; "+
-			"lower `%s`, or free memory on the server", cfg.App, asked, size(max(free, 0)), terms, key)
+			"%s, or free memory on the server", cfg.App, asked, size(max(free, 0)), terms, hint)
 	}
 	fmt.Fprintf(log, "memory: %s of %s free by the preliminary check (%s)\n", asked, size(free), terms)
 	return nil
