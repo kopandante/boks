@@ -35,6 +35,9 @@ type fake struct {
 	onRun func(cmd string)
 	// stdin is what each command that is not a file write was given on its standard input.
 	stdin map[string]string
+	// files is what the writes left in each file, appends added to what was there: a read of the
+	// app's list of images answers from it, so what a pull or a prune writes down the next step reads.
+	files map[string]string
 	// hang is the commands that never answer: they return only when their context ends, as an SSH
 	// call over a connection that stalled does once it is cut off.
 	hang []string
@@ -94,15 +97,17 @@ func (f *fake) wrote(path, content string, appended bool) error {
 	f.writes = append(f.writes, write{at: len(f.calls), path: path, content: content})
 	if appended {
 		f.appends[path] += content
+		f.files[path] += content
 	} else {
 		f.uploads[path] = content
+		f.files[path] = content
 	}
 	return nil
 }
 
 func newFake() *fake {
 	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{},
-		stopped: map[string]bool{}}
+		stopped: map[string]bool{}, files: map[string]string{}}
 	f.out[digests] = "[]"              // an image that came from no registry; tests that need a digest override it
 	f.out[netOwner] = "absent"         // the app's network is not made yet
 	f.out[applied] = "absent"          // the proxy has no applied config yet
@@ -185,6 +190,9 @@ func (f *fake) Run(ctx context.Context, args ...string) (string, error) {
 	if out, ok := longest(f.out, cmd); ok {
 		return out, nil
 	}
+	if p, ok := strings.CutPrefix(cmd, "sh -c if [ -e '"); ok && strings.HasSuffix(p, "/images.jsonl'; fi") {
+		return f.files[p[:strings.Index(p, "'")]], nil
+	}
 	switch c := args[len(args)-1]; {
 	case strings.HasPrefix(cmd, "docker stop "):
 		f.stopped[c] = true
@@ -242,6 +250,18 @@ func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string
 	return f.Run(ctx, args...)
 }
 
+// appended is whether anything was appended to other than the list of the app's images: the list
+// records the image a pull brought to the server, which a deploy refused after the pull leaves there.
+// Only a refusal after the pull asks this; one before it asks that nothing was appended at all.
+func (f *fake) appended() bool {
+	for p := range f.appends {
+		if !strings.HasSuffix(p, "/images.jsonl") {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fake) has(prefix string) bool {
 	for _, c := range f.calls {
 		if strings.HasPrefix(c, prefix) {
@@ -285,7 +305,6 @@ func TestRunHappyPath(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
 	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-v1-1\t[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}]\n"
-	f.out["docker images ghcr.io/x/y"] = "v2 sha-a\nv1 sha-b\nv0 sha-c\n"
 	f.out[frags] = fragment(t, "demo", "demo-v1-1", webPort)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatal(err)
@@ -299,6 +318,8 @@ func TestRunHappyPath(t *testing.T) {
 		boxesQuery,
 		// The image comes before the proxy: a pull the registry refuses leaves the server as it was.
 		"docker pull ghcr.io/x/y:v2",
+		// Its digest goes on the app's list of images with it.
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
 		// The proxy and its networks are every app's, so booting it takes the server's admission lock.
 		admitTake("demo"),
 		"docker network inspect boks",
@@ -351,12 +372,16 @@ func TestRunHappyPath(t *testing.T) {
 		// The old copy finishes what the proxy still holds for it before it goes.
 		upstreams,
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/y:v2",
-		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
 		cronClear("demo"),
 		"docker stop demo-v1-1",
 		"docker rm -v demo-v1-1",
-		"docker images ghcr.io/x/y --format {{.Tag}} {{.ID}}",
-		"docker rmi ghcr.io/x/y:v0",
+		// keep applies once the old copy is gone; within it nothing is dropped, so no image goes.
+		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
+		// The image just pulled is on the app's list, so the releases recorded and the images listed
+		// are read; here neither names anything, and nothing goes.
+		"sh -c if [ -e '.boks/demo/images.jsonl' ]; then cat '.boks/demo/images.jsonl'; fi",
+		recordedRead + `; do [ -e "$f" ] || continue; cat "$f" || exit 1; echo; done`,
+		"docker images --digests ghcr.io/x/y --format {{.Tag}} {{.Digest}} {{.ID}}",
 		"rmdir /tmp/boks-demo.lock",
 	}
 	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
@@ -440,6 +465,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		netOwnerQuery("boks-bot"),
 		boxesQuery,
 		"docker pull ghcr.io/x/bot:v2",
+		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
 		// Whether the app has routes to drop is its fragment's to say, not the proxy's.
 		frags + `; do [ -f "$f" ] && cat "$f"; done; true`,
@@ -469,7 +495,6 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		// In stop-first the admission lasts until the new copy is up.
 		admitGive("bot"),
 		"docker inspect --type image --format {{json .RepoDigests}} ghcr.io/x/bot:v2",
-		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
 		cronClear("bot"),
 		// Recorded: no proxy routes to the app, so the proxy is not left on its network — asked under
 		// the lock.
@@ -478,7 +503,10 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		admitGive("bot"),
 		"docker stop bot-v1-1",
 		"docker rm -v bot-v1-1",
-		"docker images ghcr.io/x/bot --format {{.Tag}} {{.ID}}",
+		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
+		"sh -c if [ -e '.boks/bot/images.jsonl' ]; then cat '.boks/bot/images.jsonl'; fi",
+		recordedRead + `; do [ -e "$f" ] || continue; cat "$f" || exit 1; echo; done`,
+		"docker images --digests ghcr.io/x/bot --format {{.Tag}} {{.Digest}} {{.ID}}",
 		"rmdir /tmp/boks-bot.lock",
 	}
 	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
@@ -865,7 +893,7 @@ func TestAHostAnotherAppRoutesIsRefusedBeforeAnyChange(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "is routed by both") {
 		t.Fatalf("want the host refused, got %v", err)
 	}
-	if f.has("docker run") || f.has("docker network create") || len(f.appends) != 0 {
+	if f.has("docker run") || f.has("docker network create") || f.appended() {
 		t.Errorf("nothing of the app may change: %v", f.calls)
 	}
 }
@@ -1285,22 +1313,355 @@ func TestARelativeHealthPathIsJoinedOntoTheAddress(t *testing.T) {
 	}
 }
 
-func TestPruneRemovesUntaggedImages(t *testing.T) {
+// depot is an image repository many apps share, each under its own tags, as a Depot project is.
+const depot = "registry.depot.dev/proj"
+
+// sharedRepo is a server where demo and other both deploy from depot. demo has releases a1 and a2
+// recorded and is deploying a3 with keep 2, so a1 is the release keep drops.
+func sharedRepo(t *testing.T) (*fake, *config.Config) {
+	t.Helper()
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
-	f.out["docker images ghcr.io/x/y"] = "v2 sha-new\n<none> sha-dangling\nv1 sha-b\nv0 sha-c\n"
-	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
+	f.out["docker ps -a --filter label=boks.app=demo"] = "demo-a2-2\t[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}]\n"
+	f.out[frags] = fragment(t, "demo", "demo-a2-2", webPort)
+	f.out["sh -c ls -1 '.boks/demo/releases'"] = "demo-a1-1.json\ndemo-a2-2.json\ndemo-a3-1700000000.json\n"
+	f.out["cat .boks/demo/releases/demo-a3-1700000000.json"] = `{"id":"demo-a3-1700000000","image":"` + depot + `","tag":"a3","previous":"demo-a2-2"}`
+	f.out["cat .boks/demo/releases/demo-a2-2.json"] = `{"id":"demo-a2-2","image":"` + depot + `","tag":"a2","digest":"sha256:a2"}`
+	f.out["cat .boks/demo/releases/demo-a1-1.json"] = `{"id":"demo-a1-1","image":"` + depot + `","tag":"a1","digest":"sha256:a1"}`
+	// What stays recorded once a1 is gone: demo's a2 and a3, and both releases of other.
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"a3"}` + "\n" +
+		`{"image":"` + depot + `","tag":"a2","digest":"sha256:a2"}` + "\n" +
+		`{"image":"` + depot + `","tag":"b2","digest":"sha256:b2"}` + "\n" +
+		`{"image":"` + depot + `","tag":"b1","digest":"sha256:b1"}`
+	cfg := parse(t, strings.Replace(onePort, "image: ghcr.io/x/y", "image: "+depot, 1))
+	return f, cfg
+}
+
+const (
+	// recordedRead is the read of every app's recorded releases.
+	recordedRead = "sh -c for f in .boks/*/releases/*.json"
+	depotImages  = "docker images --digests " + depot
+	appImages    = ".boks/demo/images.jsonl"
+)
+
+// rmis is every image removal, in order.
+func (f *fake) rmis() []string {
+	var out []string
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "docker rmi ") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// listsAfter makes the image listing answer rows once cmd has run, as docker does after a removal.
+func (f *fake) listsAfter(cmd, rows string) {
+	f.onRun = func(c string) {
+		if c == cmd {
+			f.out[depotImages] = rows
+		}
+	}
+}
+
+// Deploying one app of a shared repository removes its own release keep dropped and nothing of the
+// other app: neither the previous release other could roll back to, nor a tag of other's that no
+// snapshot names any more, nor an untagged copy of other's.
+func TestPruneLeavesOtherAppsOfTheRepositoryAlone(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	others := strings.Join([]string{
+		"a3 sha256:a3 id-a3",
+		"b2 sha256:b2 id-b2",
+		"a2 sha256:a2 id-a2",
+		"b1 sha256:b1 id-b1",
+		"b0 sha256:b0 id-b0",
+		"<none> sha256:b1 id-b1",
+		"<none> sha256:bx id-bx",
+		"<none> <none> id-local",
+	}, "\n")
+	f.out[depotImages] = "a1 sha256:a1 id-a1\n" + others
+	f.listsAfter("docker rmi "+depot+":a1", others)
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
 		t.Fatal(err)
 	}
-	if !f.has("docker rmi sha-dangling") {
-		t.Errorf("untagged layers must be pruned, calls:\n%s", strings.Join(f.calls, "\n"))
+	if want := []string{"docker rmi " + depot + ":a1"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("want only demo's dropped release removed, got %v\ncalls:\n%s", f.rmis(), strings.Join(f.calls, "\n"))
 	}
-	if f.has("docker rmi sha-new") || f.has("docker rmi ghcr.io/x/y:v2") {
-		t.Error("the image just deployed must never be pruned")
+	if !f.has("rm -rf .boks/demo/releases/demo-a1-1.json") || f.has("rm -rf .boks/demo/releases/demo-a2-2.json") {
+		t.Errorf("keep 2 must drop a1 and keep a2: %v", f.calls)
 	}
-	// keep=2 counts tagged versions only: v2 (current) + v1 retained, v0 removed.
-	if !f.has("docker rmi ghcr.io/x/y:v0") || f.has("docker rmi ghcr.io/x/y:v1") {
-		t.Errorf("keep=2 must retain v1 and drop v0, calls:\n%s", strings.Join(f.calls, "\n"))
+	// a1's image is written down before its snapshot goes, and removed once the old copy is gone.
+	if w, rm := f.writeAt(appImages, `"tag":"a1"`), f.callAt("rm -rf .boks/demo/releases/demo-a1-1.json"); w < 0 || w > rm {
+		t.Errorf("want a1's image written down before its snapshot is removed: %v", f.writes)
+	}
+	if f.lastAt("docker rm -v demo-a2-2") < 0 || f.lastAt("docker rm -v demo-a2-2") > f.callAt("docker rmi") {
+		t.Errorf("want the old copy retired before the image is pruned: %v", f.calls)
+	}
+	// a1 is gone, so it leaves the list; a3, pulled by this deploy and its release now, stays.
+	if got, want := f.files[appImages], `{"image":"`+depot+`","tag":"a3"}`+"\n"; got != want {
+		t.Errorf("want the list %q, got %q", want, got)
+	}
+}
+
+// A moving tag leaves the image it used to name untagged; the copy of a dropped release's digest
+// goes, copies whose digests are not on the app's list stay, and so does the tag itself, which the
+// kept releases still name.
+func TestPruneRemovesTheUntaggedCopyOfADroppedRelease(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out["sh -c ls -1 '.boks/demo/releases'"] = "demo-latest-1.json\ndemo-latest-2.json\ndemo-latest-1700000000.json\n"
+	f.out["cat .boks/demo/releases/demo-latest-1700000000.json"] = `{"id":"demo-latest-1700000000","image":"` + depot + `","tag":"latest","digest":"sha256:new","previous":"demo-latest-2"}`
+	f.out["cat .boks/demo/releases/demo-latest-2.json"] = `{"id":"demo-latest-2","image":"` + depot + `","tag":"latest","digest":"sha256:mid"}`
+	f.out["cat .boks/demo/releases/demo-latest-1.json"] = `{"id":"demo-latest-1","image":"` + depot + `","tag":"latest","digest":"sha256:old"}`
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:new"}` + "\n" +
+		`{"image":"` + depot + `","tag":"latest","digest":"sha256:mid"}`
+	rest := "latest sha256:new id-new\n<none> sha256:mid id-mid\n<none> sha256:other id-other\n"
+	f.out[depotImages] = rest + "<none> sha256:old id-old\n"
+	f.listsAfter("docker rmi id-old", rest)
+	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"docker rmi id-old"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("only the dropped release's copy may go, got %v", f.rmis())
+	}
+	// The tag still exists, on another image: the dropped release's image is gone, so is its line;
+	// the tag pulled stays, a release names it.
+	if got, want := f.files[appImages], `{"image":"`+depot+`","tag":"latest"}`+"\n"; got != want {
+		t.Errorf("want the list %q, got %q", want, got)
+	}
+}
+
+// A deploy whose copy never starts leaves its image pulled and no release naming it: the next
+// deploy of the app removes it, since no release names it.
+func TestPruneRemovesTheImageOfAFailedDeploy(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.fail["docker run -d --name demo-bad-"] = errors.New("exec format error")
+	if err := Run(context.Background(), f, io.Discard, cfg, "bad", fixed); err == nil {
+		t.Fatal("want the deploy refused")
+	}
+	if !strings.Contains(f.files[appImages], `"tag":"bad"`) {
+		t.Fatalf("the image pulled must be written down, got %q", f.files[appImages])
+	}
+	f.out[depotImages] = "a3 sha256:a3 id-a3\nbad sha256:bad id-bad\na2 sha256:a2 id-a2\na1 sha256:a1 id-a1\n"
+	f.listsAfter("docker rmi "+depot+":a1", "a3 sha256:a3 id-a3\na2 sha256:a2 id-a2\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"docker rmi " + depot + ":bad", "docker rmi " + depot + ":a1"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("want the failed deploy's image and a1 removed, got %v", f.rmis())
+	}
+}
+
+// A moving tag pulled by a deploy that fails, then pulled again, leaves the failed image untagged:
+// its digest, written down at the pull, is what lets the next deploy remove it.
+func TestPruneRemovesTheUntaggedImageOfAFailedDeployOfAMovingTag(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out["sh -c ls -1 '.boks/demo/releases'"] = ""
+	inspect := "docker inspect --type image --format {{json .RepoDigests}} " + depot + ":latest"
+	f.out[inspect] = `["` + depot + `@sha256:failed"]`
+	f.fail["docker run -d --name demo-latest-"] = errors.New("exec format error")
+	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err == nil {
+		t.Fatal("want the deploy refused")
+	}
+	delete(f.fail, "docker run -d --name demo-latest-")
+	f.out[inspect] = `["` + depot + `@sha256:good"]`
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:good"}`
+	f.out[depotImages] = "latest sha256:good id-good\n<none> sha256:failed id-failed\n"
+	f.listsAfter("docker rmi id-failed", "latest sha256:good id-good\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"docker rmi id-failed"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("want the failed deploy's image removed, got %v", f.rmis())
+	}
+	if got, want := f.files[appImages], `{"image":"`+depot+`","tag":"latest","digest":"sha256:good"}`+"\n"; got != want {
+		t.Errorf("want the list %q, got %q", want, got)
+	}
+}
+
+// An image a release still names stays on the list, and goes once no release names it: with keep 1,
+// a1 and a2 of one build share a digest, so a1, dropped by an earlier deploy, was kept back while a2
+// named the digest and is still on the list; dropping a2 must remove both tags.
+func TestPruneComesBackToAnImageOnceNoReleaseNamesIt(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out["sh -c ls -1 '.boks/demo/releases'"] = "demo-a2-2.json\ndemo-a3-1700000000.json\n"
+	f.out["cat .boks/demo/releases/demo-a2-2.json"] = `{"id":"demo-a2-2","image":"` + depot + `","tag":"a2","digest":"sha256:d"}`
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"a3","digest":"sha256:e"}`
+	// What a prune of an earlier deploy left on the list: a1, the same build as a2, kept back then.
+	f.files[appImages] = `{"image":"` + depot + `","tag":"a1","digest":"sha256:d"}` + "\n"
+	f.out[depotImages] = "a3 sha256:e id-e\na2 sha256:d id-d\na1 sha256:d id-d\n"
+	f.listsAfter("docker rmi "+depot+":a2", "a3 sha256:e id-e\n")
+	cfg.Keep = 1
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"docker rmi " + depot + ":a2", "docker rmi " + depot + ":a1"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("want both tags of the build removed, got %v", f.rmis())
+	}
+}
+
+// The protection of a digest holds for every row of a tag: an image with two digests of the
+// repository, one of them a release's, keeps its tag, since removing its last tag removes both.
+func TestPruneKeepsATagWhoseImageCarriesARecordedDigest(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[recordedRead] += "\n" + `{"image":"` + depot + `","tag":"b7","digest":"sha256:b7"}`
+	f.out[depotImages] = "a1 sha256:b7 id-a1\na1 sha256:a1 id-a1\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("an image a release names must stay: %v", f.rmis())
+	}
+	if !strings.Contains(f.files[appImages], `"tag":"a1"`) {
+		t.Errorf("an image kept back stays on the list, got %q", f.files[appImages])
+	}
+}
+
+// An untagged copy goes by ID, and an ID is the whole image: when another row of it stays (here
+// a tag of another app no release names, which this app has no claim to), the copy stays too.
+func TestPruneKeepsAnUntaggedCopyOfAnImageThatStaysUnderATag(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[depotImages] = "b5 sha256:b5 id-x\n<none> sha256:a1 id-x\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("an image listed under a tag that stays must stay: %v", f.rmis())
+	}
+}
+
+// The tag just put in place never goes, even while no recorded release names it yet.
+func TestPruneNeverRemovesTheTagJustDeployed(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"b2","digest":"sha256:b2"}`
+	f.out[depotImages] = "a3 sha256:a3 id-a3\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("the image just deployed must never be pruned: %v", f.rmis())
+	}
+}
+
+// The previous image of a moving tag is on the app's list from its pull and untagged now; while a
+// kept release names its digest it is a rollback target and stays.
+func TestPruneKeepsTheUntaggedCopyAKeptReleaseNames(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out["sh -c ls -1 '.boks/demo/releases'"] = ""
+	f.files[appImages] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:mid"}` + "\n"
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:new"}` + "\n" +
+		`{"image":"` + depot + `","tag":"latest","digest":"sha256:mid"}`
+	f.out[depotImages] = "latest sha256:new id-new\n<none> sha256:mid id-mid\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("a kept release's image must stay: %v", f.rmis())
+	}
+	if !strings.Contains(f.files[appImages], `"digest":"sha256:mid"`) {
+		t.Errorf("an image kept back stays on the list, got %q", f.files[appImages])
+	}
+}
+
+// A release recorded without a digest (before the field, or from an image with no registry digest)
+// names its tag alone, and the tag stays for it.
+func TestPruneKeepsATagARecordedReleaseNamesWithoutADigest(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[recordedRead] += "\n" + `{"image":"` + depot + `","tag":"a1"}`
+	f.out[depotImages] = "a1 sha256:a1 id-a1\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("a tag a release names must stay: %v", f.rmis())
+	}
+}
+
+// A listing that fails says nothing about what is still there: the app's images stay on its list.
+func TestPruneKeepsTheListWhenTheImagesCannotBeListed(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.fail[depotImages] = errors.New("connection reset")
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if f.has("docker rmi") || !strings.Contains(f.files[appImages], `"tag":"a1"`) || !strings.Contains(f.files[appImages], `"tag":"a3"`) {
+		t.Errorf("want nothing removed and the list kept, got %q: %v", f.files[appImages], f.calls)
+	}
+}
+
+// A tag that has moved since the app pulled it names an image the app did not bring: it stays.
+func TestPruneKeepsATagThatMovedAway(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[depotImages] = "a1 sha256:elsewhere id-x\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("a tag that moved must stay: %v", f.rmis())
+	}
+}
+
+// An image listed untagged before its tag goes by the tag alone: a removal by ID first would take
+// the tag with it and fail the tag's removal.
+func TestPruneRemovesATagBeforeItsUntaggedRow(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[depotImages] = "<none> sha256:a1 id-a1\na1 sha256:a1 id-a1\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"docker rmi " + depot + ":a1"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("want the tag alone removed, got %v", f.rmis())
+	}
+}
+
+// A pull and a prune can both write one image down; the list keeps it once.
+func TestPruneWritesEachImageOnce(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	a2 := `{"image":"` + depot + `","tag":"a2","digest":"sha256:a2"}` + "\n"
+	f.files[appImages] = a2 + a2
+	f.out[depotImages] = "a3 sha256:a3 id-a3\na2 sha256:a2 id-a2\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(f.files[appImages], `"tag":"a2"`); n != 1 {
+		t.Errorf("want a2 once on the list, got %d in %q", n, f.files[appImages])
+	}
+}
+
+// One image pushed under two tags, one for each app: when the other app's release names its digest,
+// demo's dropped tag stays too, since removing it may remove the image the other app rolls back to.
+func TestPruneKeepsADigestAnotherAppRecorded(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[recordedRead] += "\n" + `{"image":"` + depot + `","tag":"b9","digest":"sha256:a1"}`
+	f.out[depotImages] = "a1 sha256:a1 id-a1\n<none> sha256:a1 id-a1\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("an image another app's release names must stay: %v", f.rmis())
+	}
+}
+
+// Without knowing what every app's releases name, nothing can be known to be no one's: no image
+// goes, and the list keeps what it had for the next deploy.
+func TestPruneRemovesNothingWhenTheRecordedReleasesCannotBeRead(t *testing.T) {
+	for name, set := range map[string]func(f *fake){
+		"failed read": func(f *fake) { f.fail[recordedRead] = errors.New("connection reset") },
+		"damaged":     func(f *fake) { f.out[recordedRead] = `{"image":"x","tag":` },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, cfg := sharedRepo(t)
+			set(f)
+			f.out[depotImages] = "a1 sha256:a1 id-a1\n"
+			if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+				t.Fatal(err)
+			}
+			if f.has("docker rmi") || f.has("docker images") {
+				t.Errorf("no image may be pruned: %v", f.calls)
+			}
+			if !strings.Contains(f.files[appImages], `"tag":"a1"`) {
+				t.Errorf("a1 must stay on the list, got %q", f.files[appImages])
+			}
+		})
 	}
 }
 
@@ -1652,7 +2013,7 @@ func TestRoutelessNameCollisionWritesNoJournal(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
 		t.Fatal("want an error")
 	}
-	if len(f.appends) != 0 {
+	if f.appended() {
 		t.Errorf("no journal entry for a refused deploy: %v", f.appends)
 	}
 }
@@ -1673,7 +2034,7 @@ func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	if f.has("docker run") || len(f.appends) != 0 {
+	if f.has("docker run") || f.appended() {
 		t.Errorf("nothing may change: %v %v", f.calls, f.appends)
 	}
 }

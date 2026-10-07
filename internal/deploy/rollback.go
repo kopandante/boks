@@ -76,12 +76,9 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 		// So a second rollback goes one step further back instead of returning to the release this
 		// one just left.
 		record: func(ctx context.Context, name string, op operation) error {
-			if err := serving(ctx, r, cfg.App, id, name, op.id, o.Now()); err != nil {
-				return err
-			}
-			pruneReleases(ctx, r, log, cfg, id)
-			return nil
+			return serving(ctx, r, cfg.App, id, name, op.id, o.Now())
 		},
+		id: id,
 	}, o)
 }
 

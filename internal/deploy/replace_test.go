@@ -103,7 +103,7 @@ func TestOverlapMustFitBesideTheOldCopy(t *testing.T) {
 	if !strings.Contains(err.Error(), "232MiB is free") {
 		t.Errorf("the refusal must give the arithmetic: %v", err)
 	}
-	if f.has("docker run") || f.has("docker stop") || f.has(reloadVia) || len(f.appends) != 0 {
+	if f.has("docker run") || f.has("docker stop") || f.has(reloadVia) || f.appended() {
 		t.Errorf("nothing may change before the check: %v / %v", f.calls, f.appends)
 	}
 	if !f.has(admitGive("demo")) {
@@ -212,7 +212,7 @@ func TestAdmissionWaitsForAnotherApp(t *testing.T) {
 	if !strings.Contains(log.String(), "waiting for the deploy of convex") {
 		t.Errorf("the wait must be visible: %q", log.String())
 	}
-	if f.has("docker run") || len(f.appends) != 0 || f.has("sh -c [ ") {
+	if f.has("docker run") || f.appended() || f.has("sh -c [ ") {
 		t.Errorf("nothing changes, and a lock that is not ours is not removed: %v", f.calls)
 	}
 

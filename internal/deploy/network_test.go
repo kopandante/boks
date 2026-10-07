@@ -140,7 +140,7 @@ func TestTheNetworkIsAskedAgainUnderTheAdmissionLock(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "answers to demo") {
 		t.Fatalf("want the late conflict, got %v", err)
 	}
-	if f.has("docker network create") || f.has("docker run") || len(f.appends) != 0 || !f.has(admitGive("demo")) {
+	if f.has("docker network create") || f.has("docker run") || f.appended() || !f.has(admitGive("demo")) {
 		t.Errorf("nothing of the app changes, and the admission is given back: %v", f.calls)
 	}
 }
@@ -350,7 +350,7 @@ func TestAProxyThatCannotReachARouteStopsTheDeploy(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "other-v1-1") {
 		t.Fatalf("want the boot's failure, got %v", err)
 	}
-	if f.has("docker run") || len(f.appends) != 0 || !f.has(admitGive("demo")) {
+	if f.has("docker run") || f.appended() || !f.has(admitGive("demo")) {
 		t.Errorf("nothing of the app changes, and the lock is given back: %v", f.calls)
 	}
 }

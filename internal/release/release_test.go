@@ -16,6 +16,10 @@ type fake struct {
 	writes  map[string]string
 	appends map[string]string
 	removed []string
+	// fail answers a command starting with its key with an error.
+	fail map[string]error
+	// pipeFail, when set, fails every file write.
+	pipeFail error
 	// rmFlags is the flags of every rm, in order: a release's files are a directory, which plain -f refuses.
 	rmFlags []string
 }
@@ -26,6 +30,11 @@ func newFake() *fake {
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
+	for prefix, err := range f.fail {
+		if strings.HasPrefix(cmd, prefix) {
+			return "", err
+		}
+	}
 	if args[0] == "rm" {
 		f.removed = append(f.removed, args[2:]...)
 		f.rmFlags = append(f.rmFlags, args[1])
@@ -39,6 +48,9 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 }
 
 func (f *fake) Pipe(_ context.Context, content []byte, args ...string) (string, error) {
+	if f.pipeFail != nil {
+		return "", f.pipeFail
+	}
 	script := args[len(args)-1]
 	if _, tail, ok := strings.Cut(script, " && mv "); ok {
 		_, dest, _ := strings.Cut(tail, "' '")
@@ -134,6 +146,82 @@ func TestPruneKeepsTheNewest(t *testing.T) {
 	}
 	if strings.Join(f.rmFlags, " ") != "-rf" {
 		t.Errorf("the files are a directory, so the removal must be recursive: %v", f.rmFlags)
+	}
+}
+
+// The image a removed release ran is named by its snapshot alone, so Prune writes it down before
+// the snapshot goes; a snapshot that names no image (written before the field) adds nothing.
+func TestPruneWritesDownTheImagesItDrops(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v0-0.json\ndemo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","image":"r/p","tag":"v1","digest":"sha256:one","ports":[]}`
+	f.out["cat .boks/demo/releases/demo-v0-0.json"] = `{"id":"demo-v0-0"}`
+	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.appends[".boks/demo/images.jsonl"]; got != `{"image":"r/p","tag":"v1","digest":"sha256:one"}`+"\n" {
+		t.Errorf("want v1's image written down, got %q", got)
+	}
+	if len(f.removed) != 8 {
+		t.Errorf("want v0 and v1 removed, got %v", f.removed)
+	}
+}
+
+// The list round-trips, and a line an append cut short is skipped rather than failing the rest.
+func TestImagesReadsWhatSetImagesWrote(t *testing.T) {
+	f := newFake()
+	imgs := []Image{{Image: "r/p", Tag: "v1", Digest: "sha256:one"}, {Image: "r/p", Tag: "v2"}}
+	if err := SetImages(context.Background(), f, "demo", imgs); err != nil {
+		t.Fatal(err)
+	}
+	f.out["sh -c if [ -e '.boks/demo/images.jsonl' ]"] = f.writes[".boks/demo/images.jsonl"] + `{"image":"r/p","ta`
+	got, err := Images(context.Background(), f, "demo")
+	if err != nil || !reflect.DeepEqual(got, imgs) {
+		t.Errorf("want %v, got %v (%v)", imgs, got, err)
+	}
+	// A list that is there and cannot be read is an error, not an empty list.
+	f.fail = map[string]error{"sh -c if [ -e '.boks/demo/images.jsonl' ]": fmt.Errorf("permission denied")}
+	if _, err := Images(context.Background(), f, "demo"); err == nil {
+		t.Error("want the read failure reported")
+	}
+}
+
+// A snapshot that cannot be read is not removed: its image would never be known again.
+func TestPruneKeepsASnapshotItCannotRead(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
+	f.fail = map[string]error{"cat .boks/demo/releases/demo-v1-1.json": fmt.Errorf("connection reset")}
+	if err := Prune(context.Background(), f, "demo", "", 1); err == nil || len(f.removed) != 0 {
+		t.Errorf("want an error and nothing removed, got %v, %v", err, f.removed)
+	}
+}
+
+// Nor one whose image cannot be written down: once the snapshot is gone, nothing names the image.
+func TestPruneKeepsASnapshotWhoseImageCannotBeWrittenDown(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","image":"r/p","tag":"v1"}`
+	f.pipeFail = fmt.Errorf("no space left on device")
+	if err := Prune(context.Background(), f, "demo", "", 1); err == nil || len(f.removed) != 0 {
+		t.Errorf("want an error and nothing removed, got %v, %v", err, f.removed)
+	}
+}
+
+func TestRecordedImagesReadsEveryApp(t *testing.T) {
+	f := newFake()
+	f.out[`sh -c for f in .boks/*/releases/*.json; do [ -e "$f" ] || continue; cat "$f" || exit 1; echo; done`] = "{\n  \"app\": \"a\", \"image\": \"r/p\", \"tag\": \"a1\", \"digest\": \"sha256:a\"\n}\n" +
+		`{"app":"b","image":"r/p","tag":"b1"}` + "\n" + `{"app":"old","id":"x"}` + "\n"
+	rec, err := RecordedImages(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rec.Refs, map[string]bool{"r/p:a1": true, "r/p:b1": true}) || !reflect.DeepEqual(rec.Digests, map[string]bool{"sha256:a": true}) {
+		t.Errorf("got %+v", rec)
+	}
+	f = newFake()
+	f.out["sh -c for f in .boks/*/releases"] = `{"image":`
+	if _, err := RecordedImages(context.Background(), f); err == nil {
+		t.Error("a damaged snapshot must fail the read, not shorten it")
 	}
 }
 
