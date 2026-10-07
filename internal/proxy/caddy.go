@@ -458,7 +458,11 @@ func egressServer(e Egress) (*server, error) {
 		// A target none of whose addresses answered is a 403 error from the plugin — the code of its
 		// refusals of a port or a host, and of this server's refusal of a client. Clients read a 403
 		// from their proxy as "the way out is closed to us" and alert on it; tinyproxy answered 5xx.
-		// So that one error, told by its message, is answered 502; the refusals stay 403.
+		// So that one error, told by its message, is answered 502; the refusals of a port, a host and a
+		// client stay 403. A private or loopback target ends in the same error — the plugin skips those
+		// addresses rather than refusing them — so it is 502 too, and still never reached.
+		// With an errors route Caddy logs every error it handles at debug, this one or not: the 5xx a
+		// failed lookup logged as an error, with its target, is gone, as "No logs" above wants.
 		Errors: &serverErrors{Routes: []caddyRoute{{
 			Match:    []match{{Expression: `{http.error.status_code} == 403 && {http.error.message}.startsWith('no allowed IP addresses')`}},
 			Handle:   []handler{{Handler: "static_response", StatusCode: 502, Body: "egress: no address of the target answered\n"}},
