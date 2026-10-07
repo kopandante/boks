@@ -18,6 +18,8 @@ type fake struct {
 	removed []string
 	// fail answers a command starting with its key with an error.
 	fail map[string]error
+	// pipeFail, when set, fails every file write.
+	pipeFail error
 	// rmFlags is the flags of every rm, in order: a release's files are a directory, which plain -f refuses.
 	rmFlags []string
 }
@@ -46,6 +48,9 @@ func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 }
 
 func (f *fake) Pipe(_ context.Context, content []byte, args ...string) (string, error) {
+	if f.pipeFail != nil {
+		return "", f.pipeFail
+	}
 	script := args[len(args)-1]
 	if _, tail, ok := strings.Cut(script, " && mv "); ok {
 		_, dest, _ := strings.Cut(tail, "' '")
@@ -181,6 +186,17 @@ func TestPruneKeepsASnapshotItCannotRead(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
 	f.fail = map[string]error{"cat .boks/demo/releases/demo-v1-1.json": fmt.Errorf("connection reset")}
+	if err := Prune(context.Background(), f, "demo", "", 1); err == nil || len(f.removed) != 0 {
+		t.Errorf("want an error and nothing removed, got %v, %v", err, f.removed)
+	}
+}
+
+// Nor one whose image cannot be written down: once the snapshot is gone, nothing names the image.
+func TestPruneKeepsASnapshotWhoseImageCannotBeWrittenDown(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","image":"r/p","tag":"v1"}`
+	f.pipeFail = fmt.Errorf("no space left on device")
 	if err := Prune(context.Background(), f, "demo", "", 1); err == nil || len(f.removed) != 0 {
 		t.Errorf("want an error and nothing removed, got %v, %v", err, f.removed)
 	}
