@@ -50,6 +50,11 @@ func TestConfigEgress(t *testing.T) {
 			t.Errorf("want %s in %s", want, got)
 		}
 	}
+	// A target that does not answer is 502, not the 403 of a refusal.
+	if !strings.Contains(got, `"errors":{"routes":[{"handle":[{"body":"egress: no address of the target answered\n","handler":"static_response","status_code":502}]`) ||
+		!strings.Contains(got, `"expression":"{http.error.status_code} == 403 \u0026\u0026 {http.error.message}.startsWith('no allowed IP addresses')"`) {
+		t.Errorf("want the unanswered target answered 502: %s", got)
+	}
 	if strings.Contains(got, `"logs"`) || strings.Contains(got, "User-Agent") || strings.Contains(got, `"status_code":404`) {
 		t.Errorf("the sites' logs, filter or 404 on the egress server: %s", got)
 	}

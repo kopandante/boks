@@ -329,6 +329,11 @@ type (
 		Protocols []string     `json:"protocols,omitempty"`
 		AutoHTTPS *autoHTTPS   `json:"automatic_https,omitempty"`
 		Logs      *struct{}    `json:"logs,omitempty"`
+		// Errors are the routes for an error a handler returned rather than a response it wrote.
+		Errors *serverErrors `json:"errors,omitempty"`
+	}
+	serverErrors struct {
+		Routes []caddyRoute `json:"routes"`
 	}
 	autoHTTPS struct {
 		Disable          bool     `json:"disable,omitempty"`
@@ -352,6 +357,8 @@ type (
 		Not []match `json:"not,omitempty"`
 		// RemoteIP matches the address of the connection — the client's, past Docker's DNAT.
 		RemoteIP *remoteIP `json:"remote_ip,omitempty"`
+		// Expression is a CEL expression over the request and its placeholders.
+		Expression string `json:"expression,omitempty"`
 	}
 	remoteIP struct {
 		Ranges []string `json:"ranges"`
@@ -373,7 +380,8 @@ type (
 		StripPathPrefix string          `json:"strip_path_prefix,omitempty"`
 		PathRegexp      []regexpReplace `json:"path_regexp,omitempty"`
 		// static_response
-		StatusCode int `json:"status_code,omitempty"`
+		StatusCode int    `json:"status_code,omitempty"`
+		Body       string `json:"body,omitempty"`
 		// headers
 		Response *responseOps `json:"response,omitempty"`
 		// subroute
@@ -447,6 +455,19 @@ func egressServer(e Egress) (*server, error) {
 			{Match: []match{{RemoteIP: &remoteIP{Ranges: e.Allow}}}, Handle: []handler{fp}, Terminal: true},
 			{Handle: []handler{{Handler: "static_response", StatusCode: 403}}, Terminal: true},
 		},
+		// A target none of whose addresses answered is a 403 error from the plugin — the code of its
+		// refusals of a port or a host, and of this server's refusal of a client. Clients read a 403
+		// from their proxy as "the way out is closed to us" and alert on it; tinyproxy answered 5xx.
+		// So that one error, told by its message, is answered 502; the refusals of a port, a host and a
+		// client stay 403. A private or loopback target ends in the same error — the plugin skips those
+		// addresses rather than refusing them — so it is 502 too, and still never reached.
+		// With an errors route Caddy logs every error it handles at debug, this one or not: the 5xx a
+		// failed lookup logged as an error, with its target, is gone, as "No logs" above wants.
+		Errors: &serverErrors{Routes: []caddyRoute{{
+			Match:    []match{{Expression: `{http.error.status_code} == 403 && {http.error.message}.startsWith('no allowed IP addresses')`}},
+			Handle:   []handler{{Handler: "static_response", StatusCode: 502, Body: "egress: no address of the target answered\n"}},
+			Terminal: true,
+		}}},
 	}, nil
 }
 
