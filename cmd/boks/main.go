@@ -477,6 +477,9 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 				}
 				fmt.Fprintf(out, "  egress proxy on port %d for %s, %s\n", e.Port, strings.Join(e.Allow, ", "), login)
 			}
+			if len(p.TrustedProxies) > 0 {
+				fmt.Fprintf(out, "  X-Forwarded-For trusted from %s\n", strings.Join(p.TrustedProxies, ", "))
+			}
 			for _, d := range drift {
 				fmt.Fprintf(out, "  ! %s\n", d)
 			}
@@ -522,6 +525,9 @@ func policyOf(sc *config.Server) proxy.Policy {
 			allow = append(allow, pr.String())
 		}
 		p.Egress = &proxy.Egress{Port: e.Port, Allow: allow, User: e.User, Ports: e.Ports, HostsFile: e.HostsFile}
+	}
+	for _, pr := range sc.TrustedPrefixes() {
+		p.TrustedProxies = append(p.TrustedProxies, pr.String())
 	}
 	return p
 }

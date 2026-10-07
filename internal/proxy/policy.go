@@ -34,6 +34,9 @@ type Policy struct {
 	Allow    []BotAllow `json:"allow,omitempty"`
 	Block    []BotBlock `json:"block,omitempty"`
 	Egress   *Egress    `json:"egress,omitempty"`
+	// TrustedProxies are the CIDR ranges of the proxies in front of boks whose X-Forwarded-For the
+	// servers on 80 and 443 keep; none trusts no one.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 }
 
 // Egress is the forward proxy Caddy runs beside the apps' servers, on a port of its own, for the

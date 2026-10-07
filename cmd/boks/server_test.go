@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kopandante/boks/internal/config"
 )
 
 const policyRead = "sh -c if [ -f '.boks/_server/policy.json' ]"
@@ -169,5 +171,20 @@ func TestServerInstallAsksEveryServerFirst(t *testing.T) {
 	}
 	if a.ran("ln -sn") || installed || len(a.stdin) > 0 {
 		t.Errorf("a was changed before b was asked: %v", a.calls)
+	}
+}
+
+// The policy carries server.yml's trusted proxies as ranges, an address alone as its own.
+func TestPolicyOfCarriesTheTrustedProxies(t *testing.T) {
+	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [87.228.113.239, 10.1.2.3/16]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(policyOf(sc).TrustedProxies, " "); got != "87.228.113.239/32 10.1.0.0/16" {
+		t.Errorf("trusted proxies: %s", got)
+	}
+	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\n"))
+	if err != nil || policyOf(sc).TrustedProxies != nil {
+		t.Errorf("want none without the field: %v", err)
 	}
 }

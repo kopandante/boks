@@ -247,7 +247,7 @@ func TestConfigOwnsPort80BesideTLS(t *testing.T) {
 	}
 }
 
-// Nothing trusted stands in front of boks (#48): Caddy is told of no trusted proxy, so it sets
+// A policy without trusted proxies trusts no one (#48): Caddy is told of no trusted proxy, so it sets
 // X-Forwarded-For from the connection and drops the visitor's own — measured on boks-lab. The one
 // header every route touches is Forwarded, which it deletes: kamal-proxy did, and Caddy passes it on.
 func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
@@ -268,6 +268,41 @@ func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 		}
 		if dig(decoded(t, b), "apps", "http", "servers", srv, "logs") == nil {
 			t.Errorf("%s: want access logs on, as kamal-proxy wrote them", srv)
+		}
+	}
+}
+
+// A proxy in front of boks is trusted on the apps' servers, 80 and 443 alike: Caddy keeps the
+// X-Forwarded-For it brings and reads the client from the right. The egress server trusts no one, and
+// Forwarded is still deleted.
+func TestConfigTrustsTheProxiesInFront(t *testing.T) {
+	p := Policy{Revision: 1, TrustedProxies: []string{"87.228.113.239/32", "10.1.0.0/16"}, Egress: encar}
+	b, err := Config(p, []Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decoded(t, b)
+	for _, srv := range []string{"http", "https"} {
+		s := dig(m, "apps", "http", "servers", srv)
+		if got, _ := json.Marshal(dig(s, "trusted_proxies")); string(got) != `{"ranges":["87.228.113.239/32","10.1.0.0/16"],"source":"static"}` {
+			t.Errorf("%s: trusted_proxies %s", srv, got)
+		}
+		if got, _ := json.Marshal(dig(s, "client_ip_headers")); string(got) != `["X-Forwarded-For"]` {
+			t.Errorf("%s: client_ip_headers %s", srv, got)
+		}
+		if got := dig(s, "trusted_proxies_strict"); got != float64(1) {
+			t.Errorf("%s: want the client read from the right, trusted_proxies_strict %v", srv, got)
+		}
+		routes, _ := dig(s, "routes").([]any)
+		h := dig(routes[0], "handle").([]any)[0]
+		if del, _ := dig(h, "headers", "request", "delete").([]any); len(del) != 1 || del[0] != "Forwarded" {
+			t.Errorf("%s: want Forwarded deleted from the request, got %v", srv, dig(h, "headers"))
+		}
+	}
+	egress := dig(m, "apps", "http", "servers", "egress").(map[string]any)
+	for _, key := range []string{"trusted_proxies", "client_ip_headers", "trusted_proxies_strict"} {
+		if _, ok := egress[key]; ok {
+			t.Errorf("the egress server sets %s: %v", key, egress[key])
 		}
 	}
 }

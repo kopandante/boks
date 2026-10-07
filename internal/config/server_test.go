@@ -153,3 +153,38 @@ func TestEgressPasswordWithoutWhitespaceAtTheEnds(t *testing.T) {
 		t.Errorf("a space inside: %q, %v", p, err)
 	}
 }
+
+// A proxy in front of boks is trusted by address or range; a file without one trusts no one.
+func TestParseServerTrustedProxies(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [87.228.113.239, 10.1.2.3/16, \"2001:db8::1/48\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range s.TrustedPrefixes() {
+		got = append(got, p.String())
+	}
+	if strings.Join(got, " ") != "87.228.113.239/32 10.1.0.0/16 2001:db8::/48" {
+		t.Errorf("prefixes: %v", got)
+	}
+	s, err = ParseServer([]byte(habsida))
+	if err != nil || s.TrustedProxies != nil || s.TrustedPrefixes() != nil {
+		t.Errorf("want no trusted proxies without the field: %v, %v", s.TrustedProxies, err)
+	}
+}
+
+func TestParseServerTrustedProxiesRejects(t *testing.T) {
+	trusted := func(list string) string { return "servers: [a]\nrevision: 1\ntrusted_proxies: " + list + "\n" }
+	for _, c := range []struct{ doc, want string }{
+		{"servers: [a]\ntrusted_proxies: [10.0.0.1]\n", "revision"},
+		{trusted(`[0.0.0.0/0]`), "trusted_proxies: \"0.0.0.0/0\" lets every address in"},
+		{trusted(`["::/0"]`), "lets every address in"},
+		{trusted(`[traefik]`), "trusted_proxies: \"traefik\" is neither an address nor a CIDR range"},
+		{trusted(`[10.0.0.1/33]`), "neither an address"},
+		{trusted(`[""]`), "neither an address"},
+	} {
+		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc), c.want, err)
+		}
+	}
+}

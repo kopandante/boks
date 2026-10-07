@@ -29,6 +29,11 @@ type Server struct {
 	// Egress, when given, has the server's proxy carry outgoing requests too: a service elsewhere sends
 	// them through it to leave from this server's address, as it did through a tinyproxy beside boks.
 	Egress *Egress `yaml:"egress"`
+	// TrustedProxies are the addresses or CIDR ranges of a proxy standing in front of boks — a CDN, a
+	// load balancer, another server's proxy on the way in: a request from one of them keeps the
+	// X-Forwarded-For it brings, with the proxy's address added after it. Without any, boks trusts no
+	// one, and every app sees the address of the connection (#48).
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 // Egress is the forward proxy the server's Caddy runs on a port of its own.
@@ -54,16 +59,45 @@ type Egress struct {
 const DefaultEgressPort = 3128
 
 // Prefixes are Allow as CIDR ranges, an address alone as the range of that one address.
-func (e *Egress) Prefixes() []netip.Prefix {
+func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
+
+// TrustedPrefixes are TrustedProxies as CIDR ranges, as Prefixes are Allow.
+func (s *Server) TrustedPrefixes() []netip.Prefix { return prefixes(s.TrustedProxies) }
+
+// rangeOf is an address or a CIDR range as a range, an address alone the range of that one address.
+func rangeOf(a string) (netip.Prefix, bool) {
+	if p, err := netip.ParsePrefix(a); err == nil {
+		return p.Masked(), true
+	}
+	if ip, err := netip.ParseAddr(a); err == nil {
+		return netip.PrefixFrom(ip, ip.BitLen()), true
+	}
+	return netip.Prefix{}, false
+}
+
+func prefixes(list []string) []netip.Prefix {
 	var out []netip.Prefix
-	for _, a := range e.Allow {
-		if p, err := netip.ParsePrefix(a); err == nil {
-			out = append(out, p.Masked())
-		} else if ip, err := netip.ParseAddr(a); err == nil {
-			out = append(out, netip.PrefixFrom(ip, ip.BitLen()))
+	for _, a := range list {
+		if p, ok := rangeOf(a); ok {
+			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// checkRanges refuses an entry of list that is not an address or a CIDR range, and one that covers
+// every address.
+func checkRanges(list []string, whom string) error {
+	for _, a := range list {
+		p, ok := rangeOf(a)
+		if !ok {
+			return fmt.Errorf("%q is neither an address nor a CIDR range", a)
+		}
+		if p.Bits() == 0 {
+			return fmt.Errorf("%q lets every address in; name the %s", a, whom)
+		}
+	}
+	return nil
 }
 
 // Password reads the login's password from the environment; "" without a login.
@@ -152,13 +186,17 @@ func (s *Server) validate() error {
 	}
 	// A file of servers alone — what `boks server install` reads — has no policy to number. One with a
 	// policy needs its revision, and `boks server apply` asks for one either way.
-	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil) {
+	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0) {
 		return errors.New("revision: required, a whole number from 1 that grows by one with every edit")
 	}
 	if s.Egress != nil {
 		if err := s.Egress.validate(); err != nil {
 			return fmt.Errorf("egress: %w", err)
 		}
+	}
+	// Trusting everyone hands every app the address a visitor writes into X-Forwarded-For.
+	if err := checkRanges(s.TrustedProxies, "proxies in front of boks"); err != nil {
+		return fmt.Errorf("trusted_proxies: %w", err)
 	}
 	names := map[string]bool{}
 	for i, b := range s.Bots.Block {
@@ -215,18 +253,8 @@ func (e *Egress) validate() error {
 	if len(e.Allow) == 0 {
 		return errors.New("allow: the clients that may use it are required — open to everyone, it relays anyone's traffic from this server's address")
 	}
-	for _, a := range e.Allow {
-		p, err := netip.ParsePrefix(a)
-		if err != nil {
-			ip, aerr := netip.ParseAddr(a)
-			if aerr != nil {
-				return fmt.Errorf("allow: %q is neither an address nor a CIDR range", a)
-			}
-			p = netip.PrefixFrom(ip, ip.BitLen())
-		}
-		if p.Bits() == 0 {
-			return fmt.Errorf("allow: %q lets every address in; name the clients", a)
-		}
+	if err := checkRanges(e.Allow, "clients"); err != nil {
+		return fmt.Errorf("allow: %w", err)
 	}
 	if (e.User == "") != (e.PasswordEnv == "") {
 		return errors.New("user and password_env go together: a login needs both, and none is no login")

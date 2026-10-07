@@ -213,9 +213,9 @@ func TestSetPolicyMarksTheRoutesForOlderBoks(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := d.files[Dir+"/routes/_server.json"]
-	// 4: a boks of format 3 knows policies but not the egress proxy, and would drop it.
-	if marker != "4\n" || FragmentFormat <= 3 {
-		t.Errorf("want the marker to hold format %d, above the 3 of a boks without egress: %q", FragmentFormat, marker)
+	// 5: a boks of format 4 knows the egress proxy but not the trusted proxies, and would drop them.
+	if marker != "5\n" || FragmentFormat <= 4 {
+		t.Errorf("want the marker to hold format %d, above the 4 of a boks without trusted proxies: %q", FragmentFormat, marker)
 	}
 	if pol, mark := index(d.calls, "upload "+ServerDir+"/policy.json"), index(d.calls, "upload "+Dir+"/routes/_server.json"); mark < 0 || pol < mark {
 		t.Errorf("want the marker before the policy: %v", d.calls)
