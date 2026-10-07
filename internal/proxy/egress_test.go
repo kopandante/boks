@@ -489,3 +489,29 @@ func TestCheckEgressRefusesAnUnreadablePortListing(t *testing.T) {
 		t.Errorf("want a refusal, got %v", err)
 	}
 }
+
+// flaky fails the first call that starts with prefix, as a container removed between the listing and
+// the inspect fails it, and answers the rest as s does.
+type flaky struct {
+	*swap
+	prefix string
+	failed bool
+}
+
+func (f *flaky) Run(ctx context.Context, args ...string) (string, error) {
+	if !f.failed && strings.HasPrefix(strings.Join(args, " "), f.prefix) {
+		f.failed = true
+		return "", errors.New("Error: No such object: 0123")
+	}
+	return f.swap.Run(ctx, args...)
+}
+
+// A deploy retiring a container between the listing and the inspect fails one call: it is asked again
+// rather than refusing an apply over a port nobody holds.
+func TestCheckEgressAsksAgainWhenAContainerGoesMidListing(t *testing.T) {
+	s := reshapeServer()
+	s.out[portsQuery] = proxyPorts
+	if err := CheckEgress(context.Background(), &flaky{swap: s, prefix: portsQuery}, openEgress); err != nil {
+		t.Errorf("one failed listing must be asked again: %v", err)
+	}
+}

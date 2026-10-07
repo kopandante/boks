@@ -180,7 +180,15 @@ const portsFormat = `{"name":{{json .Name}},"ports":{{json (index .NetworkSettin
 func hostPortHolder(ctx context.Context, r remote.Runner, port int) (string, error) {
 	script := "ids=$(docker ps -q --no-trunc) || exit 1; " +
 		`[ -z "$ids" ] || exec docker inspect --format ` + remote.Quote(portsFormat) + " $ids"
-	out, err := r.Run(ctx, "sh", "-c", script)
+	// A container removed between the listing and the inspect — a deploy retiring its old copy, which
+	// nothing here keeps out — fails the call; it is asked again, as the deploy's inventory is.
+	var out string
+	var err error
+	for try := 0; try < 3; try++ {
+		if out, err = r.Run(ctx, "sh", "-c", script); err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("asking which containers publish port %d: %w", port, err)
 	}
