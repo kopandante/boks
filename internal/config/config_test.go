@@ -650,3 +650,17 @@ func TestHostsCompareAsTheProxyDoes(t *testing.T) {
 		t.Errorf("a lower-case Unicode host is fine: %v", err)
 	}
 }
+
+// A copy is named app-tag-time and dialled by that name: an app name past 51 characters would make it
+// more than one DNS label, which Docker's resolver does not answer.
+func TestAppNameFitsTheCopysName(t *testing.T) {
+	doc := func(app string) []byte {
+		return []byte("app: " + app + "\nimage: x\nservers: [a]\n")
+	}
+	if _, err := Parse(doc(strings.Repeat("a", MaxAppLen))); err != nil {
+		t.Errorf("an app of %d: %v", MaxAppLen, err)
+	}
+	if _, err := Parse(doc(strings.Repeat("a", MaxAppLen+1))); err == nil || !strings.Contains(err.Error(), "would not resolve") {
+		t.Errorf("an app of %d: %v", MaxAppLen+1, err)
+	}
+}

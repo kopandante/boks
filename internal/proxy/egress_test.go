@@ -360,3 +360,99 @@ func TestDrift(t *testing.T) {
 		t.Errorf("a stopped proxy: %v %v", d, err)
 	}
 }
+
+// A secret whose write answered with an error — the answer lost after the file was replaced — is put
+// back at once: the policy stays the old one, and the next deploy must not load the new password.
+func TestSetPolicyPutsTheSecretBackWhenItsOwnWriteIsLost(t *testing.T) {
+	d := newDisk()
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: encar}); err != nil {
+		t.Fatal(err)
+	}
+	rotated := *encar
+	rotated.Password = "n3w"
+	d.lost["upload "+ServerDir+"/egress.secret"] = errors.New("connection reset")
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: &rotated}); err == nil {
+		t.Fatal("want the lost write reported")
+	}
+	if got := d.files[ServerDir+"/egress.secret"]; got != "encar:s3cret\n" {
+		t.Errorf("want the previous secret back, got %q", got)
+	}
+}
+
+// The first policy with a login that fails leaves no secret behind, and the marker goes before it.
+func TestSetPolicyRemovesASecretItWroteFirst(t *testing.T) {
+	d := newDisk()
+	d.fail[reloadNext] = errors.New("refused")
+	if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: encar}); err == nil {
+		t.Fatal("want the failed reload reported")
+	}
+	if _, left := d.files[ServerDir+"/egress.secret"]; left {
+		t.Errorf("a secret left without its policy: %v", d.calls)
+	}
+	if mark, sec := index(d.calls, "upload "+Dir+"/routes/_server.json"), index(d.calls, "upload "+ServerDir+"/egress.secret"); mark < 0 || sec < mark {
+		t.Errorf("want the marker before the secret: %v", d.calls)
+	}
+}
+
+// uploadFault answers every atomic upload to path from the nth on with an error: before it acts, or
+// — lost — after it acted. The others go through to the disk.
+type uploadFault struct {
+	*disk
+	path       string
+	from, seen int
+	lost       bool
+}
+
+func (f *uploadFault) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	if strings.HasSuffix(args[len(args)-1], " '"+f.path+"'") {
+		if f.seen++; f.seen >= f.from {
+			if f.lost {
+				f.disk.Pipe(ctx, content, args...)
+			}
+			return "", errors.New("connection reset")
+		}
+	}
+	return f.disk.Pipe(ctx, content, args...)
+}
+
+// The secret follows the policy on disk when the policy cannot be put back by the book: a new policy
+// left in place keeps the secret it needs, and a previous one still there — the new never got there,
+// or the undo's answer was lost — gets its own back.
+func TestSetPolicyKeepsTheSecretWithThePolicyOnDisk(t *testing.T) {
+	open := *encar
+	open.User, open.Password = "", ""
+	rotated := *encar
+	rotated.Password = "n3w"
+	for _, c := range []struct {
+		name     string
+		prev     *Egress
+		fault    uploadFault
+		revision string
+		secret   string
+	}{
+		{"the undo refused, the new policy stays", &open, uploadFault{from: 2}, `"revision": 2,`, "encar:s3cret\n"},
+		{"neither write acted", encar, uploadFault{from: 1}, `"revision": 1,`, "encar:s3cret\n"},
+		{"the undo's answer lost", encar, uploadFault{from: 2, lost: true}, `"revision": 1,`, "encar:s3cret\n"},
+	} {
+		d := newDisk()
+		if err := SetPolicy(context.Background(), d, io.Discard, Policy{Revision: 1, Egress: c.prev}); err != nil {
+			t.Fatal(err)
+		}
+		d.fail[reloadNext] = errors.New("refused")
+		next := encar
+		if c.prev == encar {
+			next = &rotated
+		}
+		f := c.fault
+		f.disk, f.path = d, policyPath()
+		if err := SetPolicy(context.Background(), &f, io.Discard, Policy{Revision: 2, Egress: next}); err == nil {
+			t.Fatalf("%s: want the failure reported", c.name)
+		}
+		if !strings.Contains(d.files[policyPath()], c.revision) {
+			t.Errorf("%s: want %s on disk: %q", c.name, c.revision, d.files[policyPath()])
+		}
+		if got := d.files[egressSecretPath()]; got != c.secret {
+			t.Errorf("%s: want the secret %q, got %q: %v", c.name, c.secret, got, d.calls)
+		}
+	}
+}

@@ -50,6 +50,7 @@ flock=yes
 indocker=yes
 dockerenabled=enabled
 cronactive=active
+cronenabled=enabled
 dockerup=yes
 api=1.47
 swarm=inactive
@@ -84,6 +85,14 @@ func TestPlanInstallOnAnEmptyServer(t *testing.T) {
 	}
 	if p.daemon["log-driver"] != "json-file" || p.daemon["default-address-pools"] == nil {
 		t.Errorf("daemon.json: %v", p.daemon)
+	}
+}
+
+// cron running but not enabled is gone after a reboot, and the schedules with it.
+func TestPlanInstallEnablesACronThatIsOnlyRunning(t *testing.T) {
+	p, err := plan(t, strings.Replace(readyNoble, "cronenabled=enabled\n", "cronenabled=disabled\n", 1))
+	if err != nil || !p.enableCron {
+		t.Errorf("plan: %+v, %v", p, err)
 	}
 }
 

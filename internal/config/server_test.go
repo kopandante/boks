@@ -137,3 +137,19 @@ func TestParseServerEgressRejects(t *testing.T) {
 		}
 	}
 }
+
+// The server keeps the password in a file whose reading trims the ends: one with spaces there, or a
+// line break, is refused before anything changes rather than every client being refused after.
+func TestEgressPasswordWithoutWhitespaceAtTheEnds(t *testing.T) {
+	e := &Egress{User: "encar", PasswordEnv: "EG_PASS"}
+	for _, bad := range []string{"s3cret ", " s3cret", "s3c\nret"} {
+		t.Setenv("EG_PASS", bad)
+		if _, err := e.Password(); err == nil || !strings.Contains(err.Error(), "whitespace") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	t.Setenv("EG_PASS", "s3 cret")
+	if p, err := e.Password(); err != nil || p != "s3 cret" {
+		t.Errorf("a space inside: %q, %v", p, err)
+	}
+}

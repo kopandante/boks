@@ -26,8 +26,10 @@ const (
 	// DefaultProxyImage is pinned by digest: a proxy that changes under a moving tag changes every app's
 	// routing. It is boks's own build (proxy/Dockerfile): Caddy 2.11.7 — the newest on Docker Hub on
 	// 2026-10-06, and the one boks-lab was measured with — and the forward proxy a server's egress needs.
-	DefaultProxyImage    = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d@sha256:1f362085a5be41202ae1b5ea31770ddccca2717056d3aab9377ec78cd9b8a44f"
-	DefaultKeep          = 3
+	DefaultProxyImage = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d@sha256:1f362085a5be41202ae1b5ea31770ddccca2717056d3aab9377ec78cd9b8a44f"
+	DefaultKeep       = 3
+	// MaxAppLen keeps a copy's name (app-tag-time) one DNS label.
+	MaxAppLen            = 51
 	DefaultDeployTimeout = "60s"
 	// DefaultDrainTimeout is kamal-proxy's: how long the previous copy may go on finishing the requests
 	// it holds once the routes have moved, before it is stopped.
@@ -420,6 +422,11 @@ func (c *Config) applyDefaults() {
 func (c *Config) validate() error {
 	if !nameRe.MatchString(c.App) {
 		return fmt.Errorf("app: %q must match %s", c.App, nameRe)
+	}
+	// A copy is named app-tag-time, its host name on the app's network: one DNS label of 63, with
+	// the time's 10 digits and two dashes, leaves 51 for the app and at least nothing for the tag.
+	if len(c.App) > MaxAppLen {
+		return fmt.Errorf("app: %q is %d characters, more than %d: its containers' names would not resolve", c.App, len(c.App), MaxAppLen)
 	}
 	if c.Image == "" {
 		return fmt.Errorf("image is required")

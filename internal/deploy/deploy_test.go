@@ -1341,11 +1341,12 @@ func TestContainerNameFitsOneDNSLabel(t *testing.T) {
 		"glavdoroga-convex-"+strings.Repeat("a", 33)+"-1791336560"; got != want {
 		t.Errorf("got %s, want %s", got, want)
 	}
-	// An app name that leaves no room for the tag drops it rather than failing, even an empty one.
-	long := strings.Repeat("a", 52)
+	// The longest app name a config takes leaves no room for the tag: the tag is dropped rather than
+	// failing, even an empty one, and the name is still one label.
+	long := strings.Repeat("a", config.MaxAppLen)
 	for _, tag := range []string{"", "v1"} {
-		if got, want := ContainerName(long, tag, time.Unix(1791336560, 0)), long+"--1791336560"; got != want {
-			t.Errorf("tag %q: got %s, want %s", tag, got, want)
+		if got, want := ContainerName(long, tag, time.Unix(1791336560, 0)), long+"--1791336560"; got != want || len(got) > 63 {
+			t.Errorf("tag %q: got %s (%d), want %s", tag, got, len(got), want)
 		}
 	}
 }
