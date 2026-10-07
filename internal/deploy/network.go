@@ -31,6 +31,8 @@ type box struct {
 	// image without a HEALTHCHECK.
 	running bool
 	health  string
+	// ports are the ports docker publishes on the host for it, by container port (`6379/tcp`).
+	ports map[string][]binding
 }
 
 func (b box) on(network string) bool {
@@ -58,7 +60,7 @@ func hasName(names []string, name string) bool {
 // container). index answers a missing key with nothing.
 const boxFormat = `{"id":{{json .Id}},"name":{{json .Name}},"hostname":{{json .Config.Hostname}},` +
 	`"labels":{{json .Config.Labels}},"networks":{{json .NetworkSettings.Networks}},` +
-	`"running":{{json .State.Running}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}""{{end}}}`
+	`"ports":{{json (index .HostConfig "PortBindings")}},"running":{{json .State.Running}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}""{{end}}}`
 
 // inventory lists every container on the server, stopped ones too: a stopped copy comes back with
 // its aliases. All of them rather than those docker's network filter returns, which is documented
@@ -89,12 +91,13 @@ func inventory(ctx context.Context, r remote.Runner) ([]box, error) {
 			Running                    bool
 			Labels                     map[string]string
 			Networks                   map[string]struct{ Aliases, DNSNames []string }
+			Ports                      map[string][]binding
 		}
 		if err := json.Unmarshal([]byte(line), &c); err != nil {
 			return nil, fmt.Errorf("reading the containers on the server: %w", err)
 		}
 		b := box{name: strings.TrimPrefix(c.Name, "/"), owner: c.Labels["boks.app"], nets: map[string][]string{},
-			running: c.Running, health: c.Health}
+			running: c.Running, health: c.Health, ports: c.Ports}
 		if b.owner == "" {
 			b.owner = unlabelled(b.name)
 		}
@@ -139,6 +142,11 @@ func checkNetworks(ctx context.Context, r remote.Runner, cfg *config.Config, nam
 	}
 	mine := append([]string{name}, n.Aliases...)
 	if err := taken(boxes, n.Name, cfg.App, mine); err != nil {
+		return false, err
+	}
+	// The ports published on the host are asked with the names, for the same reason: what runs on the
+	// server can change while a deploy pulls or waits.
+	if err := checkListen(ctx, r, cfg, boxes); err != nil {
 		return false, err
 	}
 	for i, dep := range cfg.Uses {

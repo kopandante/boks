@@ -213,9 +213,10 @@ func TestUnfinishedPicksTheNewestOpenEntry(t *testing.T) {
 
 func TestSaveWritesTheFormatVersion(t *testing.T) {
 	// 9 is the first format with a port's path, rewrite and headers: a boks reading 8 must refuse
-	// such a release rather than route its paths to the whole host.
-	if FormatVersion < 9 {
-		t.Errorf("format %d cannot carry routing by path", FormatVersion)
+	// such a release rather than route its paths to the whole host. 10 is the first with listen: a
+	// boks reading 9 must refuse such a release rather than bring a database back unreachable.
+	if FormatVersion < 10 {
+		t.Errorf("format %d cannot carry listen", FormatVersion)
 	}
 	f := newFake()
 	if err := Save(context.Background(), f, Snapshot{ID: "demo-v1-1", App: "demo"}); err != nil {
@@ -322,5 +323,26 @@ func TestLoadRefusesANewerFormat(t *testing.T) {
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"version": 1, "id": "demo-v1-1", "app": "demo"}`
 	if _, err := Load(context.Background(), f, "demo", "demo-v1-1"); err != nil {
 		t.Fatalf("an older format is still read: %v", err)
+	}
+}
+
+// A rollback publishes what the release published: the address, the host port and the container's port.
+func TestSnapshotKeepsListen(t *testing.T) {
+	f := newFake()
+	want := []config.Listen{{Port: 6379, Address: "10.88.0.5", HostPort: 6390}, {Port: 5432, Address: "fd00::5"}}
+	if err := Save(context.Background(), f, Snapshot{ID: "db-v2-2", App: "db", Listen: want}); err != nil {
+		t.Fatal(err)
+	}
+	body := f.writes[".boks/db/releases/db-v2-2.json"]
+	if !strings.Contains(body, `"address": "10.88.0.5"`) || !strings.Contains(body, `"host_port": 6390`) {
+		t.Errorf("the snapshot must name the publications by their json fields: %s", body)
+	}
+	f.out["cat .boks/db/releases/db-v2-2.json"] = body
+	got, err := Load(context.Background(), f, "db", "db-v2-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Listen, want) {
+		t.Errorf("listen lost:\n got %+v\nwant %+v", got.Listen, want)
 	}
 }

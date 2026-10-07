@@ -54,6 +54,10 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 	if cfg.StopSignal != "" && target.StopSignal == "" {
 		fmt.Fprintf(log, "warning: release %s was recorded without a stop_signal, so it stops with the image's STOPSIGNAL, not %s\n", id, cfg.StopSignal)
 	}
+	if len(cfg.Listen) > 0 && len(target.Listen) == 0 {
+		fmt.Fprintf(log, "warning: release %s was recorded without listen, so it publishes no port on the host, "+
+			"and clients on other servers cannot reach it\n", id)
+	}
 	// Everything else — stopping an app without routes before its old copy comes back, the route
 	// switch and putting the routes back on failure, the certificate checks — is what a deploy does, by the same code.
 	return put(ctx, r, log, target, launch{
@@ -106,6 +110,8 @@ func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	target.StopSignal = snapshot.StopSignal
 	// And its schedules: cron follows the release that serves.
 	target.Schedules = snapshot.Schedules
+	// And the ports it published on the host: a release recorded without them published none.
+	target.Listen = snapshot.Listen
 	// The replace mode is the one field where the release and today's config both have a say, and
 	// either asking for stop-first wins: the release may have written its volume with one writer, and
 	// the config may say that it does now — overlapping on the word of either side alone could put two
@@ -200,6 +206,12 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 	// certificate to be served with now.
 	if err := restored(cfg, snapshot).CheckWildcards(); err != nil {
 		return "", nil, fmt.Errorf("release %s cannot be served with today's TLS: %w", id, err)
+	}
+	// The release's publications meet today's servers here: an address belongs to one of them. And
+	// they are checked as a deploy would check them, so a snapshot that names a public address —
+	// damaged, or edited by hand — is not published past the firewall.
+	if err := restored(cfg, snapshot).CheckListen(); err != nil {
+		return "", nil, fmt.Errorf("release %s cannot be reproduced: %w", id, err)
 	}
 	// A connection that drops is not a missing file: only an answer from the server says it is gone.
 	if snapshot.EnvPath != "" {

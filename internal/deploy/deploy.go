@@ -720,6 +720,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 		snapshot.CertDomains = cfg.Cert.Domains
 	}
 	snapshot.Schedules = cfg.Schedules
+	snapshot.Listen = cfg.Listen
 	// The commands exist before the snapshot names them, as everything a snapshot refers to does.
 	if err := writeJobs(ctx, r, cfg.App, name, cfg.Schedules); err != nil {
 		return err
@@ -1104,6 +1105,11 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string, binds []stri
 	}
 	for _, b := range binds {
 		a = append(a, "-v", b)
+	}
+	// Only ever on the private address the config names (config.CheckListen): docker's DNAT goes
+	// around the host's INPUT rules, so the address is the whole of the protection.
+	for _, l := range cfg.Listen {
+		a = append(a, "-p", l.Bind()+":"+strconv.Itoa(l.Port)+"/tcp")
 	}
 	// An image on the private registry is fetched by pull alone, logged in. Left to itself, docker
 	// would fetch one that went missing without the login — refused, or worse, let through by a login

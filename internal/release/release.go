@@ -41,7 +41,9 @@ import (
 // schedules: a boks that drops them would leave cron running the jobs of the release rolled back from.
 // Version 9 lets a port carry a path, a path rewrite and header changes: a boks that drops them
 // would route a rolled-back release's paths to the whole host, without its header rules.
-const FormatVersion = 9
+// Version 10 added the ports published on private addresses of the host (listen): a boks that drops
+// them would bring a database back unreachable from the servers of its clients.
+const FormatVersion = 10
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -89,6 +91,9 @@ type Snapshot struct {
 	// Schedules are the jobs cron runs in the serving copy; their commands are kept under JobsDir of
 	// this release. Empty when it had none, and before version 8.
 	Schedules []config.Schedule `json:"schedules,omitempty"`
+	// Listen are the container's ports published on private addresses of the host. Empty when it
+	// published none, and before version 10.
+	Listen []config.Listen `json:"listen,omitempty"`
 	// Previous is the release that was serving when this one was deployed: where a rollback
 	// without an id returns, and what Prune keeps. Empty for a first deploy, and in snapshots
 	// written before the field.
