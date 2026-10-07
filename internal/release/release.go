@@ -345,7 +345,9 @@ func AddImage(ctx context.Context, r remote.Runner, app string, img Image) error
 // Images reads the app's images, each once. A line that does not parse is skipped: an append cut
 // short leaves one, and the rest of the list is still good.
 func Images(ctx context.Context, r remote.Runner, app string) ([]Image, error) {
-	out, err := r.Run(ctx, "sh", "-c", "cat "+remote.Quote(ImagesPath(app))+" 2>/dev/null || true")
+	// Absent is an empty list; a list that is there and cannot be read is an error, not one.
+	q := remote.Quote(ImagesPath(app))
+	out, err := r.Run(ctx, "sh", "-c", "if [ -e "+q+" ]; then cat "+q+"; fi")
 	if err != nil {
 		return nil, err
 	}
@@ -384,15 +386,16 @@ type Recorded struct {
 // snapshot that does not parse, is an error rather than a shorter answer: the caller removes
 // images on the strength of nobody naming them.
 func RecordedImages(ctx context.Context, r remote.Runner) (Recorded, error) {
-	out, err := r.Run(ctx, "find", ".boks", "-mindepth", "3", "-maxdepth", "3", "-path", ".boks/*/releases/*.json",
-		"-type", "f", "-exec", "cat", "{}", "+")
+	// A glob rather than find: find reads every directory down to the snapshots', and one it may not
+	// read (a container's data under .boks) would fail it; a snapshot that cannot be read still does.
+	out, err := r.Run(ctx, "sh", "-c", `for f in .boks/*/releases/*.json; do [ -e "$f" ] || continue; cat "$f" || exit 1; echo; done`)
 	if err != nil {
 		return Recorded{}, fmt.Errorf("read the releases recorded on the server: %w", err)
 	}
 	rec := Recorded{Refs: map[string]bool{}, Digests: map[string]bool{}}
 	dec := json.NewDecoder(strings.NewReader(out))
 	for {
-		var s struct{ Image, Tag, Digest string }
+		var s Image
 		if err := dec.Decode(&s); err == io.EOF {
 			return rec, nil
 		} else if err != nil {

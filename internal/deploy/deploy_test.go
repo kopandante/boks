@@ -190,8 +190,8 @@ func (f *fake) Run(ctx context.Context, args ...string) (string, error) {
 	if out, ok := longest(f.out, cmd); ok {
 		return out, nil
 	}
-	if p, ok := strings.CutPrefix(cmd, "sh -c cat '"); ok && strings.HasSuffix(p, "/images.jsonl' 2>/dev/null || true") {
-		return f.files[strings.TrimSuffix(p, "' 2>/dev/null || true")], nil
+	if p, ok := strings.CutPrefix(cmd, "sh -c if [ -e '"); ok && strings.HasSuffix(p, "/images.jsonl'; fi") {
+		return f.files[p[:strings.Index(p, "'")]], nil
 	}
 	switch c := args[len(args)-1]; {
 	case strings.HasPrefix(cmd, "docker stop "):
@@ -379,8 +379,8 @@ func TestRunHappyPath(t *testing.T) {
 		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
 		// The image just pulled is on the app's list, so the releases recorded and the images listed
 		// are read; here neither names anything, and nothing goes.
-		"sh -c cat '.boks/demo/images.jsonl' 2>/dev/null || true",
-		"find .boks -mindepth 3 -maxdepth 3 -path .boks/*/releases/*.json -type f -exec cat {} +",
+		"sh -c if [ -e '.boks/demo/images.jsonl' ]; then cat '.boks/demo/images.jsonl'; fi",
+		recordedRead + `; do [ -e "$f" ] || continue; cat "$f" || exit 1; echo; done`,
 		"docker images --digests ghcr.io/x/y --format {{.Tag}} {{.Digest}} {{.ID}}",
 		"rmdir /tmp/boks-demo.lock",
 	}
@@ -504,8 +504,8 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker stop bot-v1-1",
 		"docker rm -v bot-v1-1",
 		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
-		"sh -c cat '.boks/bot/images.jsonl' 2>/dev/null || true",
-		"find .boks -mindepth 3 -maxdepth 3 -path .boks/*/releases/*.json -type f -exec cat {} +",
+		"sh -c if [ -e '.boks/bot/images.jsonl' ]; then cat '.boks/bot/images.jsonl'; fi",
+		recordedRead + `; do [ -e "$f" ] || continue; cat "$f" || exit 1; echo; done`,
 		"docker images --digests ghcr.io/x/bot --format {{.Tag}} {{.Digest}} {{.ID}}",
 		"rmdir /tmp/boks-bot.lock",
 	}
@@ -1329,7 +1329,7 @@ func sharedRepo(t *testing.T) (*fake, *config.Config) {
 	f.out["cat .boks/demo/releases/demo-a2-2.json"] = `{"id":"demo-a2-2","image":"` + depot + `","tag":"a2","digest":"sha256:a2"}`
 	f.out["cat .boks/demo/releases/demo-a1-1.json"] = `{"id":"demo-a1-1","image":"` + depot + `","tag":"a1","digest":"sha256:a1"}`
 	// What stays recorded once a1 is gone: demo's a2 and a3, and both releases of other.
-	f.out["find .boks"] = `{"image":"` + depot + `","tag":"a3"}` + "\n" +
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"a3"}` + "\n" +
 		`{"image":"` + depot + `","tag":"a2","digest":"sha256:a2"}` + "\n" +
 		`{"image":"` + depot + `","tag":"b2","digest":"sha256:b2"}` + "\n" +
 		`{"image":"` + depot + `","tag":"b1","digest":"sha256:b1"}`
@@ -1338,8 +1338,10 @@ func sharedRepo(t *testing.T) (*fake, *config.Config) {
 }
 
 const (
-	depotImages = "docker images --digests " + depot
-	appImages   = ".boks/demo/images.jsonl"
+	// recordedRead is the read of every app's recorded releases.
+	recordedRead = "sh -c for f in .boks/*/releases/*.json"
+	depotImages  = "docker images --digests " + depot
+	appImages    = ".boks/demo/images.jsonl"
 )
 
 // rmis is every image removal, in order.
@@ -1410,7 +1412,7 @@ func TestPruneRemovesTheUntaggedCopyOfADroppedRelease(t *testing.T) {
 	f.out["cat .boks/demo/releases/demo-latest-1700000000.json"] = `{"id":"demo-latest-1700000000","image":"` + depot + `","tag":"latest","digest":"sha256:new","previous":"demo-latest-2"}`
 	f.out["cat .boks/demo/releases/demo-latest-2.json"] = `{"id":"demo-latest-2","image":"` + depot + `","tag":"latest","digest":"sha256:mid"}`
 	f.out["cat .boks/demo/releases/demo-latest-1.json"] = `{"id":"demo-latest-1","image":"` + depot + `","tag":"latest","digest":"sha256:old"}`
-	f.out["find .boks"] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:new"}` + "\n" +
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:new"}` + "\n" +
 		`{"image":"` + depot + `","tag":"latest","digest":"sha256:mid"}`
 	rest := "latest sha256:new id-new\n<none> sha256:mid id-mid\n<none> sha256:other id-other\n"
 	f.out[depotImages] = rest + "<none> sha256:old id-old\n"
@@ -1462,7 +1464,7 @@ func TestPruneRemovesTheUntaggedImageOfAFailedDeployOfAMovingTag(t *testing.T) {
 	}
 	delete(f.fail, "docker run -d --name demo-latest-")
 	f.out[inspect] = `["` + depot + `@sha256:good"]`
-	f.out["find .boks"] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:good"}`
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:good"}`
 	f.out[depotImages] = "latest sha256:good id-good\n<none> sha256:failed id-failed\n"
 	f.listsAfter("docker rmi id-failed", "latest sha256:good id-good\n")
 	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err != nil {
@@ -1483,7 +1485,7 @@ func TestPruneComesBackToAnImageOnceNoReleaseNamesIt(t *testing.T) {
 	f, cfg := sharedRepo(t)
 	f.out["sh -c ls -1 '.boks/demo/releases'"] = "demo-a2-2.json\ndemo-a3-1700000000.json\n"
 	f.out["cat .boks/demo/releases/demo-a2-2.json"] = `{"id":"demo-a2-2","image":"` + depot + `","tag":"a2","digest":"sha256:d"}`
-	f.out["find .boks"] = `{"image":"` + depot + `","tag":"a3","digest":"sha256:e"}`
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"a3","digest":"sha256:e"}`
 	// What a prune of an earlier deploy left on the list: a1, the same build as a2, kept back then.
 	f.files[appImages] = `{"image":"` + depot + `","tag":"a1","digest":"sha256:d"}` + "\n"
 	f.out[depotImages] = "a3 sha256:e id-e\na2 sha256:d id-d\na1 sha256:d id-d\n"
@@ -1501,7 +1503,7 @@ func TestPruneComesBackToAnImageOnceNoReleaseNamesIt(t *testing.T) {
 // repository, one of them a release's, keeps its tag, since removing its last tag removes both.
 func TestPruneKeepsATagWhoseImageCarriesARecordedDigest(t *testing.T) {
 	f, cfg := sharedRepo(t)
-	f.out["find .boks"] += "\n" + `{"image":"` + depot + `","tag":"b7","digest":"sha256:b7"}`
+	f.out[recordedRead] += "\n" + `{"image":"` + depot + `","tag":"b7","digest":"sha256:b7"}`
 	f.out[depotImages] = "a1 sha256:b7 id-a1\na1 sha256:a1 id-a1\n"
 	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
 		t.Fatal(err)
@@ -1530,7 +1532,7 @@ func TestPruneKeepsAnUntaggedCopyOfAnImageThatStaysUnderATag(t *testing.T) {
 // The tag just put in place never goes, even while no recorded release names it yet.
 func TestPruneNeverRemovesTheTagJustDeployed(t *testing.T) {
 	f, cfg := sharedRepo(t)
-	f.out["find .boks"] = `{"image":"` + depot + `","tag":"b2","digest":"sha256:b2"}`
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"b2","digest":"sha256:b2"}`
 	f.out[depotImages] = "a3 sha256:a3 id-a3\n"
 	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
 		t.Fatal(err)
@@ -1546,7 +1548,7 @@ func TestPruneKeepsTheUntaggedCopyAKeptReleaseNames(t *testing.T) {
 	f, cfg := sharedRepo(t)
 	f.out["sh -c ls -1 '.boks/demo/releases'"] = ""
 	f.files[appImages] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:mid"}` + "\n"
-	f.out["find .boks"] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:new"}` + "\n" +
+	f.out[recordedRead] = `{"image":"` + depot + `","tag":"latest","digest":"sha256:new"}` + "\n" +
 		`{"image":"` + depot + `","tag":"latest","digest":"sha256:mid"}`
 	f.out[depotImages] = "latest sha256:new id-new\n<none> sha256:mid id-mid\n"
 	if err := Run(context.Background(), f, io.Discard, cfg, "latest", fixed); err != nil {
@@ -1564,7 +1566,7 @@ func TestPruneKeepsTheUntaggedCopyAKeptReleaseNames(t *testing.T) {
 // names its tag alone, and the tag stays for it.
 func TestPruneKeepsATagARecordedReleaseNamesWithoutADigest(t *testing.T) {
 	f, cfg := sharedRepo(t)
-	f.out["find .boks"] += "\n" + `{"image":"` + depot + `","tag":"a1"}`
+	f.out[recordedRead] += "\n" + `{"image":"` + depot + `","tag":"a1"}`
 	f.out[depotImages] = "a1 sha256:a1 id-a1\n"
 	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
 		t.Fatal(err)
@@ -1586,11 +1588,36 @@ func TestPruneKeepsTheListWhenTheImagesCannotBeListed(t *testing.T) {
 	}
 }
 
+// A tag that has moved since the app pulled it names an image the app did not bring: it stays.
+func TestPruneKeepsATagThatMovedAway(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[depotImages] = "a1 sha256:elsewhere id-x\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rmis()) != 0 {
+		t.Errorf("a tag that moved must stay: %v", f.rmis())
+	}
+}
+
+// An image listed untagged before its tag goes by the tag alone: a removal by ID first would take
+// the tag with it and fail the tag's removal.
+func TestPruneRemovesATagBeforeItsUntaggedRow(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.out[depotImages] = "<none> sha256:a1 id-a1\na1 sha256:a1 id-a1\n"
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"docker rmi " + depot + ":a1"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("want the tag alone removed, got %v", f.rmis())
+	}
+}
+
 // One image pushed under two tags, one for each app: when the other app's release names its digest,
 // demo's dropped tag stays too, since removing it may remove the image the other app rolls back to.
 func TestPruneKeepsADigestAnotherAppRecorded(t *testing.T) {
 	f, cfg := sharedRepo(t)
-	f.out["find .boks"] += "\n" + `{"image":"` + depot + `","tag":"b9","digest":"sha256:a1"}`
+	f.out[recordedRead] += "\n" + `{"image":"` + depot + `","tag":"b9","digest":"sha256:a1"}`
 	f.out[depotImages] = "a1 sha256:a1 id-a1\n<none> sha256:a1 id-a1\n"
 	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
 		t.Fatal(err)
@@ -1604,8 +1631,8 @@ func TestPruneKeepsADigestAnotherAppRecorded(t *testing.T) {
 // goes, and the list keeps what it had for the next deploy.
 func TestPruneRemovesNothingWhenTheRecordedReleasesCannotBeRead(t *testing.T) {
 	for name, set := range map[string]func(f *fake){
-		"failed read": func(f *fake) { f.fail["find .boks"] = errors.New("connection reset") },
-		"damaged":     func(f *fake) { f.out["find .boks"] = `{"image":"x","tag":` },
+		"failed read": func(f *fake) { f.fail[recordedRead] = errors.New("connection reset") },
+		"damaged":     func(f *fake) { f.out[recordedRead] = `{"image":"x","tag":` },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f, cfg := sharedRepo(t)

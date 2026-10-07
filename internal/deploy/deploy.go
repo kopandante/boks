@@ -1387,6 +1387,9 @@ func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 			}
 		}
 	}
+	if slices.Equal(left, imgs) {
+		return
+	}
 	if err := release.SetImages(ctx, r, cfg.App, left); err != nil {
 		fmt.Fprintf(log, "warning: could not update the app's images: %v\n", err)
 	}
@@ -1425,14 +1428,18 @@ func imageRows(ctx context.Context, r remote.Runner, repo string) ([]imageRow, e
 // by ID, so only when nothing else listed under that ID stays.
 func removeUnnamed(ctx context.Context, r remote.Runner, log io.Writer, repo string, rows []imageRow, imgs []release.Image,
 	recorded release.Recorded, image, current string) bool {
-	tags, digests, held := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	digests, held := map[string]bool{}, map[string]bool{}
 	for _, img := range imgs {
-		if img.Tag != "" {
-			tags[img.Tag] = true
-		}
 		if img.Digest != "" {
 			digests[img.Digest] = true
 		}
+	}
+	// A tag is the app's to remove while it still names the image the app brought: a tag that has
+	// since moved names an image someone else may have pulled.
+	listed := func(w imageRow) bool {
+		return slices.ContainsFunc(imgs, func(img release.Image) bool {
+			return img.Tag == w.tag && (img.Digest == "" || img.Digest == w.digest)
+		})
 	}
 	for _, w := range rows {
 		if recorded.Digests[w.digest] {
@@ -1443,7 +1450,7 @@ func removeUnnamed(ctx context.Context, r remote.Runner, log io.Writer, repo str
 		if w.tag == "<none>" {
 			return digests[w.digest] && !recorded.Digests[w.digest]
 		}
-		return tags[w.tag] && !held[w.tag] && !recorded.Refs[repo+":"+w.tag] && !(repo == image && w.tag == current)
+		return listed(w) && !held[w.tag] && !recorded.Refs[repo+":"+w.tag] && !(repo == image && w.tag == current)
 	}
 	stays := map[string]bool{}
 	for _, w := range rows {
@@ -1451,15 +1458,18 @@ func removeUnnamed(ctx context.Context, r remote.Runner, log io.Writer, repo str
 			stays[w.id] = true
 		}
 	}
+	// Tags first, and an image whose tag went is left alone by ID: removing the tag removes the image
+	// unless it has another digest, and what is left is still on the list for the next deploy.
 	done := map[string]bool{}
 	for _, w := range rows {
-		switch {
-		case !goes(w):
-		case w.tag != "<none>" && !done[w.tag]:
-			done[w.tag] = true
+		if w.tag != "<none>" && goes(w) && !done[w.tag] {
+			done[w.tag], done[w.id] = true, true
 			fmt.Fprintf(log, "prune %s:%s\n", repo, w.tag)
 			best(ctx, r, log, "docker", "rmi", repo+":"+w.tag)
-		case w.tag == "<none>" && !stays[w.id] && !done[w.id]:
+		}
+	}
+	for _, w := range rows {
+		if w.tag == "<none>" && goes(w) && !stays[w.id] && !done[w.id] {
 			done[w.id] = true
 			fmt.Fprintf(log, "prune %s (untagged %s)\n", w.id, repo)
 			best(ctx, r, log, "docker", "rmi", w.id)

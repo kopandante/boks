@@ -284,7 +284,7 @@ func TestRollbackDoesNotMistakeAFailedCheckForAMissingEnv(t *testing.T) {
 func TestRollbackPrunesReleasesBeyondKeep(t *testing.T) {
 	f := botReleases("healthy")
 	f.out["cat .boks/bot/releases/bot-v2-2.json"] = `{"id":"bot-v2-2","image":"ghcr.io/x/bot","tag":"v2","previous":"bot-v1-1"}`
-	f.out["find .boks"] = `{"image":"ghcr.io/x/bot","tag":"v1","digest":"sha256:old"}`
+	f.out[recordedRead] = `{"image":"ghcr.io/x/bot","tag":"v1","digest":"sha256:old"}`
 	f.out["docker images --digests ghcr.io/x/bot"] = "v2 <none> id-v2\nv1 sha256:old id-v1\n"
 	cfg := parse(t, noPorts+"keep: 1\n")
 	if err := Rollback(context.Background(), f, io.Discard, cfg, "", quick()); err != nil {

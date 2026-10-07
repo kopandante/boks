@@ -174,10 +174,15 @@ func TestImagesReadsWhatSetImagesWrote(t *testing.T) {
 	if err := SetImages(context.Background(), f, "demo", imgs); err != nil {
 		t.Fatal(err)
 	}
-	f.out["sh -c cat '.boks/demo/images.jsonl'"] = f.writes[".boks/demo/images.jsonl"] + `{"image":"r/p","ta`
+	f.out["sh -c if [ -e '.boks/demo/images.jsonl' ]"] = f.writes[".boks/demo/images.jsonl"] + `{"image":"r/p","ta`
 	got, err := Images(context.Background(), f, "demo")
 	if err != nil || !reflect.DeepEqual(got, imgs) {
 		t.Errorf("want %v, got %v (%v)", imgs, got, err)
+	}
+	// A list that is there and cannot be read is an error, not an empty list.
+	f.fail = map[string]error{"sh -c if [ -e '.boks/demo/images.jsonl' ]": fmt.Errorf("permission denied")}
+	if _, err := Images(context.Background(), f, "demo"); err == nil {
+		t.Error("want the read failure reported")
 	}
 }
 
@@ -204,7 +209,7 @@ func TestPruneKeepsASnapshotWhoseImageCannotBeWrittenDown(t *testing.T) {
 
 func TestRecordedImagesReadsEveryApp(t *testing.T) {
 	f := newFake()
-	f.out["find .boks -mindepth 3 -maxdepth 3 -path .boks/*/releases/*.json -type f -exec cat {} +"] = "{\n  \"app\": \"a\", \"image\": \"r/p\", \"tag\": \"a1\", \"digest\": \"sha256:a\"\n}\n" +
+	f.out[`sh -c for f in .boks/*/releases/*.json; do [ -e "$f" ] || continue; cat "$f" || exit 1; echo; done`] = "{\n  \"app\": \"a\", \"image\": \"r/p\", \"tag\": \"a1\", \"digest\": \"sha256:a\"\n}\n" +
 		`{"app":"b","image":"r/p","tag":"b1"}` + "\n" + `{"app":"old","id":"x"}` + "\n"
 	rec, err := RecordedImages(context.Background(), f)
 	if err != nil {
@@ -214,7 +219,7 @@ func TestRecordedImagesReadsEveryApp(t *testing.T) {
 		t.Errorf("got %+v", rec)
 	}
 	f = newFake()
-	f.out["find .boks"] = `{"image":`
+	f.out["sh -c for f in .boks/*/releases"] = `{"image":`
 	if _, err := RecordedImages(context.Background(), f); err == nil {
 		t.Error("a damaged snapshot must fail the read, not shorten it")
 	}
