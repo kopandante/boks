@@ -1325,6 +1325,23 @@ func TestContainerNameSanitizes(t *testing.T) {
 	}
 }
 
+// A commit tag makes the name one DNS label no more, and Docker's resolver answers nothing for it:
+// the tag is cut so the name fits, and the time still sets the deploys apart.
+func TestContainerNameFitsOneDNSLabel(t *testing.T) {
+	sha := "157eb19fd30d085cdb5ec785fdb3574f84cabfda"
+	got := ContainerName("glavdoroga-convex", sha, time.Unix(1791336560, 0))
+	if len(got) > 63 || got != "glavdoroga-convex-157eb19fd30d085cdb5ec785fdb3574f84-1791336560" {
+		t.Errorf("got %s (%d)", got, len(got))
+	}
+	if a, b := ContainerName("glavdoroga-convex", sha, time.Unix(1, 0)), ContainerName("glavdoroga-convex", sha, time.Unix(2, 0)); a == b {
+		t.Errorf("two deploys share %s", a)
+	}
+	// The cut never leaves a separator at the end of the tag.
+	if got := ContainerName("glavdoroga-convex", strings.Repeat("a", 29)+"-b", time.Unix(1791336560, 0)); strings.Contains(got, "--") || len(got) > 63 {
+		t.Errorf("got %s", got)
+	}
+}
+
 // The snapshot is what rollback will run, so it has to hold the release rather than point at a
 // config that may since have changed.
 func TestDeployRecordsWhatItRan(t *testing.T) {

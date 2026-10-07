@@ -10,6 +10,7 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,10 +50,21 @@ func (o Options) stamp() time.Time {
 var unsafe = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
 
 // ContainerName is unique per deploy so that redeploying the same tag is still a
-// start-new-then-retire-old switch with no downtime.
+// start-new-then-retire-old switch with no downtime. It is also the host name the proxy dials and
+// the health check probes, so it fits one DNS label: Docker's resolver answers nothing for a longer
+// name, and a 40-character commit tag made every probe fail. The tag is cut to fit — the time keeps
+// the name unique, and the full tag is in the container's boks.version label.
 func ContainerName(app, tag string, now time.Time) string {
-	return fmt.Sprintf("%s-%s-%d", app, unsafe.ReplaceAllString(tag, "-"), now.Unix())
+	stamp := strconv.FormatInt(now.Unix(), 10)
+	tag = unsafe.ReplaceAllString(tag, "-")
+	if room := maxNameLen - len(app) - len(stamp) - 2; len(tag) > room {
+		tag = strings.TrimRight(tag[:max(room, 1)], "-.")
+	}
+	return app + "-" + tag + "-" + stamp
 }
+
+// maxNameLen is the longest DNS label.
+const maxNameLen = 63
 
 func lockPath(app string) string {
 	return "/tmp/boks-" + app + ".lock"
