@@ -190,7 +190,7 @@ func (f *fake) Run(ctx context.Context, args ...string) (string, error) {
 	if out, ok := longest(f.out, cmd); ok {
 		return out, nil
 	}
-	if p, ok := strings.CutPrefix(cmd, "sh -c cat '"); ok && strings.HasSuffix(p, "/dropped-images.jsonl' 2>/dev/null || true") {
+	if p, ok := strings.CutPrefix(cmd, "sh -c cat '"); ok && strings.HasSuffix(p, "/images.jsonl' 2>/dev/null || true") {
 		return f.files[strings.TrimSuffix(p, "' 2>/dev/null || true")], nil
 	}
 	switch c := args[len(args)-1]; {
@@ -248,6 +248,17 @@ func (f *fake) Pipe(ctx context.Context, content []byte, args ...string) (string
 	}
 	f.stdin[strings.Join(args, " ")] = string(content)
 	return f.Run(ctx, args...)
+}
+
+// appended is whether anything was appended to other than the list of the app's images: the list
+// records the image a pull brought to the server, which a deploy refused after the pull leaves there.
+func (f *fake) appended() bool {
+	for p := range f.appends {
+		if !strings.HasSuffix(p, "/images.jsonl") {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fake) has(prefix string) bool {
@@ -363,7 +374,10 @@ func TestRunHappyPath(t *testing.T) {
 		"docker rm -v demo-v1-1",
 		// keep applies once the old copy is gone; within it nothing is dropped, so no image goes.
 		"sh -c ls -1 '.boks/demo/releases' 2>/dev/null || true",
-		"sh -c cat '.boks/demo/dropped-images.jsonl' 2>/dev/null || true",
+		// The image just pulled is on the app's list; a release names it, so it stays.
+		"sh -c cat '.boks/demo/images.jsonl' 2>/dev/null || true",
+		"find .boks -mindepth 3 -maxdepth 3 -path .boks/*/releases/*.json -type f -exec cat {} +",
+		"docker images --digests ghcr.io/x/y --format {{.Tag}} {{.Digest}} {{.ID}}",
 		"rmdir /tmp/boks-demo.lock",
 	}
 	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
@@ -485,7 +499,9 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker stop bot-v1-1",
 		"docker rm -v bot-v1-1",
 		"sh -c ls -1 '.boks/bot/releases' 2>/dev/null || true",
-		"sh -c cat '.boks/bot/dropped-images.jsonl' 2>/dev/null || true",
+		"sh -c cat '.boks/bot/images.jsonl' 2>/dev/null || true",
+		"find .boks -mindepth 3 -maxdepth 3 -path .boks/*/releases/*.json -type f -exec cat {} +",
+		"docker images --digests ghcr.io/x/bot --format {{.Tag}} {{.Digest}} {{.ID}}",
 		"rmdir /tmp/boks-bot.lock",
 	}
 	if strings.Join(f.calls, "\n") != strings.Join(want, "\n") {
@@ -872,7 +888,7 @@ func TestAHostAnotherAppRoutesIsRefusedBeforeAnyChange(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "is routed by both") {
 		t.Fatalf("want the host refused, got %v", err)
 	}
-	if f.has("docker run") || f.has("docker network create") || len(f.appends) != 0 {
+	if f.has("docker run") || f.has("docker network create") || f.appended() {
 		t.Errorf("nothing of the app may change: %v", f.calls)
 	}
 }
@@ -1318,7 +1334,7 @@ func sharedRepo(t *testing.T) (*fake, *config.Config) {
 
 const (
 	depotImages = "docker images --digests " + depot
-	droppedList = ".boks/demo/dropped-images.jsonl"
+	appImages   = ".boks/demo/images.jsonl"
 )
 
 // rmis is every image removal, in order.
@@ -1368,14 +1384,15 @@ func TestPruneLeavesOtherAppsOfTheRepositoryAlone(t *testing.T) {
 		t.Errorf("keep 2 must drop a1 and keep a2: %v", f.calls)
 	}
 	// a1's image is written down before its snapshot goes, and removed once the old copy is gone.
-	if w, rm := f.writeAt(droppedList, `"tag":"a1"`), f.callAt("rm -rf .boks/demo/releases/demo-a1-1.json"); w < 0 || w > rm {
+	if w, rm := f.writeAt(appImages, `"tag":"a1"`), f.callAt("rm -rf .boks/demo/releases/demo-a1-1.json"); w < 0 || w > rm {
 		t.Errorf("want a1's image written down before its snapshot is removed: %v", f.writes)
 	}
 	if f.lastAt("docker rm -v demo-a2-2") < 0 || f.lastAt("docker rm -v demo-a2-2") > f.callAt("docker rmi") {
 		t.Errorf("want the old copy retired before the image is pruned: %v", f.calls)
 	}
-	if got := f.files[droppedList]; got != "" {
-		t.Errorf("an image that is gone leaves the list, got %q", got)
+	// a1 is gone, so it leaves the list; a3, pulled by this deploy and its release now, stays.
+	if got, want := f.files[appImages], `{"image":"`+depot+`","tag":"a3"}`+"\n"; got != want {
+		t.Errorf("want the list %q, got %q", want, got)
 	}
 }
 
@@ -1399,9 +1416,31 @@ func TestPruneRemovesTheUntaggedCopyOfADroppedRelease(t *testing.T) {
 	if want := []string{"docker rmi id-old"}; !slices.Equal(f.rmis(), want) {
 		t.Errorf("only the dropped release's copy may go, got %v", f.rmis())
 	}
-	// The tag still exists, on another image: the dropped release's image is gone, so is its line.
-	if got := f.files[droppedList]; got != "" {
-		t.Errorf("want the list emptied, got %q", got)
+	// The tag still exists, on another image: the dropped release's image is gone, so is its line;
+	// the tag pulled stays, a release names it.
+	if got, want := f.files[appImages], `{"image":"`+depot+`","tag":"latest"}`+"\n"; got != want {
+		t.Errorf("want the list %q, got %q", want, got)
+	}
+}
+
+// A deploy whose copy never starts leaves its image pulled and no release naming it: the next
+// deploy of the app removes it, as an image beyond keep.
+func TestPruneRemovesTheImageOfAFailedDeploy(t *testing.T) {
+	f, cfg := sharedRepo(t)
+	f.fail["docker run -d --name demo-bad-"] = errors.New("exec format error")
+	if err := Run(context.Background(), f, io.Discard, cfg, "bad", fixed); err == nil {
+		t.Fatal("want the deploy refused")
+	}
+	if !strings.Contains(f.files[appImages], `"tag":"bad"`) {
+		t.Fatalf("the image pulled must be written down, got %q", f.files[appImages])
+	}
+	f.out[depotImages] = "a3 sha256:a3 id-a3\nbad sha256:bad id-bad\na2 sha256:a2 id-a2\na1 sha256:a1 id-a1\n"
+	f.listsAfter("docker rmi "+depot+":a1", "a3 sha256:a3 id-a3\na2 sha256:a2 id-a2\n")
+	if err := Run(context.Background(), f, io.Discard, cfg, "a3", fixed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"docker rmi " + depot + ":bad", "docker rmi " + depot + ":a1"}; !slices.Equal(f.rmis(), want) {
+		t.Errorf("want the failed deploy's image and a1 removed, got %v", f.rmis())
 	}
 }
 
@@ -1414,7 +1453,7 @@ func TestPruneComesBackToAnImageOnceNoReleaseNamesIt(t *testing.T) {
 	f.out["cat .boks/demo/releases/demo-a2-2.json"] = `{"id":"demo-a2-2","image":"` + depot + `","tag":"a2","digest":"sha256:d"}`
 	f.out["find .boks"] = `{"image":"` + depot + `","tag":"a3","digest":"sha256:e"}`
 	// What a prune of an earlier deploy left on the list: a1, the same build as a2, kept back then.
-	f.files[droppedList] = `{"image":"` + depot + `","tag":"a1","digest":"sha256:d"}` + "\n"
+	f.files[appImages] = `{"image":"` + depot + `","tag":"a1","digest":"sha256:d"}` + "\n"
 	f.out[depotImages] = "a3 sha256:e id-e\na2 sha256:d id-d\na1 sha256:d id-d\n"
 	f.listsAfter("docker rmi "+depot+":a2", "a3 sha256:e id-e\n")
 	cfg.Keep = 1
@@ -1438,8 +1477,8 @@ func TestPruneKeepsATagWhoseImageCarriesARecordedDigest(t *testing.T) {
 	if len(f.rmis()) != 0 {
 		t.Errorf("an image a release names must stay: %v", f.rmis())
 	}
-	if !strings.Contains(f.files[droppedList], `"tag":"a1"`) {
-		t.Errorf("an image kept back stays on the list, got %q", f.files[droppedList])
+	if !strings.Contains(f.files[appImages], `"tag":"a1"`) {
+		t.Errorf("an image kept back stays on the list, got %q", f.files[appImages])
 	}
 }
 
@@ -1474,8 +1513,8 @@ func TestPruneRemovesNothingWhenTheRecordedReleasesCannotBeRead(t *testing.T) {
 			if f.has("docker rmi") || f.has("docker images") {
 				t.Errorf("no image may be pruned: %v", f.calls)
 			}
-			if !strings.Contains(f.files[droppedList], `"tag":"a1"`) {
-				t.Errorf("a1 must stay on the list, got %q", f.files[droppedList])
+			if !strings.Contains(f.files[appImages], `"tag":"a1"`) {
+				t.Errorf("a1 must stay on the list, got %q", f.files[appImages])
 			}
 		})
 	}
@@ -1829,7 +1868,7 @@ func TestRoutelessNameCollisionWritesNoJournal(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, noPorts), "v2", quick()); err == nil {
 		t.Fatal("want an error")
 	}
-	if len(f.appends) != 0 {
+	if f.appended() {
 		t.Errorf("no journal entry for a refused deploy: %v", f.appends)
 	}
 }
@@ -1850,7 +1889,7 @@ func TestJournalNamesTheReleaseBeingReplaced(t *testing.T) {
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err == nil {
 		t.Fatal("want an error")
 	}
-	if f.has("docker run") || len(f.appends) != 0 {
+	if f.has("docker run") || f.appended() {
 		t.Errorf("nothing may change: %v %v", f.calls, f.appends)
 	}
 }

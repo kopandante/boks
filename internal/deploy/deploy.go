@@ -142,6 +142,13 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := pull(ctx, r, log, l.ref, l.pull || missing(ctx, r, l.ref), o.Login); err != nil {
 		return err
 	}
+	// A deploy brings its image to the server, and the image is this app's to remove once no release
+	// names it — also when the deploy goes no further than the pull, or its copy never comes up.
+	if l.pull {
+		if err := release.AddImage(ctx, r, cfg.App, release.Image{Image: cfg.Image, Tag: l.tag}); err != nil {
+			fmt.Fprintf(log, "warning: could not write down the image pulled: %v\n", err)
+		}
+	}
 	// Whether the container will have a health check is known before anything is touched: from the
 	// config, or else from the image. A deploy that is bound to be refused must not first take the
 	// running copy down.
@@ -1325,22 +1332,21 @@ func retire(ctx context.Context, r remote.Runner, log io.Writer, old []string) {
 	}
 }
 
-// prune removes the images of the releases keep dropped, as release.Prune listed them, and nothing
-// else. Many apps can share one image repository and differ only by tag (a Depot project keeps an
+// prune removes the app's images (see release.ImagesPath) that no release names, and nothing else.
+// Many apps can share one image repository and differ only by tag (a Depot project keeps an
 // organisation's images in one), so `docker images <repo>` lists other apps' images too, their
-// rollback targets among them: what goes is a tag a dropped release of this app ran, and the
-// untagged copy of a digest one ran (re-pulling a moving tag leaves it behind), and only while no
-// release still recorded on the server, this app's or another's, names that tag or digest. current,
-// the tag just put in place, never goes. What is still there afterwards — kept for a release that
-// names it, used by a container, a failed removal — stays on the list for the next deploy. A failure
-// costs disk, not the operation.
+// rollback targets among them: what goes is a tag on the app's list, and the untagged copy of a digest
+// on it (re-pulling a moving tag leaves it behind), and only while no release still recorded on the
+// server, this app's or another's, names that tag or digest. current, the tag just put in place,
+// never goes. What is still there afterwards — named by a release, used by a container, a failed
+// removal — stays on the list for the next deploy. A failure costs disk, not the operation.
 func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, current string) {
-	dropped, err := release.Dropped(ctx, r, cfg.App)
+	imgs, err := release.Images(ctx, r, cfg.App)
 	if err != nil {
-		fmt.Fprintf(log, "warning: could not read the dropped images: %v\n", err)
+		fmt.Fprintf(log, "warning: could not read the app's images: %v\n", err)
 		return
 	}
-	if len(dropped) == 0 {
+	if len(imgs) == 0 {
 		return
 	}
 	recorded, err := release.RecordedImages(ctx, r)
@@ -1349,7 +1355,7 @@ func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 		return
 	}
 	var repos []string
-	for _, img := range dropped {
+	for _, img := range imgs {
 		if !slices.Contains(repos, img.Image) {
 			repos = append(repos, img.Image)
 		}
@@ -1357,14 +1363,13 @@ func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 	var left []release.Image
 	for _, repo := range repos {
 		var mine []release.Image
-		for _, img := range dropped {
+		for _, img := range imgs {
 			if img.Image == repo {
 				mine = append(mine, img)
 			}
 		}
 		rows, err := imageRows(ctx, r, repo)
-		if err == nil {
-			removeDropped(ctx, r, log, repo, rows, mine, recorded, cfg.Image, current)
+		if err == nil && removeUnnamed(ctx, r, log, repo, rows, mine, recorded, cfg.Image, current) {
 			rows, err = imageRows(ctx, r, repo)
 		}
 		if err != nil {
@@ -1373,13 +1378,13 @@ func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 			continue
 		}
 		for _, img := range mine {
-			if slices.ContainsFunc(rows, func(w imageRow) bool { return ranBy(img, w) }) {
+			if slices.ContainsFunc(rows, func(w imageRow) bool { return isImage(img, w) }) {
 				left = append(left, img)
 			}
 		}
 	}
-	if err := release.SetDropped(ctx, r, cfg.App, left); err != nil {
-		fmt.Fprintf(log, "warning: could not update the dropped images: %v\n", err)
+	if err := release.SetImages(ctx, r, cfg.App, left); err != nil {
+		fmt.Fprintf(log, "warning: could not update the app's images: %v\n", err)
 	}
 }
 
@@ -1387,9 +1392,9 @@ func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Conf
 // repository, either of which may be <none>.
 type imageRow struct{ tag, digest, id string }
 
-// ranBy says whether row is the image a dropped release ran: by its digest when the release recorded
-// one, since a tag may since have moved to an image a later release runs; by its tag otherwise.
-func ranBy(img release.Image, w imageRow) bool {
+// isImage says whether row is img: by its digest when one was recorded, since a tag may since have
+// moved to an image a later release runs; by its tag otherwise.
+func isImage(img release.Image, w imageRow) bool {
 	if img.Digest != "" {
 		return w.digest == img.Digest
 	}
@@ -1410,14 +1415,14 @@ func imageRows(ctx context.Context, r remote.Runner, repo string) ([]imageRow, e
 	return rows, nil
 }
 
-// removeDropped removes from repo what the dropped images name and no recorded release does. A tag
-// stays whole when any of its rows carries a digest a release names: removing the last tag of an
-// image takes all of its digests with it. An untagged copy goes by ID, so only when nothing else
-// listed under that ID stays.
-func removeDropped(ctx context.Context, r remote.Runner, log io.Writer, repo string, rows []imageRow, dropped []release.Image,
-	recorded release.Recorded, image, current string) {
+// removeUnnamed removes from repo what the app's images name and no recorded release does, and says
+// whether it removed anything. A tag stays whole when any of its rows carries a digest a release
+// names: removing the last tag of an image takes all of its digests with it. An untagged copy goes
+// by ID, so only when nothing else listed under that ID stays.
+func removeUnnamed(ctx context.Context, r remote.Runner, log io.Writer, repo string, rows []imageRow, imgs []release.Image,
+	recorded release.Recorded, image, current string) bool {
 	tags, digests, held := map[string]bool{}, map[string]bool{}, map[string]bool{}
-	for _, img := range dropped {
+	for _, img := range imgs {
 		if img.Tag != "" {
 			tags[img.Tag] = true
 		}
@@ -1456,6 +1461,7 @@ func removeDropped(ctx context.Context, r remote.Runner, log io.Writer, repo str
 			best(ctx, r, log, "docker", "rmi", w.id)
 		}
 	}
+	return len(done) > 0
 }
 
 // best runs a cleanup command whose failure must not fail the deploy.

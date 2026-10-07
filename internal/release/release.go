@@ -279,8 +279,8 @@ func predecessor(ctx context.Context, r remote.Runner, app string, ids []string,
 // recorded is current and always kept; the caller names it, having just written it.
 //
 // The image a release ran is named by its snapshot alone, so before a snapshot goes, the image it
-// names is written to the app's list of dropped images (DroppedPath), which the deploy works off once
-// the containers that ran it are gone. A snapshot that cannot be read, or whose image cannot be
+// names is added to the app's images (ImagesPath), which the deploy prunes once the containers that
+// ran it are gone. A snapshot that cannot be read, or whose image cannot be
 // written down, stays, and the next prune comes back to it; one that reads but is damaged names no
 // image and goes all the same.
 func Prune(ctx context.Context, r remote.Runner, app, current string, keep int) error {
@@ -308,11 +308,7 @@ func Prune(ctx context.Context, r remote.Runner, app, current string, keep int) 
 		}
 		var img Image
 		if json.Unmarshal([]byte(out), &img) == nil && img.Image != "" {
-			line, err := json.Marshal(img)
-			if err != nil {
-				return err
-			}
-			if err := remote.Append(ctx, r, append(line, '\n'), DroppedPath(app)); err != nil {
+			if err := AddImage(ctx, r, app, img); err != nil {
 				return fmt.Errorf("write down the image of release %s of %s: %w", id, app, err)
 			}
 		}
@@ -331,16 +327,25 @@ type Image struct {
 	Digest string `json:"digest,omitempty"`
 }
 
-// DroppedPath lists, one JSON line each, the images of the app's releases Prune removed and whose
-// images are not removed yet: one another release still names, one a container still used, one
-// whose removal failed. The list is what makes the image this app's to remove later; a repository
-// many apps share says nothing about whose a tag is.
-func DroppedPath(app string) string { return path.Join(Dir(app), "dropped-images.jsonl") }
+// ImagesPath lists, one JSON line each, the images the app brought to the server that may still be
+// there: each one a deploy pulled, and each one a release Prune removed had run. A deploy prunes
+// those no release of any app names, and keeps on the list those still there. The list is what makes
+// an image this app's to remove; a repository many apps share says nothing about whose a tag is.
+func ImagesPath(app string) string { return path.Join(Dir(app), "images.jsonl") }
 
-// Dropped reads the app's list of dropped images. A line that does not parse is skipped: an append
-// cut short leaves one, and the rest of the list is still good.
-func Dropped(ctx context.Context, r remote.Runner, app string) ([]Image, error) {
-	out, err := r.Run(ctx, "sh", "-c", "cat "+remote.Quote(DroppedPath(app))+" 2>/dev/null || true")
+// AddImage adds img to the app's images.
+func AddImage(ctx context.Context, r remote.Runner, app string, img Image) error {
+	line, err := json.Marshal(img)
+	if err != nil {
+		return err
+	}
+	return remote.Append(ctx, r, append(line, '\n'), ImagesPath(app))
+}
+
+// Images reads the app's images, each once. A line that does not parse is skipped: an append cut
+// short leaves one, and the rest of the list is still good.
+func Images(ctx context.Context, r remote.Runner, app string) ([]Image, error) {
+	out, err := r.Run(ctx, "sh", "-c", "cat "+remote.Quote(ImagesPath(app))+" 2>/dev/null || true")
 	if err != nil {
 		return nil, err
 	}
@@ -354,8 +359,8 @@ func Dropped(ctx context.Context, r remote.Runner, app string) ([]Image, error) 
 	return imgs, nil
 }
 
-// SetDropped replaces the app's list of dropped images with imgs.
-func SetDropped(ctx context.Context, r remote.Runner, app string, imgs []Image) error {
+// SetImages replaces the app's images with imgs.
+func SetImages(ctx context.Context, r remote.Runner, app string, imgs []Image) error {
 	var body []byte
 	for _, img := range imgs {
 		line, err := json.Marshal(img)
@@ -364,7 +369,7 @@ func SetDropped(ctx context.Context, r remote.Runner, app string, imgs []Image) 
 		}
 		body = append(append(body, line...), '\n')
 	}
-	return remote.UploadAtomic(ctx, r, body, DroppedPath(app))
+	return remote.UploadAtomic(ctx, r, body, ImagesPath(app))
 }
 
 // Recorded is what the releases recorded on a server run, every app's together: the image:tag

@@ -138,7 +138,7 @@ func TestTheDependencyIsAskedAgainUnderTheAdmissionLock(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no running copy") {
 		t.Fatalf("want the late refusal, got %v", err)
 	}
-	if f.has("docker create") || len(f.appends) != 0 {
+	if f.has("docker create") || f.appended() {
 		t.Errorf("nothing of the app changes: %v", f.calls)
 	}
 }

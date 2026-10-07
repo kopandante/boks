@@ -25,7 +25,7 @@ func boxLine(name, app, hostname, aliases string) string {
 func changedNothing(f *fake) bool {
 	return !f.has("docker pull") && !f.has("docker network create") && !f.has("docker network connect") &&
 		!f.has("docker run") && !f.has("docker stop") && !f.has("docker exec boks-proxy kamal-proxy deploy") &&
-		!f.has("docker ps -a --filter name=^boks-proxy$") && len(f.appends) == 0
+		!f.has("docker ps -a --filter name=^boks-proxy$") && !f.appended()
 }
 
 // A name on the app's network that a container of another owner already answers to would split the
@@ -140,7 +140,7 @@ func TestTheNetworkIsAskedAgainUnderTheAdmissionLock(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "answers to demo") {
 		t.Fatalf("want the late conflict, got %v", err)
 	}
-	if f.has("docker network create") || f.has("docker run") || len(f.appends) != 0 || !f.has(admitGive("demo")) {
+	if f.has("docker network create") || f.has("docker run") || f.appended() || !f.has(admitGive("demo")) {
 		t.Errorf("nothing of the app changes, and the admission is given back: %v", f.calls)
 	}
 }
@@ -318,7 +318,7 @@ func TestCheckRollbackAsksTheNetwork(t *testing.T) {
 	if _, err := CheckRollback(context.Background(), f, parse(t, onePort), ""); err == nil || !strings.Contains(err.Error(), "answers to demo") {
 		t.Fatalf("want the conflict, got %v", err)
 	}
-	if f.has("docker network") || f.has("docker run") || len(f.appends) != 0 {
+	if f.has("docker network") || f.has("docker run") || f.appended() {
 		t.Errorf("a check changes nothing: %v", f.calls)
 	}
 	// The container's name is not known yet, and an empty one is nobody's name.
@@ -350,7 +350,7 @@ func TestAProxyThatCannotReachARouteStopsTheDeploy(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "other-v1-1") {
 		t.Fatalf("want the boot's failure, got %v", err)
 	}
-	if f.has("docker run") || len(f.appends) != 0 || !f.has(admitGive("demo")) {
+	if f.has("docker run") || f.appended() || !f.has(admitGive("demo")) {
 		t.Errorf("nothing of the app changes, and the lock is given back: %v", f.calls)
 	}
 }

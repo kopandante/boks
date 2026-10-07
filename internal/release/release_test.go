@@ -154,7 +154,7 @@ func TestPruneWritesDownTheImagesItDrops(t *testing.T) {
 	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.appends[".boks/demo/dropped-images.jsonl"]; got != `{"image":"r/p","tag":"v1","digest":"sha256:one"}`+"\n" {
+	if got := f.appends[".boks/demo/images.jsonl"]; got != `{"image":"r/p","tag":"v1","digest":"sha256:one"}`+"\n" {
 		t.Errorf("want v1's image written down, got %q", got)
 	}
 	if len(f.removed) != 8 {
@@ -163,14 +163,14 @@ func TestPruneWritesDownTheImagesItDrops(t *testing.T) {
 }
 
 // The list round-trips, and a line an append cut short is skipped rather than failing the rest.
-func TestDroppedReadsWhatSetDroppedWrote(t *testing.T) {
+func TestImagesReadsWhatSetImagesWrote(t *testing.T) {
 	f := newFake()
 	imgs := []Image{{Image: "r/p", Tag: "v1", Digest: "sha256:one"}, {Image: "r/p", Tag: "v2"}}
-	if err := SetDropped(context.Background(), f, "demo", imgs); err != nil {
+	if err := SetImages(context.Background(), f, "demo", imgs); err != nil {
 		t.Fatal(err)
 	}
-	f.out["sh -c cat '.boks/demo/dropped-images.jsonl'"] = f.writes[".boks/demo/dropped-images.jsonl"] + `{"image":"r/p","ta`
-	got, err := Dropped(context.Background(), f, "demo")
+	f.out["sh -c cat '.boks/demo/images.jsonl'"] = f.writes[".boks/demo/images.jsonl"] + `{"image":"r/p","ta`
+	got, err := Images(context.Background(), f, "demo")
 	if err != nil || !reflect.DeepEqual(got, imgs) {
 		t.Errorf("want %v, got %v (%v)", imgs, got, err)
 	}
