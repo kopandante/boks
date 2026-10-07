@@ -123,9 +123,6 @@ func TestRoutelessRollbackStopsTheRunningCopyFirst(t *testing.T) {
 	if f.has("docker pull") || touchesProxy(f) {
 		t.Errorf("a rollback of an app without routes neither pulls nor touches the proxy: %v", f.calls)
 	}
-	if !f.has("docker images ghcr.io/x/bot") {
-		t.Errorf("images beyond keep are pruned after a rollback too: %v", f.calls)
-	}
 }
 
 // A restored release that never becomes healthy is removed before the copy it replaced comes back.
@@ -286,12 +283,19 @@ func TestRollbackDoesNotMistakeAFailedCheckForAMissingEnv(t *testing.T) {
 // deploy; the restored release is current, so it is never the one that goes.
 func TestRollbackPrunesReleasesBeyondKeep(t *testing.T) {
 	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v2-2.json"] = `{"id":"bot-v2-2","image":"ghcr.io/x/bot","tag":"v2","previous":"bot-v1-1"}`
+	f.out["find .boks"] = `{"image":"ghcr.io/x/bot","tag":"v1","digest":"sha256:old"}`
+	f.out["docker images --digests ghcr.io/x/bot"] = "v2 <none> id-v2\nv1 sha256:old id-v1\n"
 	cfg := parse(t, noPorts+"keep: 1\n")
 	if err := Rollback(context.Background(), f, io.Discard, cfg, "", quick()); err != nil {
 		t.Fatal(err)
 	}
 	if !f.has("rm -rf .boks/bot/releases/bot-v2-2.json") || f.has("rm -rf .boks/bot/releases/bot-v1-1.json") {
 		t.Errorf("want the release left behind pruned and the restored one kept: %v", f.calls)
+	}
+	// And the image of the release left behind goes with it, once its copy is retired.
+	if !f.has("docker rmi ghcr.io/x/bot:v2") || f.has("docker rmi ghcr.io/x/bot:v1") || f.lastAt("docker rm -v bot-v2-2") > f.callAt("docker rmi") {
+		t.Errorf("want v2's image pruned after its copy is gone, v1's kept: %v", f.calls)
 	}
 }
 

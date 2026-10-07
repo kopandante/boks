@@ -16,6 +16,8 @@ type fake struct {
 	writes  map[string]string
 	appends map[string]string
 	removed []string
+	// fail answers a command starting with its key with an error.
+	fail map[string]error
 	// rmFlags is the flags of every rm, in order: a release's files are a directory, which plain -f refuses.
 	rmFlags []string
 }
@@ -26,6 +28,11 @@ func newFake() *fake {
 
 func (f *fake) Run(_ context.Context, args ...string) (string, error) {
 	cmd := strings.Join(args, " ")
+	for prefix, err := range f.fail {
+		if strings.HasPrefix(cmd, prefix) {
+			return "", err
+		}
+	}
 	if args[0] == "rm" {
 		f.removed = append(f.removed, args[2:]...)
 		f.rmFlags = append(f.rmFlags, args[1])
@@ -126,7 +133,7 @@ func TestUnfinishedIsNilWhenEverythingClosed(t *testing.T) {
 func TestPruneKeepsTheNewest(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
-	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
+	if _, err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.removed) != 4 || !strings.Contains(f.removed[0], "demo-v1-1.json") || f.removed[2] != ".boks/demo/files/demo-v1-1" || f.removed[3] != ".boks/demo/jobs/demo-v1-1" {
@@ -134,6 +141,49 @@ func TestPruneKeepsTheNewest(t *testing.T) {
 	}
 	if strings.Join(f.rmFlags, " ") != "-rf" {
 		t.Errorf("the files are a directory, so the removal must be recursive: %v", f.rmFlags)
+	}
+}
+
+// The image a removed release ran is named by its snapshot alone, so Prune reads it before the
+// snapshot goes and hands it back.
+func TestPruneReturnsWhatItRemoved(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\n"
+	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1","image":"r/p","tag":"v1","digest":"sha256:one"}`
+	removed, err := Prune(context.Background(), f, "demo", "", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0].ID != "demo-v1-1" || removed[0].Image != "r/p" || removed[0].Tag != "v1" || removed[0].Digest != "sha256:one" {
+		t.Errorf("want v1 with its image, got %+v", removed)
+	}
+}
+
+// A snapshot that cannot be read is not removed: its image would never be known again.
+func TestPruneKeepsASnapshotItCannotRead(t *testing.T) {
+	f := newFake()
+	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
+	f.fail = map[string]error{"cat .boks/demo/releases/demo-v1-1.json": fmt.Errorf("connection reset")}
+	if _, err := Prune(context.Background(), f, "demo", "", 1); err == nil || len(f.removed) != 0 {
+		t.Errorf("want an error and nothing removed, got %v, %v", err, f.removed)
+	}
+}
+
+func TestRecordedImagesReadsEveryApp(t *testing.T) {
+	f := newFake()
+	f.out["find .boks -mindepth 3 -maxdepth 3 -path .boks/*/releases/*.json -type f -exec cat {} +"] = "{\n  \"app\": \"a\", \"image\": \"r/p\", \"tag\": \"a1\", \"digest\": \"sha256:a\"\n}\n" +
+		`{"app":"b","image":"r/p","tag":"b1"}` + "\n" + `{"app":"old","id":"x"}` + "\n"
+	rec, err := RecordedImages(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rec.Refs, map[string]bool{"r/p:a1": true, "r/p:b1": true}) || !reflect.DeepEqual(rec.Digests, map[string]bool{"sha256:a": true}) {
+		t.Errorf("got %+v", rec)
+	}
+	f = newFake()
+	f.out["find .boks"] = `{"image":`
+	if _, err := RecordedImages(context.Background(), f); err == nil {
+		t.Error("a damaged snapshot must fail the read, not shorten it")
 	}
 }
 
@@ -154,7 +204,7 @@ func TestBeginWritesAnOpenEntry(t *testing.T) {
 func TestPruneGoesByAgeNotByTag(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-0a1b2c3-400.json\ndemo-c1d2e3f-100.json\ndemo-d4e5f6a-200.json\ndemo-e7f8a9b-300.json\n"
-	if err := Prune(context.Background(), f, "demo", "", 3); err != nil {
+	if _, err := Prune(context.Background(), f, "demo", "", 3); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{".boks/demo/releases/demo-c1d2e3f-100.json", ".boks/demo/demo-c1d2e3f-100.env", ".boks/demo/files/demo-c1d2e3f-100", ".boks/demo/jobs/demo-c1d2e3f-100"}
@@ -183,7 +233,7 @@ func TestIDsAreOldestFirstAcrossTags(t *testing.T) {
 func TestPruneKeepsEverythingWithinKeep(t *testing.T) {
 	f := newFake()
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\n"
-	if err := Prune(context.Background(), f, "demo", "", 2); err != nil {
+	if _, err := Prune(context.Background(), f, "demo", "", 2); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.removed) != 0 {
@@ -275,7 +325,7 @@ func TestPruneKeepsWhatARollbackReaches(t *testing.T) {
 	f.out["sh -c ls -1"] = "demo-v1-1.json\ndemo-v2-2.json\ndemo-v3-3.json\ndemo-v4-4.json\n"
 	f.out["cat .boks/demo/releases/demo-v4-4.json"] = `{"id":"demo-v4-4","previous":"demo-v1-1"}`
 	f.out["cat .boks/demo/releases/demo-v1-1.json"] = `{"id":"demo-v1-1"}`
-	if err := Prune(context.Background(), f, "demo", "demo-v4-4", 3); err != nil {
+	if _, err := Prune(context.Background(), f, "demo", "demo-v4-4", 3); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{".boks/demo/releases/demo-v2-2.json", ".boks/demo/demo-v2-2.env", ".boks/demo/files/demo-v2-2", ".boks/demo/jobs/demo-v2-2"}

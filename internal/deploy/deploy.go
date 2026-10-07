@@ -108,6 +108,9 @@ type launch struct {
 	// the journal entry; the previous containers are retired only once it succeeds.
 	start  func(ctx context.Context, name string) error
 	record func(ctx context.Context, name string, op operation) error
+	// id is the release that serves once recorded, whose rollback chain keep counts back from: the
+	// release being restored for a rollback; empty for a deploy, whose release is the new copy's name.
+	id string
 }
 
 // put runs l on a server whose lock the caller holds. cfg is what l runs with: the current config
@@ -272,7 +275,13 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		leaveProxy(ctx, r, log, cfg, o)
 	}
 	retire(ctx, r, log, names(old))
-	prune(ctx, r, log, cfg, l.tag)
+	// keep applies once the previous copies are gone: a release it drops may be the one they ran,
+	// and its image is not removable while they exist.
+	id := l.id
+	if id == "" {
+		id = name
+	}
+	prune(ctx, r, log, cfg, l.tag, pruneReleases(ctx, r, log, cfg, id))
 	return nil
 }
 
@@ -728,19 +737,17 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	if err := release.Save(ctx, r, snapshot); err != nil {
 		return err
 	}
-	if err := serving(ctx, r, cfg.App, name, name, op.id, now); err != nil {
-		return err
-	}
-	pruneReleases(ctx, r, log, cfg, name)
-	return nil
+	return serving(ctx, r, cfg.App, name, name, op.id, now)
 }
 
-// pruneReleases applies keep to the recorded releases once current is id. A failure costs disk,
-// not the operation.
-func pruneReleases(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, id string) {
-	if err := release.Prune(ctx, r, cfg.App, id, cfg.Keep); err != nil {
+// pruneReleases applies keep to the recorded releases once current is id, and returns the ones it
+// removed. A failure costs disk, not the operation.
+func pruneReleases(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, id string) []release.Snapshot {
+	removed, err := release.Prune(ctx, r, cfg.App, id, cfg.Keep)
+	if err != nil {
 		fmt.Fprintf(log, "warning: could not prune old releases: %v\n", err)
 	}
+	return removed
 }
 
 // serving points `current` at release id and closes the operation that put it there, in that order,
@@ -1319,34 +1326,83 @@ func retire(ctx context.Context, r remote.Runner, log io.Writer, old []string) {
 	}
 }
 
-// prune removes images of this repository beyond cfg.Keep, never the one just deployed.
-// `docker images` lists newest first. Untagged (`<none>`) layers left behind by re-pulling a
-// moving tag are removed by ID — without this they accumulate, and the tag-per-SHA workflow the
-// architecture recommends produces them steadily. Docker refuses to remove an image a container
-// still uses, so a rollback target cannot be pruned away.
-func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, current string) {
-	out, err := r.Run(ctx, "docker", "images", cfg.Image, "--format", "{{.Tag}} {{.ID}}")
-	if err != nil {
-		fmt.Fprintf(log, "warning: could not list images: %v\n", err)
+// prune removes the images of the releases keep dropped, and nothing else. Many apps can share one
+// image repository and differ only by tag (a Depot project keeps an organisation's images in one),
+// so `docker images <repo>` lists other apps' images too, their rollback targets among them: what
+// goes is a tag one of this app's dropped releases ran, and the untagged copy of a digest one of
+// them ran (re-pulling a moving tag leaves it behind), and only while no release still recorded on
+// the server, this app's or another's, names that tag or digest. current, the tag just put in
+// place, never goes. Docker refuses to remove an image a container still uses, and a failure costs
+// disk, not the operation.
+func prune(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config, current string, dropped []release.Snapshot) {
+	var repos []string
+	tags, digests := map[string]bool{}, map[string]bool{}
+	for _, s := range dropped {
+		if s.Image == "" {
+			continue
+		}
+		if !slices.Contains(repos, s.Image) {
+			repos = append(repos, s.Image)
+		}
+		if s.Tag != "" {
+			tags[s.Image+":"+s.Tag] = true
+		}
+		if s.Digest != "" {
+			digests[s.Image+"@"+s.Digest] = true
+		}
+	}
+	if len(repos) == 0 {
 		return
 	}
-	kept := 1
-	for _, line := range strings.Split(out, "\n") {
-		tag, id, ok := strings.Cut(strings.TrimSpace(line), " ")
-		if !ok || tag == current {
+	recorded, err := release.RecordedImages(ctx, r)
+	if err != nil {
+		fmt.Fprintf(log, "warning: no image pruned: %v\n", err)
+		return
+	}
+	for _, repo := range repos {
+		out, err := r.Run(ctx, "docker", "images", "--digests", repo, "--format", "{{.Tag}} {{.Digest}} {{.ID}}")
+		if err != nil {
+			fmt.Fprintf(log, "warning: could not list images: %v\n", err)
 			continue
 		}
-		if tag == "<none>" {
-			fmt.Fprintf(log, "prune %s (untagged %s)\n", id, cfg.Image)
-			best(ctx, r, log, "docker", "rmi", id)
-			continue
+		type row struct{ tag, digest, id string }
+		var rows []row
+		for _, line := range strings.Split(out, "\n") {
+			if f := strings.Fields(line); len(f) == 3 {
+				rows = append(rows, row{f[0], f[1], f[2]})
+			}
 		}
-		if kept < cfg.Keep {
-			kept++
-			continue
+		// An image listed under anything that stays, a tag or a digest, stays whole: its untagged
+		// rows are the same image.
+		stays := map[string]bool{}
+		goes := func(w row) bool {
+			if recorded.Digests[w.digest] {
+				return false
+			}
+			if w.tag == "<none>" {
+				return digests[repo+"@"+w.digest]
+			}
+			ref := repo + ":" + w.tag
+			return tags[ref] && !recorded.Refs[ref] && !(repo == cfg.Image && w.tag == current)
 		}
-		fmt.Fprintf(log, "prune %s:%s\n", cfg.Image, tag)
-		best(ctx, r, log, "docker", "rmi", cfg.Image+":"+tag)
+		for _, w := range rows {
+			if !goes(w) {
+				stays[w.id] = true
+			}
+		}
+		removed := map[string]bool{}
+		for _, w := range rows {
+			switch {
+			case !goes(w):
+			case w.tag != "<none>":
+				fmt.Fprintf(log, "prune %s:%s\n", repo, w.tag)
+				best(ctx, r, log, "docker", "rmi", repo+":"+w.tag)
+			case !stays[w.id] && !removed[w.id]:
+				removed[w.id] = true
+				fmt.Fprintf(log, "prune %s (untagged %s)\n", w.id, repo)
+				best(ctx, r, log, "docker", "rmi", w.id)
+			}
+		}
 	}
 }
 

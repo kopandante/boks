@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path"
 	"slices"
 	"sort"
@@ -276,30 +277,81 @@ func predecessor(ctx context.Context, r remote.Runner, app string, ids []string,
 // three are v2, v3 and v4, and pruning by age would delete v1 — the release v4 was deployed over
 // and the one its rollback has to reach. It runs after a deploy succeeds, so the release just
 // recorded is current and always kept; the caller names it, having just written it.
-func Prune(ctx context.Context, r remote.Runner, app, current string, keep int) error {
+//
+// It returns the snapshots it removed, read before their files went: the image a removed release
+// ran is the caller's to remove, and once the snapshot is gone nothing says which image that was.
+// A snapshot that cannot be read stays, so the next prune comes back to it; one that reads but is
+// damaged goes, naming no image.
+func Prune(ctx context.Context, r remote.Runner, app, current string, keep int) ([]Snapshot, error) {
 	ids, err := IDs(ctx, r, app)
 	if err != nil || len(ids) <= keep {
-		return err
+		return nil, err
 	}
 	kept := map[string]bool{}
 	for id := current; slices.Contains(ids, id) && !kept[id] && len(kept) < keep; {
 		kept[id] = true
 		if id, err = predecessor(ctx, r, app, ids, id); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	for i := len(ids) - 1; i >= 0 && len(kept) < keep; i-- {
 		kept[ids[i]] = true
 	}
+	var removed []Snapshot
 	for _, id := range ids {
 		if kept[id] {
 			continue
 		}
+		out, err := r.Run(ctx, "cat", snapshotPath(app, id))
+		if err != nil {
+			return removed, fmt.Errorf("release %s of %s: %w", id, app, err)
+		}
+		var s Snapshot
+		if json.Unmarshal([]byte(out), &s) != nil {
+			s = Snapshot{}
+		}
+		s.ID, s.App = id, app
 		if _, err := r.Run(ctx, "rm", "-rf", snapshotPath(app, id), EnvPath(app, id), FilesDir(app, id), JobsDir(app, id)); err != nil {
-			return err
+			return removed, err
+		}
+		removed = append(removed, s)
+	}
+	return removed, nil
+}
+
+// Recorded is what the releases recorded on a server run, every app's together: the image:tag
+// references and the digests. An image one of them names is a rollback target of some app, and
+// many apps can share one image repository, differing only by tag.
+type Recorded struct {
+	Refs    map[string]bool
+	Digests map[string]bool
+}
+
+// RecordedImages reads every snapshot on the server, of every app. A read that fails, or a
+// snapshot that does not parse, is an error rather than a shorter answer: the caller removes
+// images on the strength of nobody naming them.
+func RecordedImages(ctx context.Context, r remote.Runner) (Recorded, error) {
+	out, err := r.Run(ctx, "find", ".boks", "-mindepth", "3", "-maxdepth", "3", "-path", ".boks/*/releases/*.json",
+		"-type", "f", "-exec", "cat", "{}", "+")
+	if err != nil {
+		return Recorded{}, fmt.Errorf("read the releases recorded on the server: %w", err)
+	}
+	rec := Recorded{Refs: map[string]bool{}, Digests: map[string]bool{}}
+	dec := json.NewDecoder(strings.NewReader(out))
+	for {
+		var s struct{ Image, Tag, Digest string }
+		if err := dec.Decode(&s); err == io.EOF {
+			return rec, nil
+		} else if err != nil {
+			return Recorded{}, fmt.Errorf("read the releases recorded on the server: %w", err)
+		}
+		if s.Image != "" && s.Tag != "" {
+			rec.Refs[s.Image+":"+s.Tag] = true
+		}
+		if s.Digest != "" {
+			rec.Digests[s.Digest] = true
 		}
 	}
-	return nil
 }
 
 // Begin records that an operation is under way, before the app's containers or routes change
