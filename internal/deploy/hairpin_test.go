@@ -189,7 +189,7 @@ func TestEnsureHairpinLeavesWhatItCannotChange(t *testing.T) {
 	for _, c := range []struct{ facts, want string }{
 		{"nft=no\n", "no nft on this server"},
 		{"nft=yes\nuid=1000\nroot=no\n", "no root or `sudo -n`"},
-		{firewallFacts("0", iptables, true, "", ""), "ip filter INPUT drops by default and is iptables', which boks does not edit: containers here do not reach the proxy on this server's own addresses until it has `iptables -I INPUT"},
+		{firewallFacts("0", iptables, true, "", ""), "ip filter INPUT drops by default and is iptables', which boks does not edit: unless a rule there accepts them, containers here do not reach the proxy on this server's own addresses; one that does is `iptables -I INPUT"},
 		{firewallFacts("0", `{"nftables": []}`, true, "", ""), "no nft input chain drops by default"},
 	} {
 		f := newFake()
@@ -356,4 +356,147 @@ func TestProxyAnswered(t *testing.T) {
 			t.Errorf("%q: want %v", out, want)
 		}
 	}
+}
+
+// After a rollback the hosts asked for are the restored release's — its ports, under today's tls — not
+// today's config's; an app without tls reads nothing.
+func TestCheckRolledBackHairpinAsksTheRestoredHosts(t *testing.T) {
+	f := hairpinFake(hairpinMark + "https://old.example.com/\n  HTTP/1.1 200 OK\n")
+	f.out["sh -c cat '.boks/web/current'"] = "web-v1-1\n"
+	f.out["cat .boks/web/releases/web-v1-1.json"] = `{"id":"web-v1-1","app":"web","image":"ghcr.io/x/web","tag":"v1",` +
+		`"ports":[{"name":"web","port":3000,"host":"old.example.com"}]}`
+	if err := CheckRolledBackHairpin(context.Background(), f, &strings.Builder{}, hairpinConfig(t, true, "new.example.com")); err != nil {
+		t.Fatal(err)
+	}
+	if run := f.calls[f.callAt(hairpinRun)]; !strings.Contains(run, "--add-host old.example.com:203.0.113.7") || strings.Contains(run, "new.example.com") {
+		t.Errorf("want the restored release's host asked: %s", run)
+	}
+	// A release that cannot be read is an error, and nothing is run.
+	f = hairpinFake("")
+	f.out["sh -c cat '.boks/web/current'"] = "web-v1-1\n"
+	f.fail["cat .boks/web/releases/web-v1-1.json"] = errors.New("No such file")
+	if err := CheckRolledBackHairpin(context.Background(), f, &strings.Builder{}, hairpinConfig(t, true, "new.example.com")); err == nil ||
+		!strings.Contains(err.Error(), "reading the restored release for the hairpin check") || f.callAt("docker run") >= 0 {
+		t.Errorf("want an error before any probe: %v %v", err, f.calls)
+	}
+	f = newFake()
+	if err := CheckRolledBackHairpin(context.Background(), f, &strings.Builder{}, hairpinConfig(t, false, "new.example.com")); err != nil || len(f.calls) > 0 {
+		t.Errorf("want nothing asked without tls: %v %v", err, f.calls)
+	}
+}
+
+// hairpinStatusRead is the start of the status's read of the rule, after the facts.
+const hairpinStatusRead = "sh -c PATH=\"$PATH:/usr/sbin:/sbin\"\nif nft list chain"
+
+// The status line for each state of the rule: in every chain and kept, gone from a chain (a `nft -f` past
+// the unit) with the way back, kept by nothing, the unit off, and what boks cannot read or change.
+func TestHairpinStatusSaysWhereTheRuleIs(t *testing.T) {
+	input := []nftChain{{Family: "inet", Table: "filter", Name: "input"}}
+	two := strings.Replace(nftChains, `]}`, `,
+ {"chain": {"family": "ip6", "table": "fw", "name": "in", "hook": "input", "policy": "drop"}}]}`, 1)
+	kept := firewallFacts("0", nftChains, true, hairpinScriptFor(input), hairpinDropInBody)
+	iptables := `{"nftables": [{"chain": {"family": "ip", "table": "filter", "name": "INPUT", "hook": "input", "policy": "drop"}}]}`
+	for _, c := range []struct {
+		name, facts, rule string
+		want              []string
+	}{
+		{"kept", kept, "has inet filter input", []string{"firewall: hairpin rule in inet filter input, kept by nftables.service"}},
+		{"gone", kept, "lacks inet filter input", []string{"! firewall: inet filter input drops by default without boks's hairpin rule: " +
+			"unless another rule there accepts them, containers here do not reach the proxy on this server's own addresses; `boks server apply` puts it in"}},
+		{"one of two", firewallFacts("0", two, true, hairpinScriptFor([]nftChain{input[0], {Family: "ip6", Table: "fw", Name: "in"}}), hairpinDropInBody),
+			"has inet filter input\nlacks ip6 fw in", []string{"! firewall: ip6 fw in drops by default without boks's hairpin rule", "firewall: hairpin rule in inet filter input, kept"}},
+		{"never applied", firewallFacts("0", nftChains, true, "", ""), "lacks inet filter input", []string{"! firewall: inet filter input drops by default without boks's hairpin rule: " +
+			"unless another rule there accepts them, containers here do not reach the proxy on this server's own addresses; `boks server apply` puts it in"}},
+		{"kept by nothing", firewallFacts("0", nftChains, true, hairpinScriptFor(input), ""), "has inet filter input",
+			[]string{"! firewall: hairpin rule in inet filter input, but nftables.service would not put it back after a reload: `boks server apply` writes"}},
+		{"not read by systemd", strings.Replace(kept, " "+hairpinDropIn, "", 1), "has inet filter input",
+			[]string{"! firewall: hairpin rule in inet filter input, but nftables.service would not put it back"}},
+		{"old script", firewallFacts("0", two, true, hairpinScriptFor(input), hairpinDropInBody), "has inet filter input\nhas ip6 fw in",
+			[]string{"! firewall: hairpin rule in inet filter input, ip6 fw in, but " + hairpinScript + " is not the one `boks server apply` writes"}},
+		// A drop chain added since the last apply: the old script still keeps the rule in the first; only the
+		// new one is named without it, and the script is named as not the one apply writes now.
+		{"new chain", firewallFacts("0", two, true, hairpinScriptFor(input), hairpinDropInBody), "has inet filter input\nlacks ip6 fw in",
+			[]string{"! firewall: ip6 fw in drops by default without boks's hairpin rule", "! firewall: hairpin rule in inet filter input, but " + hairpinScript + " is not"}},
+		{"script and drop-in", firewallFacts("0", nftChains, true, "", ""), "has inet filter input",
+			[]string{"! firewall: hairpin rule in inet filter input, but nftables.service would not put it back"}},
+		{"unit off", firewallFacts("0", nftChains, false, "", ""), "has inet filter input", []string{"firewall: hairpin rule in inet filter input; nftables.service is not enabled"}},
+		{"no nft", "nft=no\n", "", []string{"firewall: no nft on this server"}},
+		{"no root", "nft=yes\nuid=1000\nroot=no\n", "", []string{"! firewall: no root or `sudo -n`"}},
+		{"iptables", firewallFacts("0", iptables, true, "", ""), "", []string{"firewall: ip filter INPUT drops by default and is iptables'"}},
+		{"nothing drops", firewallFacts("0", `{"nftables": []}`, true, "", ""), "", []string{"firewall: no nft input chain drops by default; boks's hairpin rule has none to go into"}},
+		{"unreadable", "garbage", "", []string{"! firewall: could not read the server's firewall"}},
+		{"no answer", kept, "", []string{"! firewall: reading boks's hairpin rule: no answer for inet filter input"}},
+	} {
+		f := newFake()
+		f.out[hairpinRead] = c.facts
+		f.out[hairpinStatusRead] = c.rule
+		lines := HairpinStatus(context.Background(), f)
+		got := strings.Join(lines, "\n")
+		if len(lines) != len(c.want) {
+			t.Errorf("%s: want %d lines:\n%s", c.name, len(c.want), got)
+			continue
+		}
+		// Each line in its place, and one to act on — "! " — only where one is wanted.
+		for i, w := range c.want {
+			if !strings.Contains(lines[i], w) || strings.HasPrefix(lines[i], "! ") != strings.HasPrefix(w, "! ") {
+				t.Errorf("%s: want %q as line %d of\n%s", c.name, w, i+1, got)
+			}
+		}
+		if c.name == "iptables" && !strings.HasSuffix(got, "(not checked)") {
+			t.Errorf("want the iptables chain named as not checked: %s", got)
+		}
+		if len(f.writes) > 0 || len(f.uploads) > 0 || f.has("systemctl daemon-reload") || f.has("sh "+hairpinScript) || f.has(admitTake(proxyHolder)) {
+			t.Errorf("%s: want nothing changed and no lock: %v", c.name, f.calls)
+		}
+	}
+	// A user that is not root reads the rule through sudo.
+	f := newFake()
+	f.out[hairpinRead] = firewallFacts("1000", nftChains, true, "", "")
+	HairpinStatus(context.Background(), f)
+	if !f.has("sudo -n " + hairpinStatusRead) {
+		t.Errorf("want the rule read through sudo: %v", f.calls)
+	}
+}
+
+// The status's read of the rule itself, run by sh against the stand-in nft of TestHairpinScriptInsertsOnce:
+// a chain without the rule lacks it, the script puts it in, and the chain has it.
+func TestHairpinStatusReadsTheRuleTheScriptPuts(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "rules")
+	nft := "#!/bin/sh\ncase \"$1\" in\n" +
+		"list) grep -F \"$3 $4 $5 \" " + state + " 2>/dev/null; exit 0 ;;\n" +
+		"*) set -f; set -- $1; echo \"$3 $4 $5 comment \\\"boks hairpin\\\"\" >> " + state + " ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(nft), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := []nftChain{{Family: "inet", Table: "filter", Name: "input"}}
+	local := &shell{path: dir + ":" + os.Getenv("PATH"), facts: firewallFacts("0", nftChains, true, hairpinScriptFor(input), hairpinDropInBody)}
+	if got := strings.Join(HairpinStatus(context.Background(), local), "\n"); !strings.Contains(got, "! firewall: inet filter input drops by default without") {
+		t.Fatalf("before the script: %s", got)
+	}
+	cmd := exec.Command("sh", "-c", hairpinScriptFor(input))
+	cmd.Env = append(os.Environ(), "PATH="+local.path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("script: %v %s", err, out)
+	}
+	if got := strings.Join(HairpinStatus(context.Background(), local), "\n"); !strings.Contains(got, "firewall: hairpin rule in inet filter input") || strings.Contains(got, "!") {
+		t.Errorf("after the script: %s", got)
+	}
+}
+
+// shell answers the firewall's facts as given and runs every other command with sh on this machine.
+type shell struct{ path, facts string }
+
+func (s *shell) Run(ctx context.Context, args ...string) (string, error) {
+	if strings.Join(args, " ") == hairpinRead {
+		return s.facts, nil
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = append(os.Environ(), "PATH="+s.path)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (s *shell) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
+	return s.Run(ctx, args...)
 }

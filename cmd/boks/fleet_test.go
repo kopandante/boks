@@ -376,3 +376,54 @@ func TestDeployAsksTheHairpinOnEveryServer(t *testing.T) {
 		t.Errorf("want every release run before any probe, and both servers probed: %v", seq)
 	}
 }
+
+// A rollback asks the hairpin as a deploy does: after the restored release serves on every server, on
+// every server; a's containers get no answer, b answers, and the error names a.
+func TestRollbackAsksTheHairpinOnEveryServer(t *testing.T) {
+	var seq []string
+	answers := func(name, hairpin string) *recorder {
+		s := botServer("bot-v2-2", "bot-v1-1")
+		s.seq, s.name = &seq, name
+		const v1 = `{"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1","ports":[{"name":"web","port":3000,"host":"bot.example.com"}],` +
+			`"env_path":".boks/bot/bot-v1-1.env"}`
+		for k, v := range map[string]string{
+			"cat .boks/bot/releases/bot-v1-1": v1, "cat .boks/bot/releases/bot-v2-2": strings.Replace(strings.Replace(v1, "v1-1", "v2-2", 2), `"tag":"v1"`, `"tag":"v2","previous":"bot-v1-1"`, 1),
+			"sh -c test -f": "present", "docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy",
+			"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1",
+			"docker exec boks-proxy sh -c wget -S -q": "  HTTP/1.1 200 OK", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
+			"sh -c if [ -f '.boks/_proxy/caddy.json' ]": "absent", "sh -c cd '.boks/_proxy' && pwd -P": "/home/u/.boks/_proxy",
+			"docker inspect -f {{.Image}} boks-proxy": "sha256:abc", "ip -4 route get 1.1.1.1": "1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.7",
+			"docker run --rm --pull never --network boks-bot": "boks-hairpin https://bot.example.com/\n" + hairpin,
+		} {
+			s.server[k] = v
+		}
+		return s
+	}
+	a, b := answers("a", "Connecting to bot.example.com (1.2.3.4:443)\nwget: download timed out"), answers("b", "  HTTP/1.1 200 OK")
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	// Today's config names another host: the probe asks the one the restored release serves.
+	cfg := parseConfig(t, twoServers+"tls: true\nports:\n  - {name: web, port: 3000, host: bot-new.example.com}\n")
+	err := dispatch(context.Background(), cfg, []string{"rollback"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "a: the release serves, but a container on boks-bot gets no answer from this server's proxy") || strings.Contains(err.Error(), "b:") {
+		t.Fatalf("want a named, b not: %v", err)
+	}
+	lastRun, firstProbe, probed := -1, -1, map[string]bool{}
+	for i, c := range seq {
+		name, cmd, _ := strings.Cut(c, " ")
+		if strings.HasPrefix(cmd, "docker run -d --name bot-v1-") {
+			lastRun = i
+		}
+		if strings.HasPrefix(cmd, "docker run --rm --pull never --network boks-bot") {
+			if !strings.Contains(cmd, "--add-host bot.example.com:") || strings.Contains(cmd, "bot-new.example.com") {
+				t.Errorf("want the restored release's host asked, not today's: %s", c)
+			}
+			probed[name] = true
+			if firstProbe < 0 {
+				firstProbe = i
+			}
+		}
+	}
+	if lastRun < 0 || firstProbe < lastRun || !probed["a"] || !probed["b"] {
+		t.Errorf("want every restored release run before any probe, and both servers probed: %v", seq)
+	}
+}

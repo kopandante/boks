@@ -515,7 +515,8 @@ func aptGet(ctx context.Context, r remote.Runner, sudo []string, args ...string)
 
 const installAction = "server install"
 
-// Install makes the server ready for boks and starts the proxy from image. r is the run's connection;
+// Install makes the server ready for boks, starts the proxy from image and, as `boks server apply` does,
+// has the firewall let containers reach it on the server's own addresses. r is the run's connection;
 // fresh makes a new one — a user just added to group docker has it only in a new login. The plan is
 // read again under the admission lock, so what was checked is what is changed.
 func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, log io.Writer, image string, o Options) error {
@@ -591,6 +592,11 @@ func Install(ctx context.Context, r remote.Runner, fresh func() remote.Runner, l
 		return fail(fmt.Errorf("docker does not answer %s without sudo in a new login: %w", f.user, err))
 	}
 	if err := proxy.Boot(ctx, nr, log, image); err != nil {
+		return fail(err)
+	}
+	// The firewall step of `boks server apply`, so a fresh server is ready for an app that calls its own
+	// public name: as root, over the run's connection, under the lock this install holds.
+	if err := ensureHairpin(ctx, r, log); err != nil {
 		return fail(err)
 	}
 	if op != "" {

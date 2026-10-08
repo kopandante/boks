@@ -33,6 +33,7 @@ import (
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/hostname"
 	"github.com/kopandante/boks/internal/proxy"
+	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -175,6 +176,21 @@ func readHairpin(ctx context.Context, r remote.Runner) (hairpinFirewall, error) 
 	return h, nil
 }
 
+// unchanged says what of the firewall boks leaves to its owner although the rule belongs there: a chain
+// iptables manages, a chain whose name boks does not write.
+func (h hairpinFirewall) unchanged() []string {
+	var out []string
+	for _, c := range h.iptables {
+		tool := map[string]string{"ip": "iptables", "ip6": "ip6tables"}[c.Family]
+		out = append(out, fmt.Sprintf("%s drops by default and is %s', which boks does not edit: unless a rule there accepts them, containers here do not reach "+
+			"the proxy on this server's own addresses; one that does is `%s -I INPUT -i br+ -p tcp -m multiport --dports 80,443 -m addrtype --dst-type LOCAL -j ACCEPT`", c, tool, tool))
+	}
+	for _, c := range h.odd {
+		out = append(out, fmt.Sprintf("%s drops by default and its name is not one boks writes; it needs `%s`", c, hairpinRule))
+	}
+	return out
+}
+
 // hairpinScriptFor is the script that inserts the rule into each of chains that does not have it, and
 // fails if it could not: a chain gone from the host's config, say.
 func hairpinScriptFor(chains []nftChain) string {
@@ -184,12 +200,17 @@ func hairpinScriptFor(chains []nftChain) string {
 		"# default would drop it. nftables.service runs this after it loads the firewall (" + hairpinDropIn + ").\n" +
 		"PATH=\"$PATH:/usr/sbin:/sbin\"\nrc=0\n")
 	for _, c := range chains {
-		fmt.Fprintf(&b, "nft list chain %s | grep -qF %s || { nft %s && echo %s; } || rc=1\n", c,
-			remote.Quote(`comment "`+hairpinComment+`"`), remote.Quote("insert rule "+c.String()+" "+hairpinRule),
+		fmt.Fprintf(&b, "%s || { nft %s && echo %s; } || rc=1\n", hairpinIn(c), remote.Quote("insert rule "+c.String()+" "+hairpinRule),
 			remote.Quote("inserted into "+c.String()))
 	}
 	b.WriteString("exit $rc\n")
 	return b.String()
+}
+
+// hairpinIn is the shell test that chain c has boks's rule: the one the script asks before it inserts
+// the rule, and `boks server status` before it says the rule is there.
+func hairpinIn(c nftChain) string {
+	return "nft list chain " + c.String() + " | grep -qF " + remote.Quote(`comment "`+hairpinComment+`"`)
 }
 
 const hairpinDropInBody = "# Written by `boks server apply`: puts boks's hairpin rule back each time this unit loads the firewall.\n" +
@@ -212,6 +233,12 @@ func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer, o Option
 		return err
 	}
 	defer adm.release(ctx)
+	return ensureHairpin(ctx, r, log)
+}
+
+// ensureHairpin is EnsureHairpin under an admission lock the caller holds: `boks server install` makes
+// the server ready under its own.
+func ensureHairpin(ctx context.Context, r remote.Runner, log io.Writer) error {
 	h, err := readHairpin(ctx, r)
 	if err != nil {
 		return err
@@ -225,13 +252,8 @@ func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer, o Option
 			"if one drops by default, containers here do not reach the proxy on this server's own addresses")
 		return nil
 	}
-	for _, c := range h.iptables {
-		tool := map[string]string{"ip": "iptables", "ip6": "ip6tables"}[c.Family]
-		fmt.Fprintf(log, "warning: firewall: %s drops by default and is %s', which boks does not edit: containers here do not reach the proxy "+
-			"on this server's own addresses until it has `%s -I INPUT -i br+ -p tcp -m multiport --dports 80,443 -m addrtype --dst-type LOCAL -j ACCEPT`\n", c, tool, tool)
-	}
-	for _, c := range h.odd {
-		fmt.Fprintf(log, "warning: firewall: %s drops by default and its name is not one boks writes; it needs `%s`\n", c, hairpinRule)
+	for _, w := range h.unchanged() {
+		fmt.Fprintf(log, "warning: firewall: %s\n", w)
 	}
 	if len(h.chains) == 0 {
 		fmt.Fprintln(log, "firewall: no nft input chain drops by default; nothing to add")
@@ -338,6 +360,99 @@ func CheckHairpin(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 			network, addr, strings.Join(failed, "\n  "))
 	}
 	return nil
+}
+
+// CheckRolledBackHairpin is CheckHairpin after a rollback: the hosts asked for are the ones the restored
+// release serves — its own ports, under today's tls, as the rollback routed them — read from the release
+// the server now records as current.
+func CheckRolledBackHairpin(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
+	if !cfg.TLS {
+		return nil
+	}
+	id, err := release.Current(ctx, r, cfg.App)
+	if err != nil {
+		return fmt.Errorf("reading the restored release for the hairpin check: %w", err)
+	}
+	snapshot, err := release.Load(ctx, r, cfg.App, id)
+	if err != nil {
+		return fmt.Errorf("reading the restored release for the hairpin check: %w", err)
+	}
+	return CheckHairpin(ctx, r, log, restored(cfg, snapshot))
+}
+
+// HairpinStatus says, changing nothing, where boks's hairpin rule stands: whether each nft input chain
+// that drops by default has it now — a `nft -f` run past nftables.service since the last apply takes it
+// out — and whether the unit puts it back. Other rules, and chains boks does not edit, it does not read.
+// A line that starts with "! " is one to act on.
+func HairpinStatus(ctx context.Context, r remote.Runner) []string {
+	h, err := readHairpin(ctx, r)
+	switch {
+	case err != nil:
+		return []string{"! firewall: " + err.Error()}
+	case !h.nft:
+		return []string{"firewall: no nft on this server; hairpin not checked"}
+	case !h.root:
+		return []string{"! firewall: no root or `sudo -n`, so its input chains were not read: whether containers here reach the proxy " +
+			"on this server's own addresses is not known"}
+	}
+	var lines []string
+	for _, w := range h.unchanged() {
+		// Not a line to act on: whether such a chain accepts them already, boks does not read.
+		lines = append(lines, "firewall: "+w+" (not checked)")
+	}
+	if len(h.chains) == 0 {
+		if len(lines) == 0 {
+			lines = append(lines, "firewall: no nft input chain drops by default; boks's hairpin rule has none to go into")
+		}
+		return lines
+	}
+	script := "PATH=\"$PATH:/usr/sbin:/sbin\"\n"
+	for _, c := range h.chains {
+		script += fmt.Sprintf("if %s; then echo %s; else echo %s; fi\n", hairpinIn(c), remote.Quote("has "+c.String()), remote.Quote("lacks "+c.String()))
+	}
+	out, err := r.Run(ctx, append(slices.Clone(h.sudo), "sh", "-c", script)...)
+	if err != nil {
+		return append(lines, "! firewall: reading boks's hairpin rule: "+err.Error())
+	}
+	answered := strings.Split(out, "\n")
+	for i := range answered {
+		answered[i] = strings.TrimSpace(answered[i])
+	}
+	var has, lacks []string
+	for _, c := range h.chains {
+		switch {
+		case slices.Contains(answered, "has "+c.String()):
+			has = append(has, c.String())
+		case slices.Contains(answered, "lacks "+c.String()):
+			lacks = append(lacks, c.String())
+		default:
+			return append(lines, fmt.Sprintf("! firewall: reading boks's hairpin rule: no answer for %s in %q", c, out))
+		}
+	}
+	if len(lacks) > 0 {
+		lines = append(lines, fmt.Sprintf("! firewall: %s drops by default without boks's hairpin rule: unless another rule there accepts them, "+
+			"containers here do not reach the proxy on this server's own addresses; `boks server apply` puts it in", strings.Join(lacks, ", ")))
+	}
+	if len(has) == 0 {
+		return lines
+	}
+	in := strings.Join(has, ", ")
+	switch {
+	case !h.persist:
+		lines = append(lines, "firewall: hairpin rule in "+in+"; nftables.service is not enabled, so boks does not count on it to put "+
+			"the rule back: after the firewall is loaded again or the server reboots, run `boks server apply`")
+	case h.dropIn != hairpinDropInBody || !h.loaded:
+		lines = append(lines, "! firewall: hairpin rule in "+in+", but nftables.service would not put it back after a reload: "+
+			"`boks server apply` writes "+hairpinDropIn)
+	case h.script != hairpinScriptFor(h.chains):
+		// The script may still put the rule back into these chains: it is not the one for the chains the
+		// server has now, an input chain added since the last apply, say.
+		lines = append(lines, "! firewall: hairpin rule in "+in+", but "+hairpinScript+" is not the one `boks server apply` writes "+
+			"for this server's input chains now; apply writes it again")
+	default:
+		lines = append(lines, "firewall: hairpin rule in "+in+", kept by nftables.service")
+	}
+	return lines
 }
 
 // hairpinMark starts the line the probe prints before each host's request.
