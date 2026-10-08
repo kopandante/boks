@@ -34,7 +34,12 @@ func firewallFacts(uid, chains string, enabled bool, script, dropIn string) stri
 	if enabled {
 		en = "enabled"
 	}
-	return "nft=yes\nuid=" + uid + "\nroot=yes\nchains=" + b64(chains) + "\nenabled=" + en + "\nscript=" + b64(script) + "\ndropin=" + b64(dropIn) + "\n"
+	facts := "nft=yes\nuid=" + uid + "\nroot=yes\nchains=" + b64(chains) + "\nenabled=" + en + "\nscript=" + b64(script) + "\ndropin=" + b64(dropIn) + "\n"
+	// systemd has read the drop-in when it is there: a test of one written and not read says so itself.
+	if dropIn != "" {
+		facts += "loaded=/etc/systemd/system/nftables.service.d/90-keep-docker.conf " + hairpinDropIn + "\n"
+	}
+	return facts
 }
 
 // Only input chains that drop by default get the rule: not forward, not one that accepts, not
@@ -120,6 +125,20 @@ func TestEnsureHairpinAgainWritesNothing(t *testing.T) {
 	}
 	if len(f.writes) > 0 || f.callAt("systemctl") >= 0 || f.callAt("sh "+hairpinScript) < 0 {
 		t.Errorf("want only the script run: %v", f.calls)
+	}
+}
+
+// A run cut between writing the drop-in and daemon-reload left the file and a unit that never read it:
+// the next one reloads systemd though the file is as it would write it.
+func TestEnsureHairpinReloadsADropInSystemdNeverRead(t *testing.T) {
+	f := newFake()
+	script := hairpinScriptFor([]nftChain{{Family: "inet", Table: "filter", Name: "input"}})
+	f.out[hairpinRead] = strings.Replace(firewallFacts("0", nftChains, true, script, hairpinDropInBody), " "+hairpinDropIn, "", 1)
+	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.writes) > 0 || f.callAt("systemctl daemon-reload") < 0 || f.callAt("sh "+hairpinScript) < f.callAt("systemctl daemon-reload") {
+		t.Errorf("want a daemon-reload, then the script, and nothing written: %v", f.calls)
 	}
 }
 
@@ -232,7 +251,7 @@ func TestHairpinScriptInsertsOnce(t *testing.T) {
 
 const (
 	proxyImageID = "docker inspect -f {{.Image}} boks-proxy"
-	hairpinRun   = "docker run --rm --pull never --network boks-web --entrypoint sh sha256:abc -c wget --no-check-certificate -S -O /dev/null -T 5 'https://"
+	hairpinRun   = "docker run --rm --pull never --network boks-web --entrypoint sh sha256:abc -c timeout 20 wget --no-check-certificate -S -O /dev/null -T 5 'https://"
 )
 
 func hairpinConfig(t *testing.T, tls bool, hosts ...string) *config.Config {
@@ -276,6 +295,9 @@ func TestCheckHairpinFailsLoudly(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "https://a.example.com/: Connecting to a.example.com (1.2.3.4:443) wget: download timed out") ||
 		strings.Contains(err.Error(), "b.example.com") || !strings.Contains(err.Error(), "`boks server apply`") {
 		t.Errorf("want a named, b not: %v", err)
+	}
+	if f.callAt(hairpinRun+"b.example.com/'") < 0 {
+		t.Errorf("want b asked after a failed: %v", f.calls)
 	}
 }
 

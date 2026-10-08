@@ -19,10 +19,17 @@ type recorder struct {
 	server
 	calls []string
 	stdin []string // what each piped command was given, in order
+	// seq, when set, is shared by the servers of a test: every call of each, as "<name> <command>", in
+	// the order the fleet made them.
+	seq  *[]string
+	name string
 }
 
 func (r *recorder) Run(ctx context.Context, args ...string) (string, error) {
 	r.calls = append(r.calls, strings.Join(args, " "))
+	if r.seq != nil {
+		*r.seq = append(*r.seq, r.name+" "+strings.Join(args, " "))
+	}
 	return r.server.Run(ctx, args...)
 }
 
@@ -339,7 +346,7 @@ func TestDeployAsksTheHairpinOnEveryServer(t *testing.T) {
 			"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1",
 			"docker exec boks-proxy sh -c wget -S -q": "  HTTP/1.1 200 OK", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
 			"sh -c if [ -f '.boks/_proxy/caddy.json' ]": "absent", "sh -c cd '.boks/_proxy' && pwd -P": "/home/u/.boks/_proxy",
-			"docker inspect -f {{.Image}} boks-proxy": "sha256:abc",
+			"docker inspect -f {{.Image}} boks-proxy":         "sha256:abc",
 			"docker run --rm --pull never --network boks-web": hairpin,
 		}}
 	}

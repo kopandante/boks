@@ -61,6 +61,7 @@ echo "chains=$(printf %s "$c" | base64 | tr -d '\n')"
 echo "enabled=$(systemctl is-enabled nftables 2>/dev/null)"
 echo "script=$($S cat ` + hairpinScript + ` 2>/dev/null | base64 | tr -d '\n')"
 echo "dropin=$($S cat ` + hairpinDropIn + ` 2>/dev/null | base64 | tr -d '\n')"
+echo "loaded=$(systemctl show -p DropInPaths --value nftables 2>/dev/null)"
 `
 
 // nftChain is a chain as `nft -j list chains` reports it; only base chains have a hook and a policy.
@@ -96,6 +97,9 @@ type hairpinFirewall struct {
 	// persist is whether nftables.service loads the firewall, so that its drop-in can keep the rule.
 	persist        bool
 	script, dropIn string
+	// loaded is whether systemd has read the drop-in: a run cut between writing it and daemon-reload
+	// leaves the file in place and the unit without it.
+	loaded bool
 }
 
 // nftName is a name boks writes into the script as it is: nft's names are not limited to it, but every
@@ -134,6 +138,8 @@ func readHairpin(ctx context.Context, r remote.Runner) (hairpinFirewall, error) 
 			h.script = decoded()
 		case "dropin":
 			h.dropIn = decoded()
+		case "loaded":
+			h.loaded = slices.Contains(strings.Fields(v), hairpinDropIn)
 		}
 	}
 	if err != nil || !seen {
@@ -230,6 +236,8 @@ func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer) error {
 			if err := writeRoot(ctx, r, sudo, []byte(hairpinDropInBody), hairpinDropIn, false); err != nil {
 				return err
 			}
+		}
+		if h.dropIn != hairpinDropInBody || !h.loaded {
 			if _, err := r.Run(ctx, append(slices.Clone(sudo), "systemctl", "daemon-reload")...); err != nil {
 				return fmt.Errorf("reloading systemd for %s: %w", hairpinDropIn, err)
 			}
@@ -257,7 +265,9 @@ func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer) error {
 // the request an app makes to its own public name, resolved as the app resolves it. Any answer of the
 // proxy passes: a status, or a TLS alert from a Caddy that has no certificate for the host yet. No
 // answer — a timeout, a refusal, a name that does not resolve — is an error naming what the container
-// got. The probe runs the image of the server's proxy, which is there and has wget.
+// got. The probe runs the image of the server's proxy, which is there and has wget. wget's -T bounds
+// a silence, not the download, so timeout bounds the whole request: a host that streams at / has
+// printed its status by then.
 func CheckHairpin(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
 	hosts := hairpinHosts(cfg)
 	if len(hosts) == 0 {
@@ -272,7 +282,7 @@ func CheckHairpin(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	for _, h := range hosts {
 		url := "https://" + h + "/"
 		out, err := r.Run(ctx, "docker", "run", "--rm", "--pull", "never", "--network", network, "--entrypoint", "sh", strings.TrimSpace(img),
-			"-c", "wget --no-check-certificate -S -O /dev/null -T 5 "+remote.Quote(url)+" 2>&1; true")
+			"-c", "timeout 20 wget --no-check-certificate -S -O /dev/null -T 5 "+remote.Quote(url)+" 2>&1; true")
 		if err != nil {
 			return fmt.Errorf("running the hairpin check for %s: %w", url, err)
 		}
