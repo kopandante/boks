@@ -340,8 +340,9 @@ func TestAMissingEnvFileReachesNoServer(t *testing.T) {
 // After the release serves on every server, each TLS host is asked from a container on every server:
 // a's containers get no answer, and b, deployed and asked all the same, answers; the error names a.
 func TestDeployAsksTheHairpinOnEveryServer(t *testing.T) {
-	answers := func(hairpin string) *recorder {
-		return &recorder{server: server{
+	var seq []string
+	answers := func(name, hairpin string) *recorder {
+		return &recorder{seq: &seq, name: name, server: server{
 			"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy", noNetwork: "absent",
 			"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1",
 			"docker exec boks-proxy sh -c wget -S -q": "  HTTP/1.1 200 OK", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
@@ -350,25 +351,28 @@ func TestDeployAsksTheHairpinOnEveryServer(t *testing.T) {
 			"docker run --rm --pull never --network boks-web": "boks-hairpin https://web.example.com/\n" + hairpin,
 		}}
 	}
-	a, b := answers("Connecting to web.example.com (1.2.3.4:443)\nwget: download timed out"), answers("  HTTP/1.1 200 OK")
+	a, b := answers("a", "Connecting to web.example.com (1.2.3.4:443)\nwget: download timed out"), answers("b", "  HTTP/1.1 200 OK")
 	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
 	cfg := parseConfig(t, "app: web\nimage: ghcr.io/x/web\nservers: [a, b]\ntls: true\nports:\n  - {name: web, port: 3000, host: web.example.com}\n")
 	err := dispatch(context.Background(), cfg, []string{"deploy", "v1"}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "a: the release serves, but a container on boks-web gets no answer from this server's proxy") || strings.Contains(err.Error(), "b:") {
 		t.Fatalf("want a named, b not: %v", err)
 	}
-	for name, r := range map[string]*recorder{"a": a, "b": b} {
-		run, probe := -1, -1
-		for i, c := range r.calls {
-			if strings.HasPrefix(c, "docker run -d --name web-v1-") {
-				run = i
-			}
-			if strings.HasPrefix(c, "docker run --rm --pull never --network boks-web") {
-				probe = i
+	// Fleet-wide: both releases run before the first probe, and each server is probed.
+	lastRun, firstProbe, probed := -1, -1, map[string]bool{}
+	for i, c := range seq {
+		name, cmd, _ := strings.Cut(c, " ")
+		if strings.HasPrefix(cmd, "docker run -d --name web-v1-") {
+			lastRun = i
+		}
+		if strings.HasPrefix(cmd, "docker run --rm --pull never --network boks-web") {
+			probed[name] = true
+			if firstProbe < 0 {
+				firstProbe = i
 			}
 		}
-		if run < 0 || probe < run {
-			t.Errorf("%s: want the release run, then the hairpin asked: %v", name, r.calls)
-		}
+	}
+	if lastRun < 0 || firstProbe < lastRun || !probed["a"] || !probed["b"] {
+		t.Errorf("want every release run before any probe, and both servers probed: %v", seq)
 	}
 }
