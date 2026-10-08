@@ -380,10 +380,10 @@ func CheckRolledBackHairpin(ctx context.Context, r remote.Runner, log io.Writer,
 	return CheckHairpin(ctx, r, log, restored(cfg, snapshot))
 }
 
-// HairpinStatus says, changing nothing, whether containers on the server reach its proxy on its own
-// addresses: whether each input chain that drops by default has boks's rule now — a `nft -f` run past
-// nftables.service since the last apply takes it out — and whether the unit puts it back. A line that
-// starts with "! " is one to act on.
+// HairpinStatus says, changing nothing, where boks's hairpin rule stands: whether each nft input chain
+// that drops by default has it now — a `nft -f` run past nftables.service since the last apply takes it
+// out — and whether the unit puts it back. Other rules, and chains boks does not edit, it does not read.
+// A line that starts with "! " is one to act on.
 func HairpinStatus(ctx context.Context, r remote.Runner) []string {
 	h, err := readHairpin(ctx, r)
 	switch {
@@ -439,8 +439,8 @@ func HairpinStatus(ctx context.Context, r remote.Runner) []string {
 	in := strings.Join(has, ", ")
 	switch {
 	case !h.persist:
-		lines = append(lines, "firewall: hairpin rule in "+in+"; nftables.service is not enabled, so nothing puts it back when the firewall "+
-			"is loaded again or the server reboots")
+		lines = append(lines, "firewall: hairpin rule in "+in+"; nftables.service is not enabled, so boks does not count on it to put "+
+			"the rule back: after the firewall is loaded again or the server reboots, run `boks server apply`")
 	case h.dropIn != hairpinDropInBody || !h.loaded:
 		lines = append(lines, "! firewall: hairpin rule in "+in+", but nftables.service would not put it back after a reload: "+
 			"`boks server apply` writes "+hairpinDropIn)
