@@ -361,7 +361,7 @@ func serverAddress(ctx context.Context, r remote.Runner) (string, error) {
 }
 
 // hairpinHosts are the hosts the app serves with TLS, as the proxy matches them; a wildcard names no
-// host to ask for.
+// host to ask for, and an address is not one --add-host can point at this server: wget dials it as it is.
 func hairpinHosts(cfg *config.Config) []string {
 	if !cfg.TLS {
 		return nil
@@ -369,7 +369,7 @@ func hairpinHosts(cfg *config.Config) []string {
 	var hosts []string
 	for _, p := range cfg.Ports {
 		h := hostname.Canonical(p.Host)
-		if h == "" || strings.HasPrefix(h, "*.") || slices.Contains(hosts, h) {
+		if h == "" || strings.HasPrefix(h, "*.") || net.ParseIP(h) != nil || slices.Contains(hosts, h) {
 			continue
 		}
 		hosts = append(hosts, h)

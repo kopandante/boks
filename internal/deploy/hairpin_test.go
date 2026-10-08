@@ -331,9 +331,11 @@ func TestCheckHairpinNeedsTheServersAddress(t *testing.T) {
 	}
 }
 
-// An app without TLS, or without hosts, asks nothing.
+// An app without TLS, or without a host a name can point at this server — none, a wildcard, an address —
+// asks nothing.
 func TestCheckHairpinWithoutTLSAsksNothing(t *testing.T) {
-	for _, cfg := range []*config.Config{hairpinConfig(t, false, "a.example.com"), hairpinConfig(t, true), hairpinConfig(t, true, "*.example.com")} {
+	for _, cfg := range []*config.Config{hairpinConfig(t, false, "a.example.com"), hairpinConfig(t, true), hairpinConfig(t, true, "*.example.com"),
+		hairpinConfig(t, true, "203.0.113.9")} {
 		f := newFake()
 		if err := CheckHairpin(context.Background(), f, &strings.Builder{}, cfg); err != nil || len(f.calls) > 0 {
 			t.Errorf("want nothing asked: %v %v", err, f.calls)
