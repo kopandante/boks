@@ -251,7 +251,7 @@ func TestServerStatusSaysTheHairpinOfEveryServer(t *testing.T) {
 	}
 	sa, sb, _ := strings.Cut(out.String(), "== b\n")
 	if !strings.Contains(sa, "== a\n") || !strings.Contains(sa, "  ! firewall: inet filter input drops by default without boks's hairpin rule") ||
-		!strings.Contains(sa, "`boks server apply` puts it back") {
+		!strings.Contains(sa, "`boks server apply` puts it in") {
 		t.Errorf("want a's rule named gone, with the way back:\n%s", out.String())
 	}
 	if !strings.Contains(sb, "firewall: hairpin rule in inet filter input") || strings.Contains(sb, "without boks's hairpin rule") {

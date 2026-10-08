@@ -182,8 +182,8 @@ func (h hairpinFirewall) unchanged() []string {
 	var out []string
 	for _, c := range h.iptables {
 		tool := map[string]string{"ip": "iptables", "ip6": "ip6tables"}[c.Family]
-		out = append(out, fmt.Sprintf("%s drops by default and is %s', which boks does not edit: containers here do not reach the proxy "+
-			"on this server's own addresses until it has `%s -I INPUT -i br+ -p tcp -m multiport --dports 80,443 -m addrtype --dst-type LOCAL -j ACCEPT`", c, tool, tool))
+		out = append(out, fmt.Sprintf("%s drops by default and is %s', which boks does not edit: unless a rule there accepts them, containers here do not reach "+
+			"the proxy on this server's own addresses; one that does is `%s -I INPUT -i br+ -p tcp -m multiport --dports 80,443 -m addrtype --dst-type LOCAL -j ACCEPT`", c, tool, tool))
 	}
 	for _, c := range h.odd {
 		out = append(out, fmt.Sprintf("%s drops by default and its name is not one boks writes; it needs `%s`", c, hairpinRule))
@@ -397,7 +397,8 @@ func HairpinStatus(ctx context.Context, r remote.Runner) []string {
 	}
 	var lines []string
 	for _, w := range h.unchanged() {
-		lines = append(lines, "! firewall: "+w)
+		// Not a line to act on: whether such a chain accepts them already, boks does not read.
+		lines = append(lines, "firewall: "+w+" (not checked)")
 	}
 	if len(h.chains) == 0 {
 		if len(lines) == 0 {
@@ -429,8 +430,8 @@ func HairpinStatus(ctx context.Context, r remote.Runner) []string {
 		}
 	}
 	if len(lacks) > 0 {
-		lines = append(lines, fmt.Sprintf("! firewall: %s drops by default without boks's hairpin rule: containers here do not reach the proxy "+
-			"on this server's own addresses; `boks server apply` puts it back", strings.Join(lacks, ", ")))
+		lines = append(lines, fmt.Sprintf("! firewall: %s drops by default without boks's hairpin rule: unless another rule there accepts them, "+
+			"containers here do not reach the proxy on this server's own addresses; `boks server apply` puts it in", strings.Join(lacks, ", ")))
 	}
 	if len(has) == 0 {
 		return lines

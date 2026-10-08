@@ -189,7 +189,7 @@ func TestEnsureHairpinLeavesWhatItCannotChange(t *testing.T) {
 	for _, c := range []struct{ facts, want string }{
 		{"nft=no\n", "no nft on this server"},
 		{"nft=yes\nuid=1000\nroot=no\n", "no root or `sudo -n`"},
-		{firewallFacts("0", iptables, true, "", ""), "ip filter INPUT drops by default and is iptables', which boks does not edit: containers here do not reach the proxy on this server's own addresses until it has `iptables -I INPUT"},
+		{firewallFacts("0", iptables, true, "", ""), "ip filter INPUT drops by default and is iptables', which boks does not edit: unless a rule there accepts them, containers here do not reach the proxy on this server's own addresses; one that does is `iptables -I INPUT"},
 		{firewallFacts("0", `{"nftables": []}`, true, "", ""), "no nft input chain drops by default"},
 	} {
 		f := newFake()
@@ -402,11 +402,11 @@ func TestHairpinStatusSaysWhereTheRuleIs(t *testing.T) {
 	}{
 		{"kept", kept, "has inet filter input", []string{"firewall: hairpin rule in inet filter input, kept by nftables.service"}},
 		{"gone", kept, "lacks inet filter input", []string{"! firewall: inet filter input drops by default without boks's hairpin rule: " +
-			"containers here do not reach the proxy on this server's own addresses; `boks server apply` puts it back"}},
+			"unless another rule there accepts them, containers here do not reach the proxy on this server's own addresses; `boks server apply` puts it in"}},
 		{"one of two", firewallFacts("0", two, true, hairpinScriptFor([]nftChain{input[0], {Family: "ip6", Table: "fw", Name: "in"}}), hairpinDropInBody),
 			"has inet filter input\nlacks ip6 fw in", []string{"! firewall: ip6 fw in drops by default without boks's hairpin rule", "firewall: hairpin rule in inet filter input, kept"}},
 		{"never applied", firewallFacts("0", nftChains, true, "", ""), "lacks inet filter input", []string{"! firewall: inet filter input drops by default without boks's hairpin rule: " +
-			"containers here do not reach the proxy on this server's own addresses; `boks server apply` puts it back"}},
+			"unless another rule there accepts them, containers here do not reach the proxy on this server's own addresses; `boks server apply` puts it in"}},
 		{"kept by nothing", firewallFacts("0", nftChains, true, hairpinScriptFor(input), ""), "has inet filter input",
 			[]string{"! firewall: hairpin rule in inet filter input, but nftables.service would not put it back after a reload: `boks server apply` writes"}},
 		{"not read by systemd", strings.Replace(kept, " "+hairpinDropIn, "", 1), "has inet filter input",
@@ -422,7 +422,7 @@ func TestHairpinStatusSaysWhereTheRuleIs(t *testing.T) {
 		{"unit off", firewallFacts("0", nftChains, false, "", ""), "has inet filter input", []string{"firewall: hairpin rule in inet filter input; nftables.service is not enabled"}},
 		{"no nft", "nft=no\n", "", []string{"firewall: no nft on this server"}},
 		{"no root", "nft=yes\nuid=1000\nroot=no\n", "", []string{"! firewall: no root or `sudo -n`"}},
-		{"iptables", firewallFacts("0", iptables, true, "", ""), "", []string{"! firewall: ip filter INPUT drops by default and is iptables'"}},
+		{"iptables", firewallFacts("0", iptables, true, "", ""), "", []string{"firewall: ip filter INPUT drops by default and is iptables'"}},
 		{"nothing drops", firewallFacts("0", `{"nftables": []}`, true, "", ""), "", []string{"firewall: no nft input chain drops by default; boks's hairpin rule has none to go into"}},
 		{"unreadable", "garbage", "", []string{"! firewall: could not read the server's firewall"}},
 		{"no answer", kept, "", []string{"! firewall: reading boks's hairpin rule: no answer for inet filter input"}},
@@ -432,13 +432,18 @@ func TestHairpinStatusSaysWhereTheRuleIs(t *testing.T) {
 		f.out[hairpinStatusRead] = c.rule
 		lines := HairpinStatus(context.Background(), f)
 		got := strings.Join(lines, "\n")
-		for _, w := range c.want {
-			if !strings.Contains(got, w) {
-				t.Errorf("%s: want %q in\n%s", c.name, w, got)
-			}
-		}
 		if len(lines) != len(c.want) {
 			t.Errorf("%s: want %d lines:\n%s", c.name, len(c.want), got)
+			continue
+		}
+		// Each line in its place, and one to act on — "! " — only where one is wanted.
+		for i, w := range c.want {
+			if !strings.Contains(lines[i], w) || strings.HasPrefix(lines[i], "! ") != strings.HasPrefix(w, "! ") {
+				t.Errorf("%s: want %q as line %d of\n%s", c.name, w, i+1, got)
+			}
+		}
+		if c.name == "iptables" && !strings.HasSuffix(got, "(not checked)") {
+			t.Errorf("want the iptables chain named as not checked: %s", got)
 		}
 		if len(f.writes) > 0 || len(f.uploads) > 0 || f.has("systemctl daemon-reload") || f.has("sh "+hairpinScript) || f.has(admitTake(proxyHolder)) {
 			t.Errorf("%s: want nothing changed and no lock: %v", c.name, f.calls)
