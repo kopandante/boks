@@ -401,7 +401,7 @@ func HairpinStatus(ctx context.Context, r remote.Runner) []string {
 	}
 	if len(h.chains) == 0 {
 		if len(lines) == 0 {
-			lines = append(lines, "firewall: no nft input chain drops by default; containers reach the proxy on this server's own addresses")
+			lines = append(lines, "firewall: no nft input chain drops by default; boks's hairpin rule has none to go into")
 		}
 		return lines
 	}
@@ -440,9 +440,14 @@ func HairpinStatus(ctx context.Context, r remote.Runner) []string {
 	case !h.persist:
 		lines = append(lines, "firewall: hairpin rule in "+in+"; nftables.service is not enabled, so nothing puts it back when the firewall "+
 			"is loaded again or the server reboots")
-	case h.script != hairpinScriptFor(h.chains) || h.dropIn != hairpinDropInBody || !h.loaded:
+	case h.dropIn != hairpinDropInBody || !h.loaded:
 		lines = append(lines, "! firewall: hairpin rule in "+in+", but nftables.service would not put it back after a reload: "+
-			"`boks server apply` writes "+hairpinScript+" and "+hairpinDropIn)
+			"`boks server apply` writes "+hairpinDropIn)
+	case h.script != hairpinScriptFor(h.chains):
+		// The script may still put the rule back into these chains: it is not the one for the chains the
+		// server has now, an input chain added since the last apply, say.
+		lines = append(lines, "! firewall: hairpin rule in "+in+", but "+hairpinScript+" is not the one `boks server apply` writes "+
+			"for this server's input chains now; apply writes it again")
 	default:
 		lines = append(lines, "firewall: hairpin rule in "+in+", kept by nftables.service")
 	}

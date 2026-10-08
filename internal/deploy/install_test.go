@@ -635,9 +635,19 @@ func TestInstallKeepsTheHairpin(t *testing.T) {
 	f, fresh := installFake(emptyNoble), installFake("")
 	f.out[hairpinRead] = firewallFacts("0", nftChains, true, "", "")
 	f.out["sh "+hairpinScript] = "inserted into inet filter input"
+	// What the proxy boot had done, over the new login, when the firewall was first read.
+	var booted []string
+	f.onRun = func(cmd string) {
+		if cmd == hairpinRead && booted == nil {
+			booted = slices.Clone(fresh.calls)
+		}
+	}
 	var log strings.Builder
 	if err := Install(context.Background(), f, func() remote.Runner { return fresh }, &log, "caddy:2.11.7-alpine", fixed); err != nil {
 		t.Fatal(err)
+	}
+	if len(booted) == 0 || len(booted) != len(fresh.calls) {
+		t.Errorf("want the firewall read after the proxy boot: %v, then %v", booted, fresh.calls)
 	}
 	read, run, give := f.callAt(hairpinRead), f.callAt("sh "+hairpinScript), f.callAt(admitGive(proxyHolder))
 	if read < f.callAt("usermod") || read < f.callAt("systemctl enable --now cron") || run < read || give < run || f.callAt(admitTake(proxyHolder)) != 0 {

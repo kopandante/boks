@@ -16,7 +16,8 @@ hairpin ставит только `server apply`, а проверку из ко�
 ## Работы
 
 - [x] `ensureHairpin` — шаг `EnsureHairpin` без своего замка; `Install` зовёт его после `proxy.Boot` под
-      своим замком допуска, по соединению запуска (root/sudo), сбой — `fail` и журнал `failed`
+      своим замком допуска, по соединению запуска (root/sudo), сбой — `fail` (журнал `failed`,
+      если установка открыла запись)
 - [x] `CheckRolledBackHairpin`: хосты восстановленного релиза (`current` → snapshot → `restored`); в
       `dispatch` rollback после отката на всех серверах — `everyServer(... "hairpin" ...)`, как deploy
 - [x] `HairpinStatus`: факты `readHairpin`, затем одна проверка `hairpinIn` на цепочку (та же, что в

@@ -401,7 +401,8 @@ func TestRollbackAsksTheHairpinOnEveryServer(t *testing.T) {
 	}
 	a, b := answers("a", "Connecting to bot.example.com (1.2.3.4:443)\nwget: download timed out"), answers("b", "  HTTP/1.1 200 OK")
 	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
-	cfg := parseConfig(t, twoServers+"tls: true\nports:\n  - {name: web, port: 3000, host: bot.example.com}\n")
+	// Today's config names another host: the probe asks the one the restored release serves.
+	cfg := parseConfig(t, twoServers+"tls: true\nports:\n  - {name: web, port: 3000, host: bot-new.example.com}\n")
 	err := dispatch(context.Background(), cfg, []string{"rollback"}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "a: the release serves, but a container on boks-bot gets no answer from this server's proxy") || strings.Contains(err.Error(), "b:") {
 		t.Fatalf("want a named, b not: %v", err)
@@ -413,6 +414,9 @@ func TestRollbackAsksTheHairpinOnEveryServer(t *testing.T) {
 			lastRun = i
 		}
 		if strings.HasPrefix(cmd, "docker run --rm --pull never --network boks-bot") {
+			if !strings.Contains(cmd, "--add-host bot.example.com:") || strings.Contains(cmd, "bot-new.example.com") {
+				t.Errorf("want the restored release's host asked, not today's: %s", c)
+			}
 			probed[name] = true
 			if firstProbe < 0 {
 				firstProbe = i
