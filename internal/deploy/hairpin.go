@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"regexp"
 	"slices"
 	"strings"
@@ -105,7 +106,7 @@ type hairpinFirewall struct {
 
 // nftName is a name boks writes into the script as it is: nft's names are not limited to it, but every
 // name a host's config is likely to use is.
-var nftName = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+var nftName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
 
 func readHairpin(ctx context.Context, r remote.Runner) (hairpinFirewall, error) {
 	var h hairpinFirewall
@@ -233,6 +234,7 @@ func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer, o Option
 		fmt.Fprintf(log, "warning: firewall: %s drops by default and its name is not one boks writes; it needs `%s`\n", c, hairpinRule)
 	}
 	if len(h.chains) == 0 {
+		fmt.Fprintln(log, "firewall: no nft input chain drops by default; nothing to add")
 		return nil
 	}
 	sudo := h.sudo
@@ -254,6 +256,7 @@ func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer, o Option
 				return fmt.Errorf("reloading systemd for %s: %w", hairpinDropIn, err)
 			}
 		}
+		// From its file, the one the unit runs: what runs now is what puts the rule back after a reload.
 		run = append(slices.Clone(sudo), "sh", hairpinScript)
 	}
 	out, err := r.Run(ctx, run...)
@@ -273,13 +276,17 @@ func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer, o Option
 	return nil
 }
 
-// CheckHairpin asks, from a container on the app's network, for each host the app serves with TLS —
-// the request an app makes to its own public name, resolved as the app resolves it. Any answer of the
-// proxy passes: a status, or a TLS alert from a Caddy that has no certificate for the host yet. No
-// answer — a timeout, a refusal, a name that does not resolve — is an error naming what the container
-// got. The probe runs the image of the server's proxy, which is there and has wget. wget's -T bounds
-// a silence, not the download, so timeout bounds the whole request: a host that streams at / has
-// printed its status by then.
+// CheckHairpin asks, from a container on the app's network, for each host the app serves with TLS,
+// sent to this server's own address — the one it leaves by (`ip route get`), which is the one a host
+// whose DNS points at the server resolves to — with the host's name in SNI and Host. That is the path
+// an app calling its own public name takes once the name points here, and it asks this server's proxy,
+// whatever DNS says today: before the name moves here, and on a fleet whose DNS names another server.
+// Any answer of the proxy passes: a status, or a TLS alert from a Caddy that has no certificate for
+// the host yet. No answer — a timeout, a refusal — is an error naming what the container got.
+//
+// One container asks for every host, from the image of the server's proxy, which is there and has
+// wget. wget's -T bounds a silence, not the download, so timeout bounds each request: a host that
+// streams at / has printed its status by then.
 func CheckHairpin(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config) error {
 	hosts := hairpinHosts(cfg)
 	if len(hosts) == 0 {
@@ -289,28 +296,68 @@ func CheckHairpin(ctx context.Context, r remote.Runner, log io.Writer, cfg *conf
 	if err != nil {
 		return fmt.Errorf("reading the proxy's image for the hairpin check: %w", err)
 	}
+	addr, err := serverAddress(ctx, r)
+	if err != nil {
+		return err
+	}
 	network := config.AppNetwork(cfg.App)
+	args := []string{"docker", "run", "--rm", "--pull", "never", "--network", network}
+	var script strings.Builder
+	for _, h := range hosts {
+		url := "https://" + h + "/"
+		args = append(args, "--add-host", h+":"+addr)
+		fmt.Fprintf(&script, "echo %s; timeout 20 wget --no-check-certificate -S -O /dev/null -T 5 %s 2>&1; ", remote.Quote(hairpinMark+url), remote.Quote(url))
+	}
+	script.WriteString("true")
+	out, err := r.Run(ctx, append(args, "--entrypoint", "sh", strings.TrimSpace(img), "-c", script.String())...)
+	if err != nil {
+		return fmt.Errorf("running the hairpin check: %w", err)
+	}
+	got := map[string]string{}
+	url := ""
+	for _, line := range strings.Split(out, "\n") {
+		if u, ok := strings.CutPrefix(strings.TrimSpace(line), hairpinMark); ok {
+			url = u
+			continue
+		}
+		got[url] += line + "\n"
+	}
 	var failed []string
 	for _, h := range hosts {
 		url := "https://" + h + "/"
-		out, err := r.Run(ctx, "docker", "run", "--rm", "--pull", "never", "--network", network, "--entrypoint", "sh", strings.TrimSpace(img),
-			"-c", "timeout 20 wget --no-check-certificate -S -O /dev/null -T 5 "+remote.Quote(url)+" 2>&1; true")
-		if err != nil {
-			return fmt.Errorf("running the hairpin check for %s: %w", url, err)
-		}
-		if proxyAnswered(out) {
-			fmt.Fprintf(log, "hairpin: %s answers a container on %s\n", url, network)
+		if proxyAnswered(got[url]) {
+			fmt.Fprintf(log, "hairpin: %s answers a container on %s at %s\n", url, network, addr)
 			continue
 		}
-		failed = append(failed, fmt.Sprintf("%s: %s", url, strings.Join(strings.Fields(out), " ")))
+		failed = append(failed, fmt.Sprintf("%s: %s", url, strings.Join(strings.Fields(got[url]), " ")))
 	}
 	if len(failed) > 0 {
-		return fmt.Errorf("the release serves, but a container on %s gets no answer from:\n  %s\n"+
-			"an app that calls its own public name (Convex Auth, server-side rendering) fails the same way. "+
-			"Where the name resolves to this server, its firewall drops containers' connections to the server's own addresses: "+
-			"`boks server apply` puts the rule back", network, strings.Join(failed, "\n  "))
+		return fmt.Errorf("the release serves, but a container on %s gets no answer from this server's proxy at %s for:\n  %s\n"+
+			"once a host's name points at this server, an app that calls it (Convex Auth, server-side rendering) fails the same way. "+
+			"The server's firewall drops containers' connections to its own addresses: `boks server apply` puts the rule back",
+			network, addr, strings.Join(failed, "\n  "))
 	}
 	return nil
+}
+
+// hairpinMark starts the line the probe prints before each host's request.
+const hairpinMark = "boks-hairpin "
+
+// serverAddress is the IPv4 address the server leaves by: the source `ip route get` names.
+func serverAddress(ctx context.Context, r remote.Runner) (string, error) {
+	out, err := r.Run(ctx, "ip", "-4", "route", "get", "1.1.1.1")
+	if err != nil {
+		return "", fmt.Errorf("reading the server's address for the hairpin check: %w", err)
+	}
+	f := strings.Fields(out)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == "src" {
+			if ip := net.ParseIP(f[i+1]); ip != nil && ip.To4() != nil {
+				return f[i+1], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("reading the server's address for the hairpin check: no source address in %q", out)
 }
 
 // hairpinHosts are the hosts the app serves with TLS, as the proxy matches them; a wildcard names no

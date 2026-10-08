@@ -50,6 +50,7 @@ func TestReadHairpinPicksTheInputChainsThatDrop(t *testing.T) {
  {"chain": {"family": "ip6", "table": "fw", "name": "in", "hook": "input", "policy": "drop"}},
  {"chain": {"family": "inet", "table": "fw", "name": "open", "hook": "input", "policy": "accept"}},
  {"chain": {"family": "inet", "table": "odd table", "name": "in", "hook": "input", "policy": "drop"}},
+ {"chain": {"family": "inet", "table": "0fw", "name": "-in", "hook": "input", "policy": "drop"}},
  {"chain": {"family": "bridge", "table": "br", "name": "in", "hook": "input", "policy": "drop"}}]}`, 1)
 	f := newFake()
 	f.out[hairpinRead] = firewallFacts("0", chains, true, "", "")
@@ -63,7 +64,7 @@ func TestReadHairpinPicksTheInputChainsThatDrop(t *testing.T) {
 	if len(h.iptables) != 1 || h.iptables[0].String() != "ip filter INPUT" {
 		t.Errorf("iptables' chain: %v", h.iptables)
 	}
-	if len(h.odd) != 1 || h.odd[0].Table != "odd table" {
+	if len(h.odd) != 2 || h.odd[0].Table != "odd table" || h.odd[1].Table != "0fw" {
 		t.Errorf("odd: %v", h.odd)
 	}
 	if !h.persist || h.sudo != nil {
@@ -189,7 +190,7 @@ func TestEnsureHairpinLeavesWhatItCannotChange(t *testing.T) {
 		{"nft=no\n", "no nft on this server"},
 		{"nft=yes\nuid=1000\nroot=no\n", "no root or `sudo -n`"},
 		{firewallFacts("0", iptables, true, "", ""), "ip filter INPUT drops by default and is iptables', which boks does not edit: containers here do not reach the proxy on this server's own addresses until it has `iptables -I INPUT"},
-		{firewallFacts("0", `{"nftables": []}`, true, "", ""), ""},
+		{firewallFacts("0", `{"nftables": []}`, true, "", ""), "no nft input chain drops by default"},
 	} {
 		f := newFake()
 		f.out[hairpinRead] = c.facts
@@ -255,7 +256,8 @@ func TestHairpinScriptInsertsOnce(t *testing.T) {
 
 const (
 	proxyImageID = "docker inspect -f {{.Image}} boks-proxy"
-	hairpinRun   = "docker run --rm --pull never --network boks-web --entrypoint sh sha256:abc -c timeout 20 wget --no-check-certificate -S -O /dev/null -T 5 'https://"
+	routeGet     = "ip -4 route get 1.1.1.1"
+	hairpinRun   = "docker run --rm --pull never --network boks-web"
 )
 
 func hairpinConfig(t *testing.T, tls bool, hosts ...string) *config.Config {
@@ -267,47 +269,71 @@ func hairpinConfig(t *testing.T, tls bool, hosts ...string) *config.Config {
 	return cfg
 }
 
-// Each TLS host is asked from a container on the app's network, by the image the proxy runs; any
-// answer of the proxy passes — a status, a TLS alert for a host without a certificate yet.
-func TestCheckHairpinAsksEveryTLSHost(t *testing.T) {
+// hairpinFake is a server leaving by 203.0.113.7 whose probe container prints out.
+func hairpinFake(out string) *fake {
 	f := newFake()
 	f.out[proxyImageID] = "sha256:abc"
-	f.out[hairpinRun+"a.example.com/'"] = "Connecting to a.example.com (1.2.3.4:443)\n  HTTP/1.1 404 Not Found"
-	f.out[hairpinRun+"xn--e1afmkfd.xn--p1ai/'"] = "Connecting to xn--e1afmkfd.xn--p1ai (1.2.3.4:443)\n" +
-		"20AD:error:0A000438:SSL routines:ssl3_read_bytes:tlsv1 alert internal error:ssl/record/rec_layer_s3.c:918:SSL alert number 80"
+	f.out[routeGet] = "1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.7 uid 0\n    cache"
+	f.out[hairpinRun] = out
+	return f
+}
+
+// One container on the app's network, from the image the proxy runs, asks for every TLS host — sent to
+// the server's own address, whatever DNS says, by the host's name; a wildcard is not asked. Any answer
+// of the proxy passes: a status, a TLS alert for a host without a certificate yet.
+func TestCheckHairpinAsksEveryTLSHost(t *testing.T) {
+	f := hairpinFake(hairpinMark + "https://a.example.com/\nConnecting to a.example.com (203.0.113.7:443)\n  HTTP/1.1 404 Not Found\n" +
+		hairpinMark + "https://xn--e1afmkfd.xn--p1ai/\nConnecting to xn--e1afmkfd.xn--p1ai (203.0.113.7:443)\n" +
+		"20AD:error:0A000438:SSL routines:ssl3_read_bytes:tlsv1 alert internal error:ssl/record/rec_layer_s3.c:918:SSL alert number 80\n")
 	var log strings.Builder
 	cfg := hairpinConfig(t, true, "a.example.com", "*.example.com", "A.example.com", "пример.рф")
 	if err := CheckHairpin(context.Background(), f, &log, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(strings.Join(f.calls, "\n"), "docker run --rm"); n != 2 {
-		t.Errorf("want one probe per host, none for the wildcard: %v", f.calls)
+	run := f.calls[f.callAt(hairpinRun)]
+	want := hairpinRun + " --add-host a.example.com:203.0.113.7 --add-host xn--e1afmkfd.xn--p1ai:203.0.113.7 --entrypoint sh sha256:abc -c " +
+		"echo 'boks-hairpin https://a.example.com/'; timeout 20 wget --no-check-certificate -S -O /dev/null -T 5 'https://a.example.com/' 2>&1; " +
+		"echo 'boks-hairpin https://xn--e1afmkfd.xn--p1ai/'; timeout 20 wget --no-check-certificate -S -O /dev/null -T 5 'https://xn--e1afmkfd.xn--p1ai/' 2>&1; true"
+	if run != want || strings.Count(strings.Join(f.calls, "\n"), "docker run") != 1 {
+		t.Errorf("want one container for both hosts:\n%s\ngot %v", want, f.calls)
 	}
-	if !strings.Contains(log.String(), "hairpin: https://a.example.com/ answers a container on boks-web") {
+	if !strings.Contains(log.String(), "hairpin: https://a.example.com/ answers a container on boks-web at 203.0.113.7") {
 		t.Errorf("log: %s", log.String())
 	}
 }
 
-// A host that does not answer fails the check, named with what the container got, and every host is
-// still asked.
+// A host that does not answer fails the check, named with what the container got for it; a host that
+// answered is not named.
 func TestCheckHairpinFailsLoudly(t *testing.T) {
-	f := newFake()
-	f.out[proxyImageID] = "sha256:abc"
-	f.out[hairpinRun+"a.example.com/'"] = "Connecting to a.example.com (1.2.3.4:443)\nwget: download timed out"
-	f.out[hairpinRun+"b.example.com/'"] = "Connecting to b.example.com (1.2.3.4:443)\n  HTTP/1.1 200 OK"
+	f := hairpinFake(hairpinMark + "https://a.example.com/\nConnecting to a.example.com (203.0.113.7:443)\nwget: download timed out\n" +
+		hairpinMark + "https://b.example.com/\nConnecting to b.example.com (203.0.113.7:443)\n  HTTP/1.1 200 OK\n")
 	err := CheckHairpin(context.Background(), f, &strings.Builder{}, hairpinConfig(t, true, "a.example.com", "b.example.com"))
-	if err == nil || !strings.Contains(err.Error(), "https://a.example.com/: Connecting to a.example.com (1.2.3.4:443) wget: download timed out") ||
-		strings.Contains(err.Error(), "b.example.com") || !strings.Contains(err.Error(), "`boks server apply`") {
+	if err == nil || !strings.Contains(err.Error(), "https://a.example.com/: Connecting to a.example.com (203.0.113.7:443) wget: download timed out") ||
+		strings.Contains(err.Error(), "b.example.com") || !strings.Contains(err.Error(), "at 203.0.113.7") || !strings.Contains(err.Error(), "`boks server apply`") {
 		t.Errorf("want a named, b not: %v", err)
 	}
-	if f.callAt(hairpinRun+"b.example.com/'") < 0 {
-		t.Errorf("want b asked after a failed: %v", f.calls)
+	// A host the output says nothing about — the container cut short — has not answered either.
+	f = hairpinFake(hairpinMark + "https://a.example.com/\n  HTTP/1.1 200 OK\n")
+	if err := CheckHairpin(context.Background(), f, &strings.Builder{}, hairpinConfig(t, true, "a.example.com", "b.example.com")); err == nil ||
+		!strings.Contains(err.Error(), "https://b.example.com/") {
+		t.Errorf("want b named: %v", err)
+	}
+}
+
+// A server whose address cannot be read is an error, and nothing is run.
+func TestCheckHairpinNeedsTheServersAddress(t *testing.T) {
+	for _, route := range []string{"", "unreachable", "1.1.1.1 dev eth0 src fe80::1"} {
+		f := hairpinFake("")
+		f.out[routeGet] = route
+		if err := CheckHairpin(context.Background(), f, &strings.Builder{}, hairpinConfig(t, true, "a.example.com")); err == nil || f.callAt("docker run") >= 0 {
+			t.Errorf("%q: want an error before any probe: %v %v", route, err, f.calls)
+		}
 	}
 }
 
 // An app without TLS, or without hosts, asks nothing.
 func TestCheckHairpinWithoutTLSAsksNothing(t *testing.T) {
-	for _, cfg := range []*config.Config{hairpinConfig(t, false, "a.example.com"), hairpinConfig(t, true)} {
+	for _, cfg := range []*config.Config{hairpinConfig(t, false, "a.example.com"), hairpinConfig(t, true), hairpinConfig(t, true, "*.example.com")} {
 		f := newFake()
 		if err := CheckHairpin(context.Background(), f, &strings.Builder{}, cfg); err != nil || len(f.calls) > 0 {
 			t.Errorf("want nothing asked: %v %v", err, f.calls)

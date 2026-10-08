@@ -346,15 +346,15 @@ func TestDeployAsksTheHairpinOnEveryServer(t *testing.T) {
 			"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1",
 			"docker exec boks-proxy sh -c wget -S -q": "  HTTP/1.1 200 OK", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
 			"sh -c if [ -f '.boks/_proxy/caddy.json' ]": "absent", "sh -c cd '.boks/_proxy' && pwd -P": "/home/u/.boks/_proxy",
-			"docker inspect -f {{.Image}} boks-proxy":         "sha256:abc",
-			"docker run --rm --pull never --network boks-web": hairpin,
+			"docker inspect -f {{.Image}} boks-proxy": "sha256:abc", "ip -4 route get 1.1.1.1": "1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.7",
+			"docker run --rm --pull never --network boks-web": "boks-hairpin https://web.example.com/\n" + hairpin,
 		}}
 	}
 	a, b := answers("Connecting to web.example.com (1.2.3.4:443)\nwget: download timed out"), answers("  HTTP/1.1 200 OK")
 	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
 	cfg := parseConfig(t, "app: web\nimage: ghcr.io/x/web\nservers: [a, b]\ntls: true\nports:\n  - {name: web, port: 3000, host: web.example.com}\n")
 	err := dispatch(context.Background(), cfg, []string{"deploy", "v1"}, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "a: the release serves, but a container on boks-web gets no answer from") || strings.Contains(err.Error(), "b:") {
+	if err == nil || !strings.Contains(err.Error(), "a: the release serves, but a container on boks-web gets no answer from this server's proxy") || strings.Contains(err.Error(), "b:") {
 		t.Fatalf("want a named, b not: %v", err)
 	}
 	for name, r := range map[string]*recorder{"a": a, "b": b} {
