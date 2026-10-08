@@ -89,7 +89,7 @@ func TestEnsureHairpinKeepsTheRuleThroughTheUnit(t *testing.T) {
 	f.out[hairpinRead] = firewallFacts("0", nftChains, true, "", "")
 	f.out["sh "+hairpinScript] = "inserted into inet filter input"
 	var log strings.Builder
-	if err := EnsureHairpin(context.Background(), f, &log); err != nil {
+	if err := EnsureHairpin(context.Background(), f, &log, fixed); err != nil {
 		t.Fatal(err)
 	}
 	script := f.uploads[hairpinScript]
@@ -110,6 +110,10 @@ func TestEnsureHairpinKeepsTheRuleThroughTheUnit(t *testing.T) {
 	if reload < 0 || run < reload || f.writeIndex(hairpinDropIn, "[Service]") < 0 {
 		t.Errorf("want the files, a daemon-reload, then the script: %v", f.calls)
 	}
+	// Under the server's admission lock, as every change of what the server's apps share.
+	if take, give := f.callAt(admitTake(proxyHolder)), f.callAt(admitGive(proxyHolder)); take < 0 || take > f.callAt(hairpinRead) || give < run {
+		t.Errorf("want the step under the admission lock: %v", f.calls)
+	}
 	if !strings.Contains(log.String(), "firewall: inserted into inet filter input") || strings.Contains(log.String(), "warning") {
 		t.Errorf("log: %s", log.String())
 	}
@@ -120,7 +124,7 @@ func TestEnsureHairpinKeepsTheRuleThroughTheUnit(t *testing.T) {
 func TestEnsureHairpinAgainWritesNothing(t *testing.T) {
 	f := newFake()
 	f.out[hairpinRead] = firewallFacts("0", nftChains, true, hairpinScriptFor([]nftChain{{Family: "inet", Table: "filter", Name: "input"}}), hairpinDropInBody)
-	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}); err != nil {
+	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}, fixed); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.writes) > 0 || f.callAt("systemctl") >= 0 || f.callAt("sh "+hairpinScript) < 0 {
@@ -134,7 +138,7 @@ func TestEnsureHairpinReloadsADropInSystemdNeverRead(t *testing.T) {
 	f := newFake()
 	script := hairpinScriptFor([]nftChain{{Family: "inet", Table: "filter", Name: "input"}})
 	f.out[hairpinRead] = strings.Replace(firewallFacts("0", nftChains, true, script, hairpinDropInBody), " "+hairpinDropIn, "", 1)
-	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}); err != nil {
+	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}, fixed); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.writes) > 0 || f.callAt("systemctl daemon-reload") < 0 || f.callAt("sh "+hairpinScript) < f.callAt("systemctl daemon-reload") {
@@ -148,7 +152,7 @@ func TestEnsureHairpinWithoutTheUnitSaysSo(t *testing.T) {
 	f := newFake()
 	f.out[hairpinRead] = firewallFacts("1000", nftChains, false, "", "")
 	var log strings.Builder
-	if err := EnsureHairpin(context.Background(), f, &log); err != nil {
+	if err := EnsureHairpin(context.Background(), f, &log, fixed); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.writes) > 0 || f.callAt("sudo -n systemctl") >= 0 {
@@ -166,7 +170,7 @@ func TestEnsureHairpinWithoutTheUnitSaysSo(t *testing.T) {
 func TestEnsureHairpinWritesThroughSudo(t *testing.T) {
 	f := newFake()
 	f.out[hairpinRead] = firewallFacts("1000", nftChains, true, "", "")
-	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}); err != nil {
+	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}, fixed); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"sudo -n sh -c mkdir -p \"$(dirname '" + hairpinScript, "sudo -n sh -c mkdir -p \"$(dirname '" + hairpinDropIn,
@@ -190,11 +194,11 @@ func TestEnsureHairpinLeavesWhatItCannotChange(t *testing.T) {
 		f := newFake()
 		f.out[hairpinRead] = c.facts
 		var log strings.Builder
-		if err := EnsureHairpin(context.Background(), f, &log); err != nil {
+		if err := EnsureHairpin(context.Background(), f, &log, fixed); err != nil {
 			t.Fatal(err)
 		}
-		if len(f.calls) != 1 || len(f.writes) > 0 {
-			t.Errorf("%q: want the facts read and nothing else: %v", c.facts, f.calls)
+		if len(f.calls) != 3 || f.calls[0] != admitTake(proxyHolder) || f.calls[1] != hairpinRead || f.calls[2] != admitGive(proxyHolder) || len(f.writes) > 0 {
+			t.Errorf("%q: want the facts read under the lock and nothing else: %v", c.facts, f.calls)
 		}
 		if !strings.Contains(log.String(), c.want) {
 			t.Errorf("%q: want %q in %s", c.facts, c.want, log.String())
@@ -207,7 +211,7 @@ func TestEnsureHairpinFailsWhenTheRuleIsNotPut(t *testing.T) {
 	f := newFake()
 	f.out[hairpinRead] = firewallFacts("0", nftChains, true, "", "")
 	f.fail["sh "+hairpinScript] = errors.New("exit status 1")
-	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}); err == nil || !strings.Contains(err.Error(), "putting the hairpin rule") {
+	if err := EnsureHairpin(context.Background(), f, &strings.Builder{}, fixed); err == nil || !strings.Contains(err.Error(), "putting the hairpin rule") {
 		t.Errorf("want the failure: %v", err)
 	}
 }

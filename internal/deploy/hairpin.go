@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/hostname"
@@ -198,7 +199,18 @@ const hairpinDropInBody = "# Written by `boks server apply`: puts boks's hairpin
 // firewall — keeps it so through the unit's reloads and the server's reboots. What it cannot do —
 // no root, a chain iptables manages, no unit to keep the rule — is said, not refused: the policy is
 // applied either way, and CheckHairpin after a deploy is the test that fails.
-func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer) error {
+//
+// It changes what every app on the server shares, so it holds the server's admission lock, as the
+// policy does: two applies at once would otherwise write the script through one temporary file.
+func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer, o Options) error {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	adm, err := admit(ctx, r, log, proxyHolder, o)
+	if err != nil {
+		return err
+	}
+	defer adm.release(ctx)
 	h, err := readHairpin(ctx, r)
 	if err != nil {
 		return err

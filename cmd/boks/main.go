@@ -475,7 +475,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		}
 		// After the policy is on every server: a firewall one server refuses to change leaves no server
 		// on another policy than the rest.
-		return everyServer(sc.Servers, out, "firewall", func(r remote.Runner) error { return deploy.EnsureHairpin(ctx, r, out) })
+		return everyServer(sc.Servers, out, "firewall", func(r remote.Runner) error { return deploy.EnsureHairpin(ctx, r, out, o) })
 	case args[0] == "rollback" && len(args) == 3:
 		rev, err := strconv.Atoi(args[2])
 		if err != nil || rev < 1 {
