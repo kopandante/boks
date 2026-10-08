@@ -19,10 +19,17 @@ type recorder struct {
 	server
 	calls []string
 	stdin []string // what each piped command was given, in order
+	// seq, when set, is shared by the servers of a test: every call of each, as "<name> <command>", in
+	// the order the fleet made them.
+	seq  *[]string
+	name string
 }
 
 func (r *recorder) Run(ctx context.Context, args ...string) (string, error) {
 	r.calls = append(r.calls, strings.Join(args, " "))
+	if r.seq != nil {
+		*r.seq = append(*r.seq, r.name+" "+strings.Join(args, " "))
+	}
 	return r.server.Run(ctx, args...)
 }
 
@@ -327,5 +334,45 @@ func TestAMissingEnvFileReachesNoServer(t *testing.T) {
 	}
 	if len(a.calls)+len(b.calls) != 0 {
 		t.Errorf("no server is reached: %v %v", a.calls, b.calls)
+	}
+}
+
+// After the release serves on every server, each TLS host is asked from a container on every server:
+// a's containers get no answer, and b, deployed and asked all the same, answers; the error names a.
+func TestDeployAsksTheHairpinOnEveryServer(t *testing.T) {
+	var seq []string
+	answers := func(name, hairpin string) *recorder {
+		return &recorder{seq: &seq, name: name, server: server{
+			"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy", noNetwork: "absent",
+			"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1",
+			"docker exec boks-proxy sh -c wget -S -q": "  HTTP/1.1 200 OK", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
+			"sh -c if [ -f '.boks/_proxy/caddy.json' ]": "absent", "sh -c cd '.boks/_proxy' && pwd -P": "/home/u/.boks/_proxy",
+			"docker inspect -f {{.Image}} boks-proxy": "sha256:abc", "ip -4 route get 1.1.1.1": "1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.7",
+			"docker run --rm --pull never --network boks-web": "boks-hairpin https://web.example.com/\n" + hairpin,
+		}}
+	}
+	a, b := answers("a", "Connecting to web.example.com (1.2.3.4:443)\nwget: download timed out"), answers("b", "  HTTP/1.1 200 OK")
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	cfg := parseConfig(t, "app: web\nimage: ghcr.io/x/web\nservers: [a, b]\ntls: true\nports:\n  - {name: web, port: 3000, host: web.example.com}\n")
+	err := dispatch(context.Background(), cfg, []string{"deploy", "v1"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "a: the release serves, but a container on boks-web gets no answer from this server's proxy") || strings.Contains(err.Error(), "b:") {
+		t.Fatalf("want a named, b not: %v", err)
+	}
+	// Fleet-wide: both releases run before the first probe, and each server is probed.
+	lastRun, firstProbe, probed := -1, -1, map[string]bool{}
+	for i, c := range seq {
+		name, cmd, _ := strings.Cut(c, " ")
+		if strings.HasPrefix(cmd, "docker run -d --name web-v1-") {
+			lastRun = i
+		}
+		if strings.HasPrefix(cmd, "docker run --rm --pull never --network boks-web") {
+			probed[name] = true
+			if firstProbe < 0 {
+				firstProbe = i
+			}
+		}
+	}
+	if lastRun < 0 || firstProbe < lastRun || !probed["a"] || !probed["b"] {
+		t.Errorf("want every release run before any probe, and both servers probed: %v", seq)
 	}
 }

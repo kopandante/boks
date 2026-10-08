@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"io"
 	"os"
 	"path/filepath"
@@ -186,5 +187,46 @@ func TestPolicyOfCarriesTheTrustedProxies(t *testing.T) {
 	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\n"))
 	if err != nil || policyOf(sc).TrustedProxies != nil {
 		t.Errorf("want none without the field: %v", err)
+	}
+}
+
+// The firewall step runs after the policy is on every server, and on every server whatever fails: a's
+// firewall cannot be read, b's is still changed, and the error names a.
+func TestServerApplyKeepsTheHairpinOnEveryServer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	firewall := `sh -c S=""; [ "$(id -u)" = 0 ]`
+	chains := `{"nftables": [{"chain": {"family": "inet", "table": "filter", "name": "input", "hook": "input", "policy": "drop"}}]}`
+	facts := "nft=yes\nuid=0\nroot=yes\nchains=" + base64.StdEncoding.EncodeToString([]byte(chains)) + "\nenabled=enabled\n"
+	var seq []string
+	a := &recorder{server: server{firewall: "garbage"}, seq: &seq, name: "a"}
+	b := &recorder{server: server{firewall: facts}, seq: &seq, name: "b"}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 {
+		t.Fatalf("want a failure, got %d: %s", code, errw.String())
+	}
+	if !strings.Contains(errw.String(), "a: could not read the server's firewall") || strings.Contains(errw.String(), "b:") {
+		t.Errorf("want a named, b not: %s", errw.String())
+	}
+	if !b.ran("sh /usr/local/lib/boks/hairpin.sh") || !b.ran("systemctl daemon-reload") {
+		t.Errorf("want b's firewall changed: %v", b.calls)
+	}
+	// Fleet-wide: the last policy written, on either server, comes before the first firewall read.
+	lastPolicy, firstFirewall := -1, -1
+	for i, c := range seq {
+		_, cmd, _ := strings.Cut(c, " ")
+		if strings.Contains(cmd, "mv '.boks/_server/policy.json.") || strings.Contains(cmd, "'.boks/_server/policy.json'") && strings.Contains(cmd, " mv ") {
+			lastPolicy = i
+		}
+		if strings.HasPrefix(cmd, firewall) && firstFirewall < 0 {
+			firstFirewall = i
+		}
+	}
+	if lastPolicy < 0 || firstFirewall < lastPolicy {
+		t.Errorf("want every policy written before any firewall is read: %v", seq)
 	}
 }
