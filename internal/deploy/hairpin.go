@@ -207,8 +207,9 @@ func EnsureHairpin(ctx context.Context, r remote.Runner, log io.Writer) error {
 		return nil
 	}
 	for _, c := range h.iptables {
-		fmt.Fprintf(log, "warning: firewall: %s drops by default and is iptables', which boks does not edit: containers here do not reach the proxy "+
-			"on this server's own addresses until it has `-I INPUT -i br+ -p tcp -m multiport --dports 80,443 -m addrtype --dst-type LOCAL -j ACCEPT`\n", c)
+		tool := map[string]string{"ip": "iptables", "ip6": "ip6tables"}[c.Family]
+		fmt.Fprintf(log, "warning: firewall: %s drops by default and is %s', which boks does not edit: containers here do not reach the proxy "+
+			"on this server's own addresses until it has `%s -I INPUT -i br+ -p tcp -m multiport --dports 80,443 -m addrtype --dst-type LOCAL -j ACCEPT`\n", c, tool, tool)
 	}
 	for _, c := range h.odd {
 		fmt.Fprintf(log, "warning: firewall: %s drops by default and its name is not one boks writes; it needs `%s`\n", c, hairpinRule)

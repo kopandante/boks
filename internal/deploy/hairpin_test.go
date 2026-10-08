@@ -165,7 +165,7 @@ func TestEnsureHairpinLeavesWhatItCannotChange(t *testing.T) {
 	for _, c := range []struct{ facts, want string }{
 		{"nft=no\n", "no nft on this server"},
 		{"nft=yes\nuid=1000\nroot=no\n", "no root or `sudo -n`"},
-		{firewallFacts("0", iptables, true, "", ""), "ip filter INPUT drops by default and is iptables'"},
+		{firewallFacts("0", iptables, true, "", ""), "ip filter INPUT drops by default and is iptables', which boks does not edit: containers here do not reach the proxy on this server's own addresses until it has `iptables -I INPUT"},
 		{firewallFacts("0", `{"nftables": []}`, true, "", ""), ""},
 	} {
 		f := newFake()
