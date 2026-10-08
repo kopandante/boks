@@ -27,7 +27,7 @@ const usage = `usage: boks [-f boks.yml] <command>
                    on the app's network, and fail if the proxy does not answer
   rollback [id]    return to a recorded release (the previous one by default), reproducing the
                    image by digest, the ports, volumes and environment it actually ran with.
-                   The ids are what "boks releases" prints
+                   The ids are what "boks releases" prints. Then asks each TLS host as deploy does
   ps               containers and proxy routes of this app on every server
   releases         releases recorded on each server, newest last
   proxy boot       make sure the proxy (Caddy) is running (idempotent)
@@ -43,8 +43,9 @@ const usage = `usage: boks [-f boks.yml] <command>
   cert status      subject and expiry of the certificate each server currently serves
   server install <server.yml>
                    make the servers it lists ready for boks — Docker, cron, flock, the SSH user
-                   in group docker — and start the proxy; refuses, before any change, a server
-                   it cannot share (another proxy on 80/443, Swarm, an unknown firewall)
+                   in group docker, the firewall rule server apply keeps — and start the proxy;
+                   refuses, before any change, a server it cannot share (another proxy on
+                   80/443, Swarm, an unknown firewall)
   server apply <server.yml>
                    apply the server's policy (the bot filter, the egress proxy) to the servers it
                    lists; the file's revision must be the one after the highest each server applied.
@@ -53,7 +54,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   server rollback <server.yml> <revision>
                    put back the policy of an earlier revision on those servers
   server status <server.yml>
-                   the revision each server applies, its egress proxy, and a run that never finished
+                   the revision each server applies, its egress proxy, a run that never finished,
+                   and whether its firewall has the rule server apply keeps
   cert pull        copy the certificate and its lego metadata back from the first server, so a
                    renewal elsewhere can tell whether anything is due without holding the key
 
@@ -158,9 +160,13 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 			}
 		}
 		stamp := now()
-		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+		if err := each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return deploy.Rollback(ctx, r, out, cfg, id, deploy.Options{Login: login, Stamp: stamp})
-		})
+		}); err != nil {
+			return err
+		}
+		// As after a deploy, once the restored release serves everywhere.
+		return everyServer(cfg.Servers, out, "hairpin", func(r remote.Runner) error { return deploy.CheckRolledBackHairpin(ctx, r, out, cfg) })
 	case "releases":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error { return releases(ctx, r, out, cfg) })
 	case "ps":
@@ -511,6 +517,9 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			}
 			if open != nil {
 				fmt.Fprintf(out, "  ! %s started %s and never finished; run it again\n", open.Action, open.StartedAt.Format(time.RFC3339))
+			}
+			for _, line := range deploy.HairpinStatus(ctx, r) {
+				fmt.Fprintf(out, "  %s\n", line)
 			}
 			return nil
 		})

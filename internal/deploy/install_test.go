@@ -235,11 +235,13 @@ const factsCall = "sh -c " + factsScript
 // aptCall is how apt-get is run, before its arguments.
 const aptCall = "sh -c " + aptScript + " apt-get "
 
-// installFake is a server answering facts, with the proxy already running.
+// installFake is a server answering facts, with the proxy already running and no nft, so the firewall
+// step has nothing to do: a test of that step answers its facts itself.
 func installFake(facts string) *fake {
 	f := newFake()
 	f.out[factsCall] = facts
 	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
+	f.out[hairpinRead] = "nft=no\n"
 	return f
 }
 
@@ -320,19 +322,21 @@ func TestInstallAsASudoUser(t *testing.T) {
 func TestInstallTwiceChangesNothing(t *testing.T) {
 	ready := readyNoble + daemonLine(`{"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"},"default-address-pools":[{"base":"10.240.0.0/16","size":24}]}`)
 	f, fresh := installFake(ready), installFake("")
+	// The firewall as the first install left it: the script runs, in case the rule is gone, and nothing is written.
+	f.out[hairpinRead] = firewallFacts("1000", nftChains, true, hairpinScriptFor([]nftChain{{Family: "inet", Table: "filter", Name: "input"}}), hairpinDropInBody)
 	if err := install(f, fresh); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range f.calls {
-		if c == factsCall {
+		if c == factsCall || c == hairpinRead {
 			continue
 		}
 		if strings.Contains(c, "apt-get") || strings.Contains(c, "systemctl") || strings.Contains(c, "usermod") {
 			t.Errorf("a ready server changed: %s", c)
 		}
 	}
-	if len(f.uploads) > 0 || len(f.appends) > 0 || len(f.stdin) > 0 {
-		t.Errorf("want nothing written, not even the journal: %v %v %v", f.uploads, f.appends, f.stdin)
+	if len(f.uploads) > 0 || len(f.appends) > 0 || len(f.stdin) > 0 || !f.has("sudo -n sh "+hairpinScript) {
+		t.Errorf("want nothing written, not even the journal, and the rule's script run: %v %v %v", f.uploads, f.appends, f.stdin)
 	}
 	// The running proxy is left as it is.
 	for _, c := range fresh.calls {
@@ -622,5 +626,46 @@ func TestNftFlushIgnoresAComment(t *testing.T) {
 		if got := exec.Command("grep", "-qE", nftFlush, path).Run() == nil; got != want {
 			t.Errorf("%q: flagged %v, want %v", body, got, want)
 		}
+	}
+}
+
+// The install has the firewall let containers reach the proxy, as `boks server apply` does: on the run's
+// connection, as root, after the proxy is up, under the install's own lock, before the server is ready.
+func TestInstallKeepsTheHairpin(t *testing.T) {
+	f, fresh := installFake(emptyNoble), installFake("")
+	f.out[hairpinRead] = firewallFacts("0", nftChains, true, "", "")
+	f.out["sh "+hairpinScript] = "inserted into inet filter input"
+	var log strings.Builder
+	if err := Install(context.Background(), f, func() remote.Runner { return fresh }, &log, "caddy:2.11.7-alpine", fixed); err != nil {
+		t.Fatal(err)
+	}
+	read, run, give := f.callAt(hairpinRead), f.callAt("sh "+hairpinScript), f.callAt(admitGive(proxyHolder))
+	if read < f.callAt("usermod") || read < f.callAt("systemctl enable --now cron") || run < read || give < run || f.callAt(admitTake(proxyHolder)) != 0 {
+		t.Errorf("want the firewall step after the install's steps, under its one lock: %v", f.calls)
+	}
+	if strings.Count(strings.Join(f.calls, "\n"), admitTake(proxyHolder)) != 1 || fresh.has(hairpinRead) {
+		t.Errorf("want one lock taken and the firewall read over the run's connection: %v %v", f.calls, fresh.calls)
+	}
+	if f.uploads[hairpinDropIn] != hairpinDropInBody || !strings.Contains(f.uploads[hairpinScript], "insert rule inet filter input") {
+		t.Errorf("want the script and the drop-in written: %v", f.uploads)
+	}
+	if i := strings.Index(log.String(), "firewall: inserted into inet filter input"); i < 0 || i > strings.Index(log.String(), "server ready for boks") {
+		t.Errorf("want the rule in before the server is ready: %s", log.String())
+	}
+}
+
+// A firewall the install cannot change fails it, and the journal says so: the server is not ready for
+// an app that calls its own name.
+func TestInstallFailsWhenTheHairpinFails(t *testing.T) {
+	f, fresh := installFake(emptyNoble), installFake("")
+	f.out[hairpinRead] = firewallFacts("0", nftChains, true, "", "")
+	f.fail["sh "+hairpinScript] = errors.New("exit status 1")
+	var log strings.Builder
+	err := Install(context.Background(), f, func() remote.Runner { return fresh }, &log, "caddy:2.11.7-alpine", fixed)
+	if err == nil || !strings.Contains(err.Error(), "putting the hairpin rule") || strings.Contains(log.String(), "server ready") {
+		t.Fatalf("got %v; log %s", err, log.String())
+	}
+	if j := f.appends[serverLog]; !strings.Contains(j, `"result":"failed"`) {
+		t.Errorf("journal: %s", j)
 	}
 }

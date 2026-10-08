@@ -230,3 +230,31 @@ func TestServerApplyKeepsTheHairpinOnEveryServer(t *testing.T) {
 		t.Errorf("want every policy written before any firewall is read: %v", seq)
 	}
 }
+
+// The status names the hairpin rule of every server: a, whose rule a `nft -f` past nftables.service
+// took out, with the way back; b, whose rule is there, as there.
+func TestServerStatusSaysTheHairpinOfEveryServer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chains := `{"nftables": [{"chain": {"family": "inet", "table": "filter", "name": "input", "hook": "input", "policy": "drop"}}]}`
+	facts := "nft=yes\nuid=0\nroot=yes\nchains=" + base64.StdEncoding.EncodeToString([]byte(chains)) + "\nenabled=enabled\n"
+	const rule = "sh -c PATH=\"$PATH:/usr/sbin:/sbin\"\nif nft list chain"
+	a := &recorder{server: server{`sh -c S=""; [ "$(id -u)" = 0 ]`: facts, rule: "lacks inet filter input"}}
+	b := &recorder{server: server{`sh -c S=""; [ "$(id -u)" = 0 ]`: facts, rule: "has inet filter input"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var out, errw strings.Builder
+	if code := run([]string{"server", "status", path}, &out, &errw); code != 0 {
+		t.Fatalf("got %d: %s", code, errw.String())
+	}
+	sa, sb, _ := strings.Cut(out.String(), "== b\n")
+	if !strings.Contains(sa, "== a\n") || !strings.Contains(sa, "  ! firewall: inet filter input drops by default without boks's hairpin rule") ||
+		!strings.Contains(sa, "`boks server apply` puts it back") {
+		t.Errorf("want a's rule named gone, with the way back:\n%s", out.String())
+	}
+	if !strings.Contains(sb, "firewall: hairpin rule in inet filter input") || strings.Contains(sb, "without boks's hairpin rule") {
+		t.Errorf("want b's rule named in place:\n%s", out.String())
+	}
+}
