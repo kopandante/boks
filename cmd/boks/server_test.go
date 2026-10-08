@@ -188,3 +188,39 @@ func TestPolicyOfCarriesTheTrustedProxies(t *testing.T) {
 		t.Errorf("want none without the field: %v", err)
 	}
 }
+
+// The firewall step runs after the policy is on every server, and on every server whatever fails: a's
+// firewall cannot be read, b's is still changed, and the error names a.
+func TestServerApplyKeepsTheHairpinOnEveryServer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	firewall := `sh -c S=""; [ "$(id -u)" = 0 ]`
+	a := &recorder{server: server{firewall: "garbage"}}
+	b := &recorder{server: server{firewall: "nft=no"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 {
+		t.Fatalf("want a failure, got %d: %s", code, errw.String())
+	}
+	if !strings.Contains(errw.String(), "a: could not read the server's firewall") || strings.Contains(errw.String(), "b:") {
+		t.Errorf("want a named, b not: %s", errw.String())
+	}
+	// Each server: the firewall is read after the policy is written there.
+	for name, r := range map[string]*recorder{"a": a, "b": b} {
+		policy, fw := -1, -1
+		for i, c := range r.calls {
+			if strings.Contains(c, "mv '.boks/_server/policy.json.") || strings.Contains(c, "'.boks/_server/policy.json'") && strings.Contains(c, " mv ") {
+				policy = i
+			}
+			if strings.HasPrefix(c, firewall) && fw < 0 {
+				fw = i
+			}
+		}
+		if policy < 0 || fw < policy {
+			t.Errorf("%s: want the firewall read after the policy is written: %v", name, r.calls)
+		}
+	}
+}

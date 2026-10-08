@@ -329,3 +329,39 @@ func TestAMissingEnvFileReachesNoServer(t *testing.T) {
 		t.Errorf("no server is reached: %v %v", a.calls, b.calls)
 	}
 }
+
+// After the release serves on every server, each TLS host is asked from a container on every server:
+// a's containers get no answer, and b, deployed and asked all the same, answers; the error names a.
+func TestDeployAsksTheHairpinOnEveryServer(t *testing.T) {
+	answers := func(hairpin string) *recorder {
+		return &recorder{server: server{
+			"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy", noNetwork: "absent",
+			"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1",
+			"docker exec boks-proxy sh -c wget -S -q": "  HTTP/1.1 200 OK", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
+			"sh -c if [ -f '.boks/_proxy/caddy.json' ]": "absent", "sh -c cd '.boks/_proxy' && pwd -P": "/home/u/.boks/_proxy",
+			"docker inspect -f {{.Image}} boks-proxy": "sha256:abc",
+			"docker run --rm --pull never --network boks-web": hairpin,
+		}}
+	}
+	a, b := answers("Connecting to web.example.com (1.2.3.4:443)\nwget: download timed out"), answers("  HTTP/1.1 200 OK")
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	cfg := parseConfig(t, "app: web\nimage: ghcr.io/x/web\nservers: [a, b]\ntls: true\nports:\n  - {name: web, port: 3000, host: web.example.com}\n")
+	err := dispatch(context.Background(), cfg, []string{"deploy", "v1"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "a: the release serves, but a container on boks-web gets no answer from") || strings.Contains(err.Error(), "b:") {
+		t.Fatalf("want a named, b not: %v", err)
+	}
+	for name, r := range map[string]*recorder{"a": a, "b": b} {
+		run, probe := -1, -1
+		for i, c := range r.calls {
+			if strings.HasPrefix(c, "docker run -d --name web-v1-") {
+				run = i
+			}
+			if strings.HasPrefix(c, "docker run --rm --pull never --network boks-web") {
+				probe = i
+			}
+		}
+		if run < 0 || probe < run {
+			t.Errorf("%s: want the release run, then the hairpin asked: %v", name, r.calls)
+		}
+	}
+}

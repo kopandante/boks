@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,7 +23,8 @@ import (
 const usage = `usage: boks [-f boks.yml] <command>
 
   deploy <tag>     pull image:<tag>, start it, switch the proxy once it is healthy, retire the
-                   previous version once it has drained
+                   previous version once it has drained; then ask each TLS host from a container
+                   on the app's network, and fail if the proxy does not answer
   rollback [id]    return to a recorded release (the previous one by default), reproducing the
                    image by digest, the ports, volumes and environment it actually ran with.
                    The ids are what "boks releases" prints
@@ -45,7 +47,9 @@ const usage = `usage: boks [-f boks.yml] <command>
                    it cannot share (another proxy on 80/443, Swarm, an unknown firewall)
   server apply <server.yml>
                    apply the server's policy (the bot filter, the egress proxy) to the servers it
-                   lists; the file's revision must be the one after the highest each server applied
+                   lists; the file's revision must be the one after the highest each server applied.
+                   It also has each server's firewall let containers reach its proxy on its own
+                   addresses, and keeps that through nftables.service reloads and reboots
   server rollback <server.yml> <revision>
                    put back the policy of an earlier revision on those servers
   server status <server.yml>
@@ -126,9 +130,14 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 			return err
 		}
 		o := deploy.Options{Env: env, Files: files, Login: login, Stamp: now()}
-		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
+		if err := each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return deploy.Run(ctx, r, out, cfg, rest[0], o)
-		})
+		}); err != nil {
+			return err
+		}
+		// Once the release serves everywhere: a server whose containers cannot reach the app's hosts
+		// does not stop the deploy of the next, and every one of them is named.
+		return everyServer(cfg.Servers, out, "hairpin", func(r remote.Runner) error { return deploy.CheckHairpin(ctx, r, out, cfg) })
 	case "rollback":
 		if len(rest) > 1 {
 			return fmt.Errorf("rollback takes at most one release id; `boks releases` lists them")
@@ -207,6 +216,18 @@ func each(ctx context.Context, cfg *config.Config, out io.Writer, fn action) err
 		}
 	}
 	return nil
+}
+
+// everyServer runs fn on each server, all of them whatever fails, and names every server it failed on.
+func everyServer(servers []string, out io.Writer, what string, fn func(r remote.Runner) error) error {
+	var errs []error
+	for _, s := range servers {
+		fmt.Fprintf(out, "== %s (%s)\n", s, what)
+		if err := fn(connect(s)); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", s, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func ps(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config) error {
@@ -449,7 +470,12 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next) }); err != nil {
 			return err
 		}
-		return on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) })
+		if err := on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) }); err != nil {
+			return err
+		}
+		// After the policy is on every server: a firewall one server refuses to change leaves no server
+		// on another policy than the rest.
+		return everyServer(sc.Servers, out, "firewall", func(r remote.Runner) error { return deploy.EnsureHairpin(ctx, r, out) })
 	case args[0] == "rollback" && len(args) == 3:
 		rev, err := strconv.Atoi(args[2])
 		if err != nil || rev < 1 {
