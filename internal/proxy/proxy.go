@@ -276,26 +276,40 @@ func awaitAnswer(ctx context.Context, r remote.Runner) error {
 var answerWait, answerPoll = 10 * time.Second, 250 * time.Millisecond
 
 // Probe asks, from inside the proxy, whether a container answers on port at path: over the network
-// and by the name the route will dial. It passes on a final status in 2xx, after redirects, as
-// kamal-proxy's health check did; its 5s timeout is kamal-proxy's too. busybox wget's exit status is
-// not that rule (measured, 2.11.7-alpine: a 207 exits 1, a 302 without Location exits 0), so the
-// status is read from the response it prints.
+// and by the name the route will dial. Any answer in 2xx or 3xx passes, and a redirect is not
+// followed: the image is not boks's, and a Location it names would be fetched from inside the proxy,
+// where 127.0.0.1:2019 is Caddy's admin API. kamal-proxy followed redirects and judged the last
+// answer; a 3xx passing keeps the apps that redirect their health path (to a trailing slash, to a
+// login) deploying as before. curl, not busybox wget, which cannot be told not to follow: it ships in
+// the proxy image (caddy:2.11.7-alpine), its 5s bound is the whole request, as kamal-proxy's was,
+// and it refuses headers past its own limit, so what comes back is one short line whatever the
+// container sends. A proxy image without curl fails every probe, with sh saying so.
 func Probe(ctx context.Context, r remote.Runner, target string, port int, healthPath string) error {
 	url := "http://" + target + ":" + strconv.Itoa(port) + healthPath
-	out, err := r.Run(ctx, "docker", "exec", Container, "sh", "-c", "wget -S -q -O /dev/null -T 5 "+remote.Quote(url)+" 2>&1; true")
+	out, err := r.Run(ctx, "docker", "exec", Container, "sh", "-c", probeScript(url))
 	if err != nil {
 		return err
 	}
-	status := 0
-	for _, line := range strings.Split(out, "\n") {
-		if f := strings.Fields(line); len(f) >= 2 && strings.HasPrefix(f[0], "HTTP/") {
-			status, _ = strconv.Atoi(f[1])
-		}
+	status, code := -1, -1
+	if i := strings.LastIndex(out, probeMark); i >= 0 {
+		fmt.Sscanf(out[i+len(probeMark):], "%d %d", &status, &code)
 	}
-	if status < 200 || status > 299 {
+	if code != 0 || status < 200 || status > 399 {
 		return fmt.Errorf("%s answered %s", url, strings.TrimSpace(out))
 	}
 	return nil
+}
+
+// probeMark starts the line curl writes last: the status and its own exit code. The exit code is
+// needed because a status line followed by headers past curl's limit, or by a body cut off at the
+// bound, still leaves its status.
+const probeMark = "boks-probe "
+
+func probeScript(url string) string {
+	// -q first: no curlrc. No -L: a redirect is the answer. The body is read to /dev/null within the
+	// bound; only the -w line and curl's own error come back.
+	return "curl -q -sS -o /dev/null --max-time 5 -w " + remote.Quote(`\n`+probeMark+`%{http_code} %{exitcode}\n`) +
+		" " + remote.Quote(url) + " 2>&1; true"
 }
 
 // Busy says how many requests the proxy has in flight to these containers, on any port. After a

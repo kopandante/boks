@@ -108,12 +108,12 @@ func (f *fake) wrote(path, content string, appended bool) error {
 func newFake() *fake {
 	f := &fake{uploads: map[string]string{}, appends: map[string]string{}, out: map[string]string{}, fail: map[string]error{},
 		stopped: map[string]bool{}, files: map[string]string{}}
-	f.out[digests] = "[]"              // an image that came from no registry; tests that need a digest override it
-	f.out[netOwner] = "absent"         // the app's network is not made yet
-	f.out[applied] = "absent"          // the proxy has no applied config yet
-	f.out[migrateReq] = "1"            // the proxy runs with the sysctl a lossless reload needs
-	f.out[upstreams] = "[]"            // and holds no request in flight
-	f.out[probe] = "  HTTP/1.1 200 OK" // and every copy it probes answers
+	f.out[digests] = "[]"               // an image that came from no registry; tests that need a digest override it
+	f.out[netOwner] = "absent"          // the app's network is not made yet
+	f.out[applied] = "absent"           // the proxy has no applied config yet
+	f.out[migrateReq] = "1"             // the proxy runs with the sysctl a lossless reload needs
+	f.out[upstreams] = "[]"             // and holds no request in flight
+	f.out[probe] = "\nboks-probe 200 0" // and every copy it probes answers
 	f.out["sh -c cd '.boks/_proxy' && pwd -P"] = "/home/u/.boks/_proxy"
 	return f
 }
@@ -129,7 +129,7 @@ const (
 	migrateReq = "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req"
 	proxyImage = "sh -c docker inspect -f '{{.Config.Image}}' boks-proxy 2>/dev/null || true"
 	upstreams  = "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams"
-	probe      = "docker exec boks-proxy sh -c wget -S -q -O /dev/null -T 5 '"
+	probe      = "docker exec boks-proxy sh -c curl -q -sS -o /dev/null --max-time 5 -w '\\nboks-probe %{http_code} %{exitcode}\\n' '"
 	probeEnd   = "' 2>&1; true"
 	reloadVia  = "docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json"
 	caddyUp    = "running\tcaddy"
@@ -1118,7 +1118,7 @@ func TestAFailedSwitchThatCannotBePutBackKeepsBothCopies(t *testing.T) {
 // copy keeps serving, and the outcome is known.
 func TestAnUnhealthyCopyGetsNoRoute(t *testing.T) {
 	f := routedFake(t)
-	f.fail[probe] = errors.New("wget: server returned error: HTTP/1.1 503 Service Unavailable")
+	f.out[probe] = "\nboks-probe 503 0"
 	cfg := parse(t, onePort+"deploy_timeout: 1ms\n")
 	err := Run(context.Background(), f, io.Discard, cfg, "v2", quick())
 	if err == nil || !strings.Contains(err.Error(), "did not pass its health check within 1ms, so no route moved") || !strings.Contains(err.Error(), "503") {

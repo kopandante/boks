@@ -345,7 +345,7 @@ func TestDeployAsksTheHairpinOnEveryServer(t *testing.T) {
 		return &recorder{seq: &seq, name: name, server: server{
 			"docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy", noNetwork: "absent",
 			"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1",
-			"docker exec boks-proxy sh -c wget -S -q": "  HTTP/1.1 200 OK", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
+			"docker exec boks-proxy sh -c curl -q -sS": "\nboks-probe 200 0", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
 			"sh -c if [ -f '.boks/_proxy/caddy.json' ]": "absent", "sh -c cd '.boks/_proxy' && pwd -P": "/home/u/.boks/_proxy",
 			"docker inspect -f {{.Image}} boks-proxy": "sha256:abc", "ip -4 route get 1.1.1.1": "1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.7",
 			"docker run --rm --pull never --network boks-web": "boks-hairpin https://web.example.com/\n" + hairpin,
@@ -390,7 +390,7 @@ func TestRollbackAsksTheHairpinOnEveryServer(t *testing.T) {
 			"cat .boks/bot/releases/bot-v1-1": v1, "cat .boks/bot/releases/bot-v2-2": strings.Replace(strings.Replace(v1, "v1-1", "v2-2", 2), `"tag":"v1"`, `"tag":"v2","previous":"bot-v1-1"`, 1),
 			"sh -c test -f": "present", "docker inspect --type image": "[]", "docker image inspect": `["CMD","true"]`, "docker inspect --format": "healthy",
 			"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req": "1",
-			"docker exec boks-proxy sh -c wget -S -q": "  HTTP/1.1 200 OK", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
+			"docker exec boks-proxy sh -c curl -q -sS": "\nboks-probe 200 0", "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams": "[]",
 			"sh -c if [ -f '.boks/_proxy/caddy.json' ]": "absent", "sh -c cd '.boks/_proxy' && pwd -P": "/home/u/.boks/_proxy",
 			"docker inspect -f {{.Image}} boks-proxy": "sha256:abc", "ip -4 route get 1.1.1.1": "1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.7",
 			"docker run --rm --pull never --network boks-bot": "boks-hairpin https://bot.example.com/\n" + hairpin,

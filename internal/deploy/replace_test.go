@@ -442,7 +442,7 @@ func TestStopFirstDoesNotStartWithoutAConfirmedStop(t *testing.T) {
 // unhealthy is a server on which the new copy never passes its health check, and a config that gives
 // up on it at once.
 func unhealthy(t *testing.T, f *fake, cfg string) (*config.Config, Options) {
-	f.fail[probe] = errors.New("wget: server returned error: HTTP/1.1 503 Service Unavailable")
+	f.out[probe] = "\nboks-probe 503 0"
 	return parse(t, cfg+"deploy_timeout: 1ms\n"), quick()
 }
 
