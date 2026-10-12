@@ -3,8 +3,17 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -366,30 +375,146 @@ func TestBootCancelsACallThatHangs(t *testing.T) {
 }
 
 // A health check is asked from inside the proxy, by the name and port the route will dial, with a
-// bound of its own.
+// bound of its own, and never follows a redirect.
 func TestProbe(t *testing.T) {
-	const cmd = "docker exec boks-proxy sh -c wget -S -q -O /dev/null -T 5 'http://demo-v2-1:3000/up' 2>&1; true"
-	f := &fake{out: map[string]string{cmd: "  HTTP/1.1 200 OK\n  Content-Length: 2"}}
+	const cmd = "docker exec boks-proxy sh -c curl -q -g -sS -o /dev/null --max-time 5 -w '\\nboks-probe %{http_code} %{exitcode}\\n' 'http://demo-v2-1:3000/up' 2>&1; true"
+	f := &fake{out: map[string]string{cmd: "\nboks-probe 200 0\n"}}
 	if err := Probe(context.Background(), f, "demo-v2-1", 3000, "/up"); err != nil {
 		t.Fatal(err)
 	}
 	if at(f.calls, cmd) < 0 {
 		t.Errorf("want the probe from the proxy: %v", f.calls)
 	}
-	// The final status decides, as kamal-proxy's check did: any 2xx after redirects passes, anything
-	// else fails — whatever busybox wget's exit status says (what it prints was measured).
+	// 2xx and 3xx pass, as answers: a redirect is not followed. Anything else fails, and so does a
+	// status curl left behind when it gave up on the response.
 	for out, ok := range map[string]bool{
-		"  HTTP/1.1 207 Multi-Status\nwget: server returned error: HTTP/1.1 207 Multi-Status": true,
-		"  HTTP/1.1 302 Found\n  Content-Length: 0":                                           false,
-		"  HTTP/1.1 301 Moved\n  Location: /health\n  HTTP/1.1 204 No Content":                true,
-		"  HTTP/1.1 503 Service Unavailable\nwget: server returned error: HTTP/1.1 503":       false,
-		"wget: can't connect to remote host: Connection refused":                              false,
+		"\nboks-probe 207 0\n": true,
+		"\nboks-probe 302 0\n": true,
+		"\nboks-probe 404 0\n": false,
+		"\nboks-probe 503 0\n": false,
+		"curl: (56) Too large response headers: 307210 > 307200\nboks-probe 200 56\n":                       false,
+		"curl: (28) Operation timed out after 5002 milliseconds with 0 bytes received\nboks-probe 000 28\n": false,
+		"curl: (7) Failed to connect to demo-v2-1 port 3000\nboks-probe 000 7\n":                            false,
+		"sh: curl: not found": false,
 	} {
 		g := &fake{out: map[string]string{cmd: out}}
 		if err := Probe(context.Background(), g, "demo-v2-1", 3000, "/up"); (err == nil) != ok {
 			t.Errorf("%q: want pass=%v, got %v", out, ok, err)
 		}
 	}
+}
+
+// local runs what the proxy would run, on this machine: `docker exec boks-proxy sh -c SCRIPT` as
+// `sh -c SCRIPT`, so the probe's real command meets real servers. It keeps how much came back.
+type local struct{ got int }
+
+func (l *local) Run(ctx context.Context, args ...string) (string, error) {
+	if len(args) != 6 || strings.Join(args[:5], " ") != "docker exec boks-proxy sh -c" {
+		return "", fmt.Errorf("unexpected command %q", args)
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", args[5])
+	cmd.WaitDelay = time.Second // a client left behind by sh would otherwise hold the output open
+	out, err := cmd.CombinedOutput()
+	l.got += len(out)
+	return string(out), err
+}
+
+func (l *local) Pipe(ctx context.Context, _ []byte, args ...string) (string, error) {
+	return l.Run(ctx, args...)
+}
+
+// The image is not boks's: a health path that redirects to the proxy's own admin API, or to any
+// other address, is not fetched, and one that sends headers without end neither hangs the deploy
+// nor comes back to boks.
+func TestProbeAgainstHostileContainer(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is not installed")
+	}
+	var reached atomic.Int32
+	admin := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached.Add(1) }))
+	defer admin.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, admin.URL+"/config/", http.StatusFound)
+	}))
+	defer redirect.Close()
+	host, port := hostPort(t, redirect.URL)
+	l := &local{}
+	if err := Probe(context.Background(), l, host, port, "/up"); err != nil {
+		t.Errorf("a 302 is an answer: %v", err)
+	}
+	if n := reached.Load(); n != 0 {
+		t.Errorf("the probe followed the redirect: the target was asked %d times", n)
+	}
+
+	// The path goes out as written: curl's URL globs would turn braces into several requests and
+	// refuse brackets.
+	var asked []string
+	var mu sync.Mutex
+	literal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Path+"?"+r.URL.RawQuery)
+		mu.Unlock()
+	}))
+	defer literal.Close()
+	host, port = hostPort(t, literal.URL)
+	if err := Probe(context.Background(), &local{}, host, port, "/up/{a,b}?q[]=1"); err != nil {
+		t.Errorf("a path with braces and brackets: %v", err)
+	}
+	if len(asked) != 1 || asked[0] != "/up/{a,b}?q[]=1" {
+		t.Errorf("want the path asked once, as written: %q", asked)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				c.Write([]byte("HTTP/1.1 200 OK\r\n"))
+				line := []byte("X-Pad: " + strings.Repeat("a", 1000) + "\r\n")
+				for {
+					if _, err := c.Write(line); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	host, port = hostPort(t, "http://"+ln.Addr().String())
+	l = &local{}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	err = Probe(ctx, l, host, port, "/up")
+	if err == nil {
+		t.Error("endless headers passed")
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("the probe took %s", d)
+	}
+	if l.got > 4096 {
+		t.Errorf("%d bytes of the answer came back to boks", l.got)
+	}
+}
+
+func hostPort(t *testing.T, raw string) (string, int) {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Hostname(), p
 }
 
 // Busy counts the requests in flight to the containers asked about, on every port, in the shape Caddy
