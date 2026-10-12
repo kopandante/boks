@@ -205,7 +205,7 @@ func TestAFailedStartDoesNotPutTheProxyOnTheNetwork(t *testing.T) {
 func TestTheFirstDeployMovesTheAppOffTheSharedNetwork(t *testing.T) {
 	f := stopFirstFake(t)
 	f.out[proxyNets] = "boks-test"
-	f.fail[probe] = errors.New("wget: server returned error: HTTP/1.1 502 Bad Gateway")
+	f.out[probe] = "\nboks-probe 502 0"
 	if err := Run(context.Background(), f, io.Discard, parse(t, stopFirst+"deploy_timeout: 1ms\n"), "v2", quick()); err == nil {
 		t.Fatal("want the failed health check")
 	}
