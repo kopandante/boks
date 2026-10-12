@@ -87,7 +87,7 @@ type Snapshot struct {
 	CPUs string `json:"cpus,omitempty"`
 	// PidsLimit is the pids limit the config gave the release; nil when it set none and ran with the
 	// default, and before version 12.
-	PidsLimit *int `json:"pids_limit,omitempty"`
+	PidsLimit *config.WholeNumber `json:"pids_limit,omitempty"`
 	// Replace is the replace mode the release itself asks for — its config's, with the shape filled
 	// in, so an app without routes records stop-first. It is not how the release was put in place:
 	// a release deployed over a stop-first one was put in place stop-first and may still record

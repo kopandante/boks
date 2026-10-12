@@ -334,6 +334,18 @@ func TestCheckRollbackChangesNothing(t *testing.T) {
 	}
 }
 
+// The check refuses a release whose CPU cap this server cannot give, so a rollback over several
+// servers stops before the first one moves.
+func TestCheckRollbackRefusesMoreCPUsThanTheServerHas(t *testing.T) {
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env","cpus":"4"}`
+	f.out[ncpu] = "2"
+	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err == nil || !strings.Contains(err.Error(), "more than the 2 CPUs") {
+		t.Errorf("want the refusal, got %v", err)
+	}
+}
+
 // A server still on kamal-proxy refuses a rollback with routes partway through: the check asks first,
 // so a rollback over several servers does not leave the earlier ones on another release.
 func TestCheckRollbackAsksForTheMigration(t *testing.T) {
@@ -521,6 +533,7 @@ func TestRollbackRestoresTheLimitsOfTheRelease(t *testing.T) {
 	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
 		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
 		"cpus":"0.5","pids_limit":64}`
+	f.out[ncpu] = "1"
 	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
 		t.Fatal(err)
 	}
@@ -529,6 +542,7 @@ func TestRollbackRestoresTheLimitsOfTheRelease(t *testing.T) {
 	}
 
 	g := botReleases("healthy")
+	g.out[ncpu] = "4"
 	var log strings.Builder
 	if err := Rollback(context.Background(), g, &log, parse(t, noPorts+"cpus: 2\npids_limit: 4096\n"), "", quick()); err != nil {
 		t.Fatal(err)

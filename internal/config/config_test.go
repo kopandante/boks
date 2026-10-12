@@ -230,14 +230,16 @@ func TestEnvContentEmpty(t *testing.T) {
 func TestParseLimits(t *testing.T) {
 	const routed = "app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\n"
 	for in, want := range map[string]string{
-		"cpus: 0":         "below docker's minimum",
-		"cpus: 0.001":     "not a number of CPUs",
-		"cpus: -1":        "not a number of CPUs",
-		"cpus: 2c":        "not a number of CPUs",
-		"cpus: 1e3":       "not a number of CPUs",
-		"pids_limit: 0":   "pids_limit: 0 must be a positive number, or -1",
-		"pids_limit: -2":  "pids_limit: -2",
-		"pids_limit: lot": "cannot unmarshal",
+		"cpus: 0":          "below docker's minimum",
+		"cpus: 0.001":      "not a number of CPUs",
+		"cpus: -1":         "not a number of CPUs",
+		"cpus: 2c":         "not a number of CPUs",
+		"cpus: 1e3":        "not a number of CPUs",
+		"pids_limit: 0":    "pids_limit: 0 must be a positive number, or -1",
+		"pids_limit: -2":   "pids_limit: -2",
+		"pids_limit: lot":  "not a whole number",
+		"pids_limit: -1.5": "not a whole number", // YAML would truncate it to -1, no limit
+		"pids_limit: 2.0":  "not a whole number",
 	} {
 		if _, err := Parse([]byte(routed + in)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want error containing %q, got %v", in, want, err)

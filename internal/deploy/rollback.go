@@ -169,6 +169,9 @@ func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id 
 			return "", proxy.NotCaddy()
 		}
 	}
+	if err := checkCPUs(ctx, r, target); err != nil {
+		return "", err
+	}
 	if target.Memory == "" {
 		return id, nil
 	}

@@ -209,6 +209,7 @@ func TestDeployRunsAndRecordsTheReservation(t *testing.T) {
 // wrote them. Without either key the copy has no CPU cap and the default pids limit; -1 lifts it.
 func TestDeployRunsAndRecordsTheLimits(t *testing.T) {
 	f := routedFake(t)
+	f.out[ncpu] = "2"
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"cpus: 1.5\npids_limit: 2048\n"), "v2", fixed); err != nil {
 		t.Fatal(err)
 	}
@@ -232,6 +233,27 @@ func TestDeployRunsAndRecordsTheLimits(t *testing.T) {
 		if run := g.calls[g.callAt("docker run")]; !strings.Contains(run, want) || strings.Contains(run, "--cpus") {
 			t.Errorf("%q: want%sand no CPU cap: %s", in, want, run)
 		}
+	}
+}
+
+const ncpu = "docker info --format {{.NCPU}}"
+
+// A CPU cap above the server's CPUs is refused before anything changes: docker would refuse it only
+// at `docker run`, after a stop-first deploy stopped the running copy.
+func TestDeployRefusesMoreCPUsThanTheServerHas(t *testing.T) {
+	f := stopFirstFake(t)
+	f.out[ncpu] = "2"
+	err := Run(context.Background(), f, io.Discard, parse(t, stopFirst+"cpus: 2.5\n"), "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "cpus: 2.5 is more than the 2 CPUs of this server") {
+		t.Fatalf("want the refusal, got %v", err)
+	}
+	if f.callAt("docker stop") >= 0 || f.callAt("docker run") >= 0 {
+		t.Errorf("nothing may change: %v", f.calls)
+	}
+	g := stopFirstFake(t)
+	g.out[ncpu] = "2"
+	if err := Run(context.Background(), g, io.Discard, parse(t, stopFirst+"cpus: 2\n"), "v2", fixed); err != nil {
+		t.Errorf("every CPU of the server is a valid cap: %v", err)
 	}
 }
 

@@ -402,3 +402,24 @@ func parseSize(s string) (int64, error) {
 func size(n int64) string {
 	return strconv.FormatInt(n>>20, 10) + "MiB"
 }
+
+// checkCPUs refuses a CPU cap above the CPUs docker sees on this server, which `docker run` would
+// refuse only after a stop-first deploy stopped the running copy. The config cannot know: the same
+// boks.yml goes to servers of different sizes.
+func checkCPUs(ctx context.Context, r remote.Runner, cfg *config.Config) error {
+	if cfg.CPUs == "" {
+		return nil
+	}
+	out, err := r.Run(ctx, "docker", "info", "--format", "{{.NCPU}}")
+	if err != nil {
+		return fmt.Errorf("reading the server's CPUs for cpus: %w", err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil || n < 1 {
+		return fmt.Errorf("reading the server's CPUs for cpus: unexpected answer %q", out)
+	}
+	if want, _ := strconv.ParseFloat(cfg.CPUs, 64); want > float64(n) {
+		return fmt.Errorf("cpus: %s is more than the %d CPUs of this server, and docker would refuse the container", cfg.CPUs, n)
+	}
+	return nil
+}

@@ -240,6 +240,9 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := checkMemory(ctx, r, log, cfg, live); err != nil {
 		return fmt.Errorf("%w\nnothing of the app was changed", err)
 	}
+	if err := checkCPUs(ctx, r, cfg); err != nil {
+		return fmt.Errorf("%w\nnothing of the app was changed", err)
+	}
 	if fresh {
 		if err := makeNetwork(ctx, r, log, cfg); err != nil {
 			return err

@@ -307,7 +307,7 @@ type Config struct {
 	// PidsLimit caps the processes and threads the container may hold at once; nil means
 	// DefaultPidsLimit and -1 means none. A fork bomb or a leak of threads in one app otherwise takes
 	// the whole server's pid space.
-	PidsLimit *int `yaml:"pids_limit"`
+	PidsLimit *WholeNumber `yaml:"pids_limit"`
 	// Healthcheck is the container's health check; nil leaves the image's HEALTHCHECK, if any.
 	Healthcheck *Healthcheck `yaml:"healthcheck"`
 	// Command replaces the image's CMD, in exec form: the program, then its arguments, passed as they
@@ -453,13 +453,29 @@ func (c *Config) CheckLimits() error {
 	return nil
 }
 
+// WholeNumber is an integer written as one: YAML would otherwise truncate a fraction into an int
+// field, so `pids_limit: -1.5` would read as -1, no limit.
+type WholeNumber int
+
+func (n *WholeNumber) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!int" {
+		return fmt.Errorf("line %d: %q is not a whole number", node.Line, node.Value)
+	}
+	var v int
+	if err := node.Decode(&v); err != nil {
+		return err
+	}
+	*n = WholeNumber(v)
+	return nil
+}
+
 // Pids is the pids limit the container runs with: the config's, DefaultPidsLimit when it sets
 // none, -1 for none.
 func (c *Config) Pids() int {
 	if c.PidsLimit == nil {
 		return DefaultPidsLimit
 	}
-	return *c.PidsLimit
+	return int(*c.PidsLimit)
 }
 
 // MemoryBytes reads a limit written in the format Memory accepts. Empty is no limit, and 0.

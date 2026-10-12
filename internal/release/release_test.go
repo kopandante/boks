@@ -459,7 +459,7 @@ func TestSnapshotKeepsTheMemoryReservation(t *testing.T) {
 
 func TestSnapshotKeepsTheLimits(t *testing.T) {
 	f := newFake()
-	pids := 64
+	pids := config.WholeNumber(64)
 	if err := Save(context.Background(), f, Snapshot{ID: "web-v2-2", App: "web", CPUs: "0.5", PidsLimit: &pids}); err != nil {
 		t.Fatal(err)
 	}
