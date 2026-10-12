@@ -403,10 +403,11 @@ func size(n int64) string {
 	return strconv.FormatInt(n>>20, 10) + "MiB"
 }
 
-// checkCPUs refuses a CPU cap above the CPUs docker sees on this server, which `docker run` would
+// CheckCPUs refuses a CPU cap above the CPUs docker sees on this server, which `docker run` would
 // refuse only after a stop-first deploy stopped the running copy. The config cannot know: the same
-// boks.yml goes to servers of different sizes.
-func checkCPUs(ctx context.Context, r remote.Runner, cfg *config.Config) error {
+// boks.yml goes to servers of different sizes. It is exported for a deploy over several servers,
+// which asks every one of them before the first changes.
+func CheckCPUs(ctx context.Context, r remote.Runner, cfg *config.Config) error {
 	if cfg.CPUs == "" {
 		return nil
 	}

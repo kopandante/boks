@@ -47,8 +47,8 @@ import (
 // memory reservation: a boks that drops it would admit the next deploys beside a rolled-back release
 // as if it could still grow to its whole limit, and the release would run without its soft limit.
 // Version 12 added the CPU and pids limits: a boks that drops them would bring a release back with
-// no CPU cap and the default pids limit, whatever it ran with. An older snapshot reads as what it
-// ran: no CPU cap, and no pids limit set by boks, which comes back as the default.
+// no CPU cap and the default pids limit, whatever it ran with. An older snapshot reads as no CPU cap,
+// and its pids limit is today's config's: it ran with none boks set.
 const FormatVersion = 12
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
@@ -86,7 +86,7 @@ type Snapshot struct {
 	// before version 12.
 	CPUs string `json:"cpus,omitempty"`
 	// PidsLimit is the pids limit the config gave the release; nil when it set none and ran with the
-	// default, and before version 12.
+	// default, and before version 12, when a rollback takes today's config's.
 	PidsLimit *config.WholeNumber `json:"pids_limit,omitempty"`
 	// Replace is the replace mode the release itself asks for — its config's, with the shape filled
 	// in, so an app without routes records stop-first. It is not how the release was put in place:

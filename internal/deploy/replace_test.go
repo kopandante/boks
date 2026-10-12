@@ -247,8 +247,8 @@ func TestDeployRefusesMoreCPUsThanTheServerHas(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "cpus: 2.5 is more than the 2 CPUs of this server") {
 		t.Fatalf("want the refusal, got %v", err)
 	}
-	if f.callAt("docker stop") >= 0 || f.callAt("docker run") >= 0 {
-		t.Errorf("nothing may change: %v", f.calls)
+	if f.callAt("docker stop") >= 0 || f.callAt("docker run") >= 0 || f.callAt("docker pull") >= 0 || f.callAt("ln -sn") >= 0 {
+		t.Errorf("nothing may change, the pull and the admission included: %v", f.calls)
 	}
 	g := stopFirstFake(t)
 	g.out[ncpu] = "2"

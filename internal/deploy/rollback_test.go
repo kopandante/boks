@@ -526,8 +526,7 @@ func TestRollbackRestoresTheCommandOfTheRelease(t *testing.T) {
 	}
 }
 
-// A rollback runs the CPU and pids limits its release recorded; a release recorded before them ran
-// with no CPU cap and comes back with the default pids limit, whatever today's config says.
+// A rollback runs the CPU and pids limits its release recorded.
 func TestRollbackRestoresTheLimitsOfTheRelease(t *testing.T) {
 	f := botReleases("healthy")
 	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
@@ -541,17 +540,35 @@ func TestRollbackRestoresTheLimitsOfTheRelease(t *testing.T) {
 		t.Errorf("the restored copy must run the recorded limits: %s", run)
 	}
 
+	// A release recorded before the limits (format 11) ran with no CPU cap and with no pids limit boks
+	// set: it comes back without the cap, and with today's pids limit, which an app that needs more has
+	// already lifted.
 	g := botReleases("healthy")
 	g.out[ncpu] = "4"
 	var log strings.Builder
 	if err := Rollback(context.Background(), g, &log, parse(t, noPorts+"cpus: 2\npids_limit: 4096\n"), "", quick()); err != nil {
 		t.Fatal(err)
 	}
-	if run := g.calls[g.callAt("docker run")]; strings.Contains(run, "--cpus") || !strings.Contains(run, " --pids-limit 512 ") {
-		t.Errorf("a release recorded without them runs without a CPU cap and with the default pids limit: %s", run)
+	if run := g.calls[g.callAt("docker run")]; strings.Contains(run, "--cpus") || !strings.Contains(run, " --pids-limit 4096 ") {
+		t.Errorf("a release recorded before the limits runs without a CPU cap and with today's pids limit: %s", run)
 	}
-	if !strings.Contains(log.String(), "without a cpus limit") || !strings.Contains(log.String(), "pids limit 512") {
-		t.Errorf("the rollback must say it drops today's limits: %s", log.String())
+	if !strings.Contains(log.String(), "without a cpus limit") || strings.Contains(log.String(), "pids limit") {
+		t.Errorf("the rollback must say it drops today's CPU cap, and nothing of pids: %s", log.String())
+	}
+
+	// A format 12 release recorded without a pids limit ran with the default, and comes back with it.
+	k := botReleases("healthy")
+	k.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env"}`
+	log.Reset()
+	if err := Rollback(context.Background(), k, &log, parse(t, noPorts+"pids_limit: 4096\n"), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := k.calls[k.callAt("docker run")]; !strings.Contains(run, " --pids-limit 512 ") {
+		t.Errorf("a release recorded with the default comes back with it: %s", run)
+	}
+	if !strings.Contains(log.String(), "pids limit 512 it was recorded with, not the 4096") {
+		t.Errorf("the rollback must say it drops today's pids limit: %s", log.String())
 	}
 
 	h := botReleases("healthy")

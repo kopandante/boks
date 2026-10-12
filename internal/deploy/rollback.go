@@ -112,10 +112,13 @@ func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	// So is the reservation under it.
 	target.Memory = snapshot.Memory
 	target.MemoryReservation = snapshot.MemoryReservation
-	// And the CPU and pids limits: a release recorded without them ran with no CPU cap and comes back
-	// with the default pids limit.
+	// And the CPU and pids limits: a release recorded without a CPU cap ran without one. A snapshot
+	// from before version 12 says nothing of pids, and the release ran with no limit boks set: it comes
+	// back with today's config's, which an app that needs more has already lifted.
 	target.CPUs = snapshot.CPUs
-	target.PidsLimit = snapshot.PidsLimit
+	if snapshot.Version >= 12 {
+		target.PidsLimit = snapshot.PidsLimit
+	}
 	// So is the health check: one the release did not record ran with the image's own.
 	target.Healthcheck = snapshot.Healthcheck
 	// And the command and stop signal: one the release did not record ran with the image's own.
@@ -169,7 +172,7 @@ func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id 
 			return "", proxy.NotCaddy()
 		}
 	}
-	if err := checkCPUs(ctx, r, target); err != nil {
+	if err := CheckCPUs(ctx, r, target); err != nil {
 		return "", err
 	}
 	if target.Memory == "" {

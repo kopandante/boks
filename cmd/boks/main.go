@@ -132,6 +132,15 @@ func dispatch(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 			return err
 		}
 		o := deploy.Options{Env: env, Files: files, Login: login, Stamp: now()}
+		// A CPU cap one server cannot give is asked of every server first: refused halfway through
+		// the list, the deploy would leave the app on two versions.
+		if len(cfg.Servers) > 1 && cfg.CPUs != "" {
+			for _, s := range cfg.Servers {
+				if err := deploy.CheckCPUs(ctx, connect(s), cfg); err != nil {
+					return fmt.Errorf("%s: %w\nno server was deployed", s, err)
+				}
+			}
+		}
 		if err := each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return deploy.Run(ctx, r, out, cfg, rest[0], o)
 		}); err != nil {

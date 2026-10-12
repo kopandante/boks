@@ -427,3 +427,19 @@ func TestRollbackAsksTheHairpinOnEveryServer(t *testing.T) {
 		t.Errorf("want every restored release run before any probe, and both servers probed: %v", seq)
 	}
 }
+
+// A CPU cap one server cannot give is found before any server changes: b has 2 CPUs, and a is not
+// even pulled to.
+func TestDeployAsksEveryServerForTheCPUsFirst(t *testing.T) {
+	a := &recorder{server: server{"docker info --format {{.NCPU}}": "8"}}
+	b := &recorder{server: server{"docker info --format {{.NCPU}}": "2"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	cfg := parseConfig(t, twoServers+"cpus: 4\n")
+	err := dispatch(context.Background(), cfg, []string{"deploy", "v2"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "b: cpus: 4 is more than the 2 CPUs") || !strings.Contains(err.Error(), "no server was deployed") {
+		t.Fatalf("want b named before anything changes: %v", err)
+	}
+	if a.ran("docker pull") || a.ran("mkdir") || b.ran("docker pull") {
+		t.Errorf("no server may change: a %v, b %v", a.calls, b.calls)
+	}
+}

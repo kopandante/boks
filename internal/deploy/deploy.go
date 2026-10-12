@@ -132,6 +132,9 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	if err := checkCron(ctx, r, cfg); err != nil {
 		return err
 	}
+	if err := CheckCPUs(ctx, r, cfg); err != nil {
+		return fmt.Errorf("%w\nnothing of the app was changed", err)
+	}
 	routed := len(cfg.Ports) > 0
 	name := ContainerName(cfg.App, l.tag, o.stamp())
 	if _, err := checkNetworks(ctx, r, cfg, name); err != nil {
@@ -238,9 +241,6 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 		return err
 	}
 	if err := checkMemory(ctx, r, log, cfg, live); err != nil {
-		return fmt.Errorf("%w\nnothing of the app was changed", err)
-	}
-	if err := checkCPUs(ctx, r, cfg); err != nil {
 		return fmt.Errorf("%w\nnothing of the app was changed", err)
 	}
 	if fresh {
