@@ -350,7 +350,7 @@ func TestRunHappyPath(t *testing.T) {
 		"docker run -d --name demo-v2-1700000000 --network boks-demo --network-alias demo --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 --restart unless-stopped " +
 			"--label boks.app=demo --label boks.version=v2 " +
 			"--label boks.ports=[{\"name\":\"web\",\"port\":3000,\"host\":\"demo.example.com\",\"health_path\":\"/up\",\"health_port\":0}] " +
-			"--label boks.replace=overlap --env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
+			"--label boks.replace=overlap --pids-limit 512 --env-file .boks/demo/demo-v2-1700000000.env -v demo.data:/data ghcr.io/x/y:v2",
 		// The proxy joins the app's network to reach the new copy, still under the lock.
 		proxyNets,
 		"docker network connect boks-demo boks-proxy",
@@ -489,7 +489,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		// The stop is confirmed by the container's state, not by the command having returned.
 		isRunningQuery + "bot-v1-1",
 		"docker run -d --name bot-v2-1700000000 --network boks-bot --network-alias bot --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 --restart unless-stopped " +
-			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] --label boks.replace=stop-first " +
+			"--label boks.app=bot --label boks.version=v2 --label boks.ports=[] --label boks.replace=stop-first --pids-limit 512 " +
 			"--env-file .boks/bot/bot-v2-1700000000.env ghcr.io/x/bot:v2",
 		"docker inspect --format {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} bot-v2-1700000000",
 		// In stop-first the admission lasts until the new copy is up.

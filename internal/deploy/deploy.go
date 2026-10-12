@@ -733,7 +733,7 @@ func record(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Con
 	snapshot := release.Snapshot{
 		ID: name, App: cfg.App, Image: cfg.Image, Tag: tag, Digest: digest,
 		Ports: cfg.Ports, Volumes: cfg.Volumes, TLS: cfg.TLS, Networks: cfg.Networks(), Uses: cfg.Uses,
-		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, MemoryReservation: cfg.MemoryReservation, Replace: cfg.ReplaceMode(),
+		EnvPath: envFile(cfg.App, name, env), Memory: cfg.Memory, MemoryReservation: cfg.MemoryReservation, CPUs: cfg.CPUs, PidsLimit: cfg.PidsLimit, Replace: cfg.ReplaceMode(),
 		Healthcheck: cfg.Healthcheck, Files: files, Command: cfg.Command, StopSignal: cfg.StopSignal,
 		Previous: op.from, CreatedAt: now,
 	}
@@ -1103,6 +1103,12 @@ func runOptions(cfg *config.Config, name, tag, ref, envPath string, binds []stri
 	if cfg.MemoryReservation != "" {
 		a = append(a, "--memory-reservation", cfg.MemoryReservation)
 	}
+	if cfg.CPUs != "" {
+		a = append(a, "--cpus", cfg.CPUs)
+	}
+	// Always said, -1 included: docker's daemon may have a default of its own (default-pids-limit),
+	// and the config is what decides.
+	a = append(a, "--pids-limit", strconv.Itoa(cfg.Pids()))
 	if h := cfg.Healthcheck; h != nil {
 		// The start period is the deploy's wait: docker calls a copy unhealthy after three failed checks
 		// in a row — 15s at the default interval — and waitHealthy gives up on the first unhealthy, so

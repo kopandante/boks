@@ -205,6 +205,36 @@ func TestDeployRunsAndRecordsTheReservation(t *testing.T) {
 	}
 }
 
+// The CPU cap and the pids limit reach `docker run`, and the snapshot records them as the config
+// wrote them. Without either key the copy has no CPU cap and the default pids limit; -1 lifts it.
+func TestDeployRunsAndRecordsTheLimits(t *testing.T) {
+	f := routedFake(t)
+	if err := Run(context.Background(), f, io.Discard, parse(t, onePort+"cpus: 1.5\npids_limit: 2048\n"), "v2", fixed); err != nil {
+		t.Fatal(err)
+	}
+	run := f.calls[f.callAt("docker run")]
+	if !strings.Contains(run, " --cpus 1.5 ") || !strings.Contains(run, " --pids-limit 2048 ") {
+		t.Errorf("the limits must reach docker run: %s", run)
+	}
+	var snap release.Snapshot
+	if err := json.Unmarshal([]byte(f.uploads[".boks/demo/releases/"+newCopy+".json"]), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.CPUs != "1.5" || snap.PidsLimit == nil || *snap.PidsLimit != 2048 {
+		t.Errorf("snapshot must keep the limits: %+v", snap)
+	}
+
+	for in, want := range map[string]string{"": " --pids-limit 512 ", "pids_limit: -1\n": " --pids-limit -1 "} {
+		g := routedFake(t)
+		if err := Run(context.Background(), g, io.Discard, parse(t, onePort+in), "v2", fixed); err != nil {
+			t.Fatal(err)
+		}
+		if run := g.calls[g.callAt("docker run")]; !strings.Contains(run, want) || strings.Contains(run, "--cpus") {
+			t.Errorf("%q: want%sand no CPU cap: %s", in, want, run)
+		}
+	}
+}
+
 // Limits set at each app's spike add up to the whole server long before it is full. With
 // reservations the same server admits the deploy: 1500 − (256−200) − (256−100) − 256 reserve leaves
 // 1032 for a copy that reserves 512 under a 2g limit. Counted by their limits, the same containers

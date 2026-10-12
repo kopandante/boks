@@ -225,6 +225,44 @@ func TestEnvContentEmpty(t *testing.T) {
 	}
 }
 
+// cpus is a number of CPUs down to docker's hundredth, written bare or quoted; pids_limit is a positive
+// count or -1 for none, and without the key the default.
+func TestParseLimits(t *testing.T) {
+	const routed = "app: demo\nimage: x\nservers: [a]\nports: [{name: w, port: 1, host: h}]\n"
+	for in, want := range map[string]string{
+		"cpus: 0":         "below docker's minimum",
+		"cpus: 0.001":     "not a number of CPUs",
+		"cpus: -1":        "not a number of CPUs",
+		"cpus: 2c":        "not a number of CPUs",
+		"cpus: 1e3":       "not a number of CPUs",
+		"pids_limit: 0":   "pids_limit: 0 must be a positive number, or -1",
+		"pids_limit: -2":  "pids_limit: -2",
+		"pids_limit: lot": "cannot unmarshal",
+	} {
+		if _, err := Parse([]byte(routed + in)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want error containing %q, got %v", in, want, err)
+		}
+	}
+	for in, want := range map[string]struct {
+		cpus string
+		pids int
+	}{
+		"":                            {"", DefaultPidsLimit},
+		"cpus: 0.5":                   {"0.5", DefaultPidsLimit},
+		"cpus: \"2\"\npids_limit: 64": {"2", 64},
+		"cpus: 0.01\npids_limit: -1":  {"0.01", -1},
+	} {
+		cfg, err := Parse([]byte(routed + in))
+		if err != nil {
+			t.Errorf("%q: %v", in, err)
+			continue
+		}
+		if cfg.CPUs != want.cpus || cfg.Pids() != want.pids {
+			t.Errorf("%q: got cpus %q, pids %d; want %+v", in, cfg.CPUs, cfg.Pids(), want)
+		}
+	}
+}
+
 // memory is docker's format narrowed to what cannot be misread, and replace names one of two modes;
 // an app without routes has no handover to overlap, so saying it would is a mistake in the config.
 func TestParseResources(t *testing.T) {

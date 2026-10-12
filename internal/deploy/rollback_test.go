@@ -514,6 +514,44 @@ func TestRollbackRestoresTheCommandOfTheRelease(t *testing.T) {
 	}
 }
 
+// A rollback runs the CPU and pids limits its release recorded; a release recorded before them ran
+// with no CPU cap and comes back with the default pids limit, whatever today's config says.
+func TestRollbackRestoresTheLimitsOfTheRelease(t *testing.T) {
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
+		"cpus":"0.5","pids_limit":64}`
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, " --cpus 0.5 ") || !strings.Contains(run, " --pids-limit 64 ") {
+		t.Errorf("the restored copy must run the recorded limits: %s", run)
+	}
+
+	g := botReleases("healthy")
+	var log strings.Builder
+	if err := Rollback(context.Background(), g, &log, parse(t, noPorts+"cpus: 2\npids_limit: 4096\n"), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := g.calls[g.callAt("docker run")]; strings.Contains(run, "--cpus") || !strings.Contains(run, " --pids-limit 512 ") {
+		t.Errorf("a release recorded without them runs without a CPU cap and with the default pids limit: %s", run)
+	}
+	if !strings.Contains(log.String(), "without a cpus limit") || !strings.Contains(log.String(), "pids limit 512") {
+		t.Errorf("the rollback must say it drops today's limits: %s", log.String())
+	}
+
+	h := botReleases("healthy")
+	h.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
+		"pids_limit":0}`
+	if err := Rollback(context.Background(), h, io.Discard, parse(t, noPorts), "", quick()); err == nil || !strings.Contains(err.Error(), "pids_limit") {
+		t.Errorf("a damaged snapshot must be refused before anything changes: %v", err)
+	}
+	if h.callAt("docker stop") >= 0 || h.callAt("docker run") >= 0 {
+		t.Errorf("nothing may change for a release that cannot be reproduced: %v", h.calls)
+	}
+}
+
 // A rollback brings back the schedules its release had, records the restored copy — a new container
 // under the release's old id — as the serving one, and refuses before anything changes when the
 // release's job commands are gone.
