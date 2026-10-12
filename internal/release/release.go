@@ -46,7 +46,10 @@ import (
 // them would bring a database back unreachable from the servers of its clients. Version 11 added the
 // memory reservation: a boks that drops it would admit the next deploys beside a rolled-back release
 // as if it could still grow to its whole limit, and the release would run without its soft limit.
-const FormatVersion = 11
+// Version 12 added the CPU and pids limits: a boks that drops them would bring a release back with
+// no CPU cap and the default pids limit, whatever it ran with. An older snapshot reads as no CPU cap,
+// and its pids limit is today's config's: it ran with none boks set.
+const FormatVersion = 12
 
 // Snapshot is what a release ran: the image and the digest actually pulled, its ports with their
 // routes (hosts, TLS, the certificate's domains), volumes, network and environment file — enough
@@ -79,6 +82,12 @@ type Snapshot struct {
 	// MemoryReservation is the soft limit the release ran with, which the memory check counts in place
 	// of the limit; empty when it had none, and before version 11.
 	MemoryReservation string `json:"memory_reservation,omitempty"`
+	// CPUs is the CPU cap the release ran with, in the config's format; empty when it had none, and
+	// before version 12.
+	CPUs string `json:"cpus,omitempty"`
+	// PidsLimit is the pids limit the config gave the release; nil when it set none and ran with the
+	// default, and before version 12, when a rollback takes today's config's.
+	PidsLimit *config.WholeNumber `json:"pids_limit,omitempty"`
 	// Replace is the replace mode the release itself asks for — its config's, with the shape filled
 	// in, so an app without routes records stop-first. It is not how the release was put in place:
 	// a release deployed over a stop-first one was put in place stop-first and may still record

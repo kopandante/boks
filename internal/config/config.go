@@ -56,6 +56,8 @@ var (
 	// survives; fractions and suffixes like `MB` or `GiB` are left out because they read as one thing
 	// and mean another depending on who parses them.
 	memoryRe = regexp.MustCompile(`^([1-9][0-9]*)([bkmgBKMG])$`)
+	// cpusRe is a CPU count as docker takes it, down to its precision of a hundredth.
+	cpusRe = regexp.MustCompile(`^(0|[1-9][0-9]{0,2})(\.[0-9]{1,2})?$`)
 	// registryHostRe is a registry as docker names it in an image reference: a lowercase DNS name with
 	// at least one dot, or an IPv4 address, and an optional port. No scheme and no path — the
 	// repository belongs in image.
@@ -72,6 +74,11 @@ var (
 
 // DefaultRegistryUser is the user name Depot's registry takes with a token as the password.
 const DefaultRegistryUser = "x-token"
+
+// DefaultPidsLimit is the pids limit of an app whose config sets none. The busiest containers on the
+// servers boks runs peaked at 89 tasks (grafana; Convex, Postgres and Next.js stay under 60,
+// measured 2026-10-12), so it leaves them several times their peak and still stops a fork bomb.
+const DefaultPidsLimit = 512
 
 // minMemory is the smallest limit docker accepts; below it `docker run` refuses, and it is better
 // to hear that from the config than from a half-done deploy.
@@ -294,6 +301,13 @@ type Config struct {
 	// add up to the whole server. Docker passes it on as a soft limit (memory.low). It needs Memory and
 	// cannot exceed it; empty means the check counts the limit.
 	MemoryReservation string `yaml:"memory_reservation"`
+	// CPUs caps the container's CPU time, in CPUs, as `docker run --cpus` takes it (0.5, 2); empty
+	// means none. It is a quota, not a reservation: a copy over it is slowed, never refused or killed.
+	CPUs string `yaml:"cpus"`
+	// PidsLimit caps the processes and threads the container may hold at once; nil means
+	// DefaultPidsLimit and -1 means none. A fork bomb or a leak of threads in one app otherwise takes
+	// the whole server's pid space.
+	PidsLimit *WholeNumber `yaml:"pids_limit"`
 	// Healthcheck is the container's health check; nil leaves the image's HEALTHCHECK, if any.
 	Healthcheck *Healthcheck `yaml:"healthcheck"`
 	// Command replaces the image's CMD, in exec form: the program, then its arguments, passed as they
@@ -417,6 +431,51 @@ func (c *Config) CheckMemory() error {
 			"the limit the peak it may reach", c.MemoryReservation, c.Memory)
 	}
 	return nil
+}
+
+// CheckLimits checks the CPU and pids limits. It is exported for a rollback, whose snapshot holds
+// both and passed no validation of its own.
+func (c *Config) CheckLimits() error {
+	if c.CPUs != "" {
+		if !cpusRe.MatchString(c.CPUs) {
+			return fmt.Errorf("cpus: %q is not a number of CPUs such as 0.5 or 2", c.CPUs)
+		}
+		if n, _ := strconv.ParseFloat(c.CPUs, 64); n < 0.01 {
+			return fmt.Errorf("cpus: %q is below docker's minimum of 0.01; leave the key out for no limit", c.CPUs)
+		}
+	}
+	if p := c.PidsLimit; p != nil && *p < 1 && *p != -1 {
+		// Docker reads 0 as no limit; here it would read as the default to one reader and as none to
+		// another, so neither is assumed.
+		return fmt.Errorf("pids_limit: %d must be a positive number, or -1 for no limit (leaving the key out means %d)",
+			*p, DefaultPidsLimit)
+	}
+	return nil
+}
+
+// WholeNumber is an integer written as one: YAML would otherwise truncate a fraction into an int
+// field, so `pids_limit: -1.5` would read as -1, no limit.
+type WholeNumber int
+
+func (n *WholeNumber) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!int" {
+		return fmt.Errorf("line %d: %q is not a whole number", node.Line, node.Value)
+	}
+	var v int
+	if err := node.Decode(&v); err != nil {
+		return err
+	}
+	*n = WholeNumber(v)
+	return nil
+}
+
+// Pids is the pids limit the container runs with: the config's, DefaultPidsLimit when it sets
+// none, -1 for none.
+func (c *Config) Pids() int {
+	if c.PidsLimit == nil {
+		return DefaultPidsLimit
+	}
+	return int(*c.PidsLimit)
 }
 
 // MemoryBytes reads a limit written in the format Memory accepts. Empty is no limit, and 0.
@@ -624,6 +683,9 @@ func (c *Config) validate() error {
 
 func (c *Config) validateResources() error {
 	if err := c.CheckMemory(); err != nil {
+		return err
+	}
+	if err := c.CheckLimits(); err != nil {
 		return err
 	}
 	switch c.Replace {

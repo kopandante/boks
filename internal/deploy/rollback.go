@@ -50,6 +50,12 @@ func Rollback(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.C
 		fmt.Fprintf(log, "warning: release %s was recorded without a memory_reservation, so it runs without that soft limit, "+
 			"and the memory check counts its whole limit %s, not the %s today's config reserves\n", id, target.Memory, cfg.MemoryReservation)
 	}
+	if cfg.CPUs != "" && target.CPUs == "" {
+		fmt.Fprintf(log, "warning: release %s was recorded without a cpus limit, so it runs without one; today's config asks for %s\n", id, cfg.CPUs)
+	}
+	if cfg.Pids() != target.Pids() {
+		fmt.Fprintf(log, "warning: release %s runs with the pids limit %d it was recorded with, not the %d of today's config\n", id, target.Pids(), cfg.Pids())
+	}
 	// The release runs as it was recorded, not with today's command: say so when that falls back to
 	// the image's own. The command itself is not printed — it can carry a secret.
 	if len(cfg.Command) > 0 && len(target.Command) == 0 {
@@ -106,6 +112,13 @@ func restored(cfg *config.Config, snapshot *release.Snapshot) *config.Config {
 	// So is the reservation under it.
 	target.Memory = snapshot.Memory
 	target.MemoryReservation = snapshot.MemoryReservation
+	// And the CPU and pids limits: a release recorded without a CPU cap ran without one. A snapshot
+	// from before version 12 says nothing of pids, and the release ran with no limit boks set: it comes
+	// back with today's config's, which an app that needs more has already lifted.
+	target.CPUs = snapshot.CPUs
+	if snapshot.Version >= 12 {
+		target.PidsLimit = snapshot.PidsLimit
+	}
 	// So is the health check: one the release did not record ran with the image's own.
 	target.Healthcheck = snapshot.Healthcheck
 	// And the command and stop signal: one the release did not record ran with the image's own.
@@ -158,6 +171,9 @@ func CheckRollback(ctx context.Context, r remote.Runner, cfg *config.Config, id 
 		if state != "" && kind != proxy.Kind {
 			return "", proxy.NotCaddy()
 		}
+	}
+	if err := CheckCPUs(ctx, r, target); err != nil {
+		return "", err
 	}
 	if target.Memory == "" {
 		return id, nil
@@ -223,6 +239,10 @@ func reproducible(ctx context.Context, r remote.Runner, cfg *config.Config, id s
 		if err := restored(cfg, snapshot).CheckMemory(); err != nil {
 			return "", nil, fmt.Errorf("release %s cannot be reproduced: %w", id, err)
 		}
+	}
+	// The CPU and pids limits, likewise: docker refuses a bad one only at `docker run`.
+	if err := restored(cfg, snapshot).CheckLimits(); err != nil {
+		return "", nil, fmt.Errorf("release %s cannot be reproduced: %w", id, err)
 	}
 	// A connection that drops is not a missing file: only an answer from the server says it is gone.
 	if snapshot.EnvPath != "" {

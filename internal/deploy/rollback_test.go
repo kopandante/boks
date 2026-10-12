@@ -334,6 +334,18 @@ func TestCheckRollbackChangesNothing(t *testing.T) {
 	}
 }
 
+// The check refuses a release whose CPU cap this server cannot give, so a rollback over several
+// servers stops before the first one moves.
+func TestCheckRollbackRefusesMoreCPUsThanTheServerHas(t *testing.T) {
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env","cpus":"4"}`
+	f.out[ncpu] = "2"
+	if _, err := CheckRollback(context.Background(), f, parse(t, noPorts), ""); err == nil || !strings.Contains(err.Error(), "more than the 2 CPUs") {
+		t.Errorf("want the refusal, got %v", err)
+	}
+}
+
 // A server still on kamal-proxy refuses a rollback with routes partway through: the check asks first,
 // so a rollback over several servers does not leave the earlier ones on another release.
 func TestCheckRollbackAsksForTheMigration(t *testing.T) {
@@ -511,6 +523,63 @@ func TestRollbackRestoresTheCommandOfTheRelease(t *testing.T) {
 	}
 	if run := g.calls[g.callAt("docker run")]; !strings.HasSuffix(run, "ghcr.io/x/bot@sha256:old") || strings.Contains(run, "--stop-signal") {
 		t.Errorf("a release recorded without them runs the image's own, not today's: %s", run)
+	}
+}
+
+// A rollback runs the CPU and pids limits its release recorded.
+func TestRollbackRestoresTheLimitsOfTheRelease(t *testing.T) {
+	f := botReleases("healthy")
+	f.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
+		"cpus":"0.5","pids_limit":64}`
+	f.out[ncpu] = "1"
+	if err := Rollback(context.Background(), f, io.Discard, parse(t, noPorts), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := f.calls[f.callAt("docker run")]; !strings.Contains(run, " --cpus 0.5 ") || !strings.Contains(run, " --pids-limit 64 ") {
+		t.Errorf("the restored copy must run the recorded limits: %s", run)
+	}
+
+	// A release recorded before the limits (format 11) ran with no CPU cap and with no pids limit boks
+	// set: it comes back without the cap, and with today's pids limit, which an app that needs more has
+	// already lifted.
+	g := botReleases("healthy")
+	g.out[ncpu] = "4"
+	var log strings.Builder
+	if err := Rollback(context.Background(), g, &log, parse(t, noPorts+"cpus: 2\npids_limit: 4096\n"), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := g.calls[g.callAt("docker run")]; strings.Contains(run, "--cpus") || !strings.Contains(run, " --pids-limit 4096 ") {
+		t.Errorf("a release recorded before the limits runs without a CPU cap and with today's pids limit: %s", run)
+	}
+	if !strings.Contains(log.String(), "without a cpus limit") || strings.Contains(log.String(), "pids limit") {
+		t.Errorf("the rollback must say it drops today's CPU cap, and nothing of pids: %s", log.String())
+	}
+
+	// A format 12 release recorded without a pids limit ran with the default, and comes back with it.
+	k := botReleases("healthy")
+	k.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env"}`
+	log.Reset()
+	if err := Rollback(context.Background(), k, &log, parse(t, noPorts+"pids_limit: 4096\n"), "", quick()); err != nil {
+		t.Fatal(err)
+	}
+	if run := k.calls[k.callAt("docker run")]; !strings.Contains(run, " --pids-limit 512 ") {
+		t.Errorf("a release recorded with the default comes back with it: %s", run)
+	}
+	if !strings.Contains(log.String(), "pids limit 512 it was recorded with, not the 4096") {
+		t.Errorf("the rollback must say it drops today's pids limit: %s", log.String())
+	}
+
+	h := botReleases("healthy")
+	h.out["cat .boks/bot/releases/bot-v1-1.json"] = `{"version":12,"id":"bot-v1-1","app":"bot","image":"ghcr.io/x/bot","tag":"v1",
+		"digest":"sha256:old","ports":[],"networks":[{"name":"boks-bot","aliases":["bot"]}],"env_path":".boks/bot/bot-v1-1.env",
+		"pids_limit":0}`
+	if err := Rollback(context.Background(), h, io.Discard, parse(t, noPorts), "", quick()); err == nil || !strings.Contains(err.Error(), "pids_limit") {
+		t.Errorf("a damaged snapshot must be refused before anything changes: %v", err)
+	}
+	if h.callAt("docker stop") >= 0 || h.callAt("docker run") >= 0 {
+		t.Errorf("nothing may change for a release that cannot be reproduced: %v", h.calls)
 	}
 }
 

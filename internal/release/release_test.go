@@ -456,3 +456,23 @@ func TestSnapshotKeepsTheMemoryReservation(t *testing.T) {
 		t.Errorf("reservation lost: %+v", got)
 	}
 }
+
+func TestSnapshotKeepsTheLimits(t *testing.T) {
+	f := newFake()
+	pids := config.WholeNumber(64)
+	if err := Save(context.Background(), f, Snapshot{ID: "web-v2-2", App: "web", CPUs: "0.5", PidsLimit: &pids}); err != nil {
+		t.Fatal(err)
+	}
+	body := f.writes[".boks/web/releases/web-v2-2.json"]
+	if !strings.Contains(body, `"cpus": "0.5"`) || !strings.Contains(body, `"pids_limit": 64`) {
+		t.Errorf("the snapshot must name the limits by their json fields: %s", body)
+	}
+	f.out["cat .boks/web/releases/web-v2-2.json"] = body
+	got, err := Load(context.Background(), f, "web", "web-v2-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CPUs != "0.5" || got.PidsLimit == nil || *got.PidsLimit != 64 {
+		t.Errorf("limits lost: %+v", got)
+	}
+}
