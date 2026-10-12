@@ -306,9 +306,10 @@ func Probe(ctx context.Context, r remote.Runner, target string, port int, health
 const probeMark = "boks-probe "
 
 func probeScript(url string) string {
-	// -q first: no curlrc. No -L: a redirect is the answer. The body is read to /dev/null within the
+	// -q first: no curlrc. No -L: a redirect is the answer. -g: the path is sent as written, brackets
+	// and braces included, not expanded as curl's URL globs. The body is read to /dev/null within the
 	// bound; only the -w line and curl's own error come back.
-	return "curl -q -sS -o /dev/null --max-time 5 -w " + remote.Quote(`\n`+probeMark+`%{http_code} %{exitcode}\n`) +
+	return "curl -q -g -sS -o /dev/null --max-time 5 -w " + remote.Quote(`\n`+probeMark+`%{http_code} %{exitcode}\n`) +
 		" " + remote.Quote(url) + " 2>&1; true"
 }
 

@@ -129,7 +129,7 @@ const (
 	migrateReq = "docker exec boks-proxy cat /proc/sys/net/ipv4/tcp_migrate_req"
 	proxyImage = "sh -c docker inspect -f '{{.Config.Image}}' boks-proxy 2>/dev/null || true"
 	upstreams  = "docker exec boks-proxy wget -q -O - http://127.0.0.1:2019/reverse_proxy/upstreams"
-	probe      = "docker exec boks-proxy sh -c curl -q -sS -o /dev/null --max-time 5 -w '\\nboks-probe %{http_code} %{exitcode}\\n' '"
+	probe      = "docker exec boks-proxy sh -c curl -q -g -sS -o /dev/null --max-time 5 -w '\\nboks-probe %{http_code} %{exitcode}\\n' '"
 	probeEnd   = "' 2>&1; true"
 	reloadVia  = "docker exec boks-proxy caddy reload --config /etc/boks/caddy.next.json"
 	caddyUp    = "running\tcaddy"

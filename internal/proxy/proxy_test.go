@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -376,7 +377,7 @@ func TestBootCancelsACallThatHangs(t *testing.T) {
 // A health check is asked from inside the proxy, by the name and port the route will dial, with a
 // bound of its own, and never follows a redirect.
 func TestProbe(t *testing.T) {
-	const cmd = "docker exec boks-proxy sh -c curl -q -sS -o /dev/null --max-time 5 -w '\\nboks-probe %{http_code} %{exitcode}\\n' 'http://demo-v2-1:3000/up' 2>&1; true"
+	const cmd = "docker exec boks-proxy sh -c curl -q -g -sS -o /dev/null --max-time 5 -w '\\nboks-probe %{http_code} %{exitcode}\\n' 'http://demo-v2-1:3000/up' 2>&1; true"
 	f := &fake{out: map[string]string{cmd: "\nboks-probe 200 0\n"}}
 	if err := Probe(context.Background(), f, "demo-v2-1", 3000, "/up"); err != nil {
 		t.Fatal(err)
@@ -443,6 +444,24 @@ func TestProbeAgainstHostileContainer(t *testing.T) {
 	}
 	if n := reached.Load(); n != 0 {
 		t.Errorf("the probe followed the redirect: the target was asked %d times", n)
+	}
+
+	// The path goes out as written: curl's URL globs would turn braces into several requests and
+	// refuse brackets.
+	var asked []string
+	var mu sync.Mutex
+	literal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Path+"?"+r.URL.RawQuery)
+		mu.Unlock()
+	}))
+	defer literal.Close()
+	host, port = hostPort(t, literal.URL)
+	if err := Probe(context.Background(), &local{}, host, port, "/up/{a,b}?q[]=1"); err != nil {
+		t.Errorf("a path with braces and brackets: %v", err)
+	}
+	if len(asked) != 1 || asked[0] != "/up/{a,b}?q[]=1" {
+		t.Errorf("want the path asked once, as written: %q", asked)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
