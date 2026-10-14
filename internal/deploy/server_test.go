@@ -349,6 +349,19 @@ func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
 	if err := CheckServerRollback(context.Background(), g, 3); err != nil {
 		t.Errorf("want the rollback taken on the image with the handler: %v", err)
 	}
+
+	// A stopped proxy is asked through its image: the boot after the apply starts it as it is.
+	h := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
+	h.out["docker ps -a --filter name=^boks-proxy$"] = "exited\tcaddy"
+	h.out[proxyImage] = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d"
+	h.out["docker run --rm --entrypoint caddy ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d list-modules"] = "http.handlers.forward_proxy"
+	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "no ban handler") {
+		t.Errorf("want a stopped proxy whose image lacks the handler refused: %v", err)
+	}
+	h.out["docker run --rm --entrypoint caddy ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d list-modules"] = "http.handlers.boks_ban"
+	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err != nil {
+		t.Errorf("want a stopped proxy whose image has the handler taken: %v", err)
+	}
 }
 
 // Status reports the policy even when the running proxy cannot be compared with it.
