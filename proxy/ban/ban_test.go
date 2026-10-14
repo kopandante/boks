@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -35,6 +36,19 @@ func (s *store) len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.entries)
+}
+
+// counters are the rules a has a count for, with the count: name → count.
+func (s *store) counters(a string) map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]int{}
+	if e := s.entries[netip.MustParseAddr(a)]; e != nil {
+		for _, c := range e.counters {
+			out[c.rule] = int(c.count)
+		}
+	}
+	return out
 }
 
 // fixture swaps the shared store for one on a hand-moved clock, as the process's would be.
@@ -122,8 +136,8 @@ func TestTheRequestPastTheLimitBans(t *testing.T) {
 	}
 	e := logs.All()[0]
 	f := e.ContextMap()
-	if e.Level != zap.WarnLevel || f["ip"] != "217.81.103.213" || f["host"] != "cars.dbauto.kr" || f["count"] != int64(301) ||
-		f["until"] != "2026-10-15T01:47:00Z" {
+	if e.Level != zap.WarnLevel || f["ip"] != "217.81.103.213" || f["host"] != "cars.dbauto.kr" || f["rule"] != "default" ||
+		f["count"] != int64(301) || f["window"] != "1m0s" || f["until"] != "2026-10-15T01:47:00Z" {
 		t.Errorf("log line: %s %v", e.Level, f)
 	}
 }
@@ -360,19 +374,31 @@ func TestValidateRefuses(t *testing.T) {
 		`{"limit": 0, "window": "1m", "duration": "1h"}`,
 		`{"limit": 1, "duration": "1h"}`,
 		`{"limit": 1, "window": "1m"}`,
+		`{"rules": [], "duration": "1h"}`,
+		`{"limit": 1, "window": "1m", "rules": [{"name": "a", "limit": 1, "window": "1m"}], "duration": "1h"}`,
+		`{"rules": [{"limit": 1, "window": "1m"}], "duration": "1h"}`,
+		`{"rules": [{"name": "a", "limit": 1, "window": "1m"}, {"name": "a", "limit": 2, "window": "1m"}], "duration": "1h"}`,
+		`{"rules": [{"name": "a", "limit": 0, "window": "1m"}], "duration": "1h"}`,
+		`{"rules": [{"name": "a", "limit": 1}], "duration": "1h"}`,
+		`{"rules": [{"name": "a", "limit": 1, "window": "1m", "class": "pages"}], "duration": "1h"}`,
+		`{"limit": 1, "window": "1m", "duration": "1h", "heuristics": {"mode": "block"}}`,
+		`{"limit": 1, "window": "1m", "duration": "1h", "heuristics": {"mode": "log", "cluster": {"window": "1m", "min_addresses": 2}}}`,
+		`{"limit": 1, "window": "1m", "duration": "1h", "heuristics": {"mode": "ban", "cluster": {"limit": 1, "min_addresses": 2}}}`,
+		`{"limit": 1, "window": "1m", "duration": "1h", "heuristics": {"mode": "ban", "cluster": {"limit": 1, "window": "1m", "min_addresses": 101}}}`,
 	} {
 		var h Handler
 		if err := json.Unmarshal([]byte(c), &h); err != nil {
 			t.Fatal(err)
 		}
-		h.MaxTracked = 1
+		h.MaxTracked, h.MaxFingerprints = 1, 1
 		if err := h.Validate(); err == nil {
 			t.Errorf("%s: want refused", c)
 		}
 	}
 	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
 	defer cancel()
-	for _, c := range []Handler{{ExemptPaths: []string{"("}}, {ExemptRanges: []string{"10.0.0.1"}}} {
+	for _, c := range []Handler{{ExemptPaths: []string{"("}}, {ExemptRanges: []string{"10.0.0.1"}},
+		{Rules: []Rule{{Name: "a", Limit: 1, Window: caddy.Duration(time.Minute), Paths: []string{"("}}}}} {
 		if err := c.Provision(ctx); err == nil {
 			t.Errorf("%+v: want refused", c)
 		}
@@ -391,5 +417,142 @@ func TestPrivateRanges(t *testing.T) {
 		if h.exemptAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s: want counted", s)
 		}
+	}
+}
+
+// rules is the ban the plan sets for hb-sites, small enough to count by hand: two windows over
+// everything, one over pages, one over the API, and one over a path whatever its Sec-Fetch-Dest.
+const rules = `{"duration": "24h", "rules": [
+	{"name": "all-1m", "limit": 5, "window": "1m"},
+	{"name": "all-10m", "limit": 8, "window": "10m", "class": "all"},
+	{"name": "pages", "limit": 3, "window": "1m", "class": "page"},
+	{"name": "api", "limit": 4, "window": "1m", "class": "api"},
+	{"name": "pics", "limit": 2, "window": "1m", "paths": ["^/pics/"]}]}`
+
+// Each rule counts and bans on its own: four a minute pass the minute's rule, and the ninth in ten
+// minutes is past the ten minutes', which outlives the minute's sweeps; the journal names the rule.
+func TestEachRuleBansOnItsOwn(t *testing.T) {
+	c := fixture(t)
+	h, logs := provisioned(t, rules)
+	const ip = "198.51.100.7"
+	for minute := range 2 {
+		for i := range 4 {
+			if code := serve(t, h, request(ip, fmt.Sprintf("/api/encar/%d", i))); code != 200 {
+				t.Fatalf("minute %d, request %d: %d", minute, i, code)
+			}
+		}
+		c.add(time.Minute)
+		serve(t, h, request("192.0.2.1", "/")) // another address's request runs the minute's sweep
+	}
+	if got := shared.counters(ip); !maps.Equal(got, map[string]int{"all-10m": 8}) {
+		t.Fatalf("want the ten minutes' count kept past the sweeps, the minute's swept: %v", got)
+	}
+	if code := serve(t, h, request(ip, "/api/encar/9")); code != 403 {
+		t.Fatalf("the ninth in ten minutes: want 403, got %d", code)
+	}
+	if logs.Len() != 1 || logs.All()[0].ContextMap()["rule"] != "all-10m" || logs.All()[0].ContextMap()["count"] != int64(9) ||
+		logs.All()[0].ContextMap()["window"] != "10m0s" {
+		t.Errorf("want the ban logged with its rule: %v", logs.All())
+	}
+	// The ban is the address's on every host, whatever rule started it.
+	r := request(ip, "/")
+	r.Host = "autogroup.kr"
+	if code := serve(t, h, r); code != 403 {
+		t.Errorf("another host: want the ban held, got %d", code)
+	}
+	// One minute's rule alone bans too: the sixth request of a minute.
+	for i := range 5 {
+		if code := serve(t, h, request("198.51.100.8", fmt.Sprintf("/api/encar/%d", i))); code != 200 && i < 4 {
+			t.Fatalf("request %d: %d", i, code)
+		}
+	}
+	if f := logs.All()[logs.Len()-1].ContextMap(); f["ip"] != "198.51.100.8" || f["rule"] != "api" {
+		t.Errorf("want the fifth api request a minute banned by api: %v", f)
+	}
+}
+
+// What each class counts: page is a GET outside /api/ that is no prefetch; api is under /api/,
+// whatever Sec-Fetch-Dest it claims; all and page leave a page's subresources out, a rule on paths
+// counts its paths whatever they claim.
+func TestClassesCountTheirOwn(t *testing.T) {
+	fixture(t)
+	h, _ := provisioned(t, rules)
+	post := func(ip, p string) *http.Request {
+		r := request(ip, p)
+		r.Method = http.MethodPost
+		return r
+	}
+	for _, c := range []struct {
+		r    *http.Request
+		want map[string]int
+	}{
+		{request("198.51.100.1", "/en/encar/1"), map[string]int{"all-1m": 1, "all-10m": 1, "pages": 1}},
+		{request("198.51.100.2", "/en/encar/1", "Next-Router-Prefetch", "1", "RSC", "1"), map[string]int{"all-1m": 1, "all-10m": 1}},
+		{request("198.51.100.3", "/en/encar/1", "RSC", "1"), map[string]int{"all-1m": 1, "all-10m": 1, "pages": 1}},
+		{post("198.51.100.4", "/en/encar/1"), map[string]int{"all-1m": 1, "all-10m": 1}},
+		{request("198.51.100.5", "/api/encar/info/1"), map[string]int{"all-1m": 1, "all-10m": 1, "api": 1}},
+		{request("198.51.100.6", "/api"), map[string]int{"all-1m": 1, "all-10m": 1, "api": 1}},
+		{request("198.51.100.7", "/apis/x"), map[string]int{"all-1m": 1, "all-10m": 1, "pages": 1}},
+		{request("198.51.100.8", "/api/encar/info/1", "Sec-Fetch-Dest", "image"), map[string]int{"api": 1}},
+		{request("198.51.100.9", "/pics/1.jpg", "Sec-Fetch-Dest", "image"), map[string]int{"pics": 1}},
+		{request("198.51.100.10", "/pics/1.jpg"), map[string]int{"all-1m": 1, "all-10m": 1, "pages": 1, "pics": 1}},
+		{request("198.51.100.11", "/en/x.css", "Sec-Fetch-Dest", "style"), map[string]int{}},
+		{request("198.51.100.12", "/_next/static/a.js"), map[string]int{}},
+		// Cleaned: dot segments do not take a page under /api/ or out of it.
+		{request("198.51.100.13", "/api/../en/encar/1"), map[string]int{"all-1m": 1, "all-10m": 1, "pages": 1}},
+	} {
+		if code := serve(t, h, c.r); code != 200 {
+			t.Fatalf("%s: %d", c.r.URL.Path, code)
+		}
+		ip, _ := clientAddr(c.r)
+		if got := shared.counters(ip.String()); !maps.Equal(got, c.want) {
+			t.Errorf("%s %s %v: want %v, got %v", c.r.Method, c.r.URL.Path, c.r.Header, c.want, got)
+		}
+	}
+}
+
+// A reload with other rules: a rule kept as it was keeps its count; one whose window or limit
+// changed starts again; one removed is dropped at the next sweep. A ban outlives any of it, rules
+// gone included, and provisioning changes nothing of the shared state.
+func TestAReloadWithOtherRules(t *testing.T) {
+	c := fixture(t)
+	before, _ := provisioned(t, `{"duration": "24h", "rules": [
+		{"name": "kept", "limit": 10, "window": "10m"}, {"name": "changed", "limit": 10, "window": "10m"},
+		{"name": "relimited", "limit": 10, "window": "10m"}, {"name": "gone", "limit": 10, "window": "10m"}]}`)
+	for range 3 {
+		serve(t, before, request("198.51.100.7", "/"))
+	}
+	banner, _ := provisioned(t, `{"duration": "24h", "rules": [{"name": "strict", "limit": 1, "window": "1m"}]}`)
+	serve(t, banner, request("198.51.100.9", "/"))
+	serve(t, banner, request("198.51.100.9", "/"))
+
+	store, entries := shared, shared.len()
+	after, _ := provisioned(t, `{"duration": "24h", "rules": [
+		{"name": "kept", "limit": 10, "window": "10m"}, {"name": "changed", "limit": 10, "window": "5m"},
+		{"name": "relimited", "limit": 20, "window": "10m"}, {"name": "new", "limit": 10, "window": "1m"}]}`)
+	if shared != store || shared.len() != entries || shared.counters("198.51.100.7")["gone"] != 3 {
+		t.Fatal("want provisioning to leave the shared state as it was")
+	}
+	serve(t, after, request("198.51.100.7", "/"))
+	if got := shared.counters("198.51.100.7"); got["kept"] != 4 || got["changed"] != 1 || got["relimited"] != 1 || got["new"] != 1 || got["gone"] != 3 {
+		t.Errorf("after the reload: %v", got)
+	}
+	c.add(time.Minute)
+	serve(t, after, request("192.0.2.1", "/")) // the sweep
+	if got := shared.counters("198.51.100.7"); got["gone"] != 0 || got["kept"] != 4 || len(got) != 3 {
+		t.Errorf("want the removed rule's count swept, the rest kept: %v", got)
+	}
+	if code := serve(t, after, request("198.51.100.9", "/")); code != 403 {
+		t.Errorf("want the ban kept though its rule is gone: %d", code)
+	}
+}
+
+func TestAPolicyOfFormat6RunsAsTheRuleDefault(t *testing.T) {
+	fixture(t)
+	h, _ := provisioned(t, `{"limit": 2, "window": "1m", "duration": "1h"}`)
+	serve(t, h, request("198.51.100.7", "/api/x", "Sec-Fetch-Dest", "image")) // left out, as by class all
+	serve(t, h, request("198.51.100.7", "/api/x"))
+	if got := shared.counters("198.51.100.7"); !maps.Equal(got, map[string]int{"default": 1}) {
+		t.Errorf("want one rule, default, of class all: %v", got)
 	}
 }
