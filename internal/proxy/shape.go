@@ -150,6 +150,21 @@ func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
 	if err := loadSecret(ctx, r, &p); err != nil {
 		return err
 	}
+	return checkModule(ctx, r, "http.handlers.forward_proxy", "no forward proxy")
+}
+
+// CheckBan refuses, before anything changes, a ban the running proxy has no handler for: Caddy would
+// refuse the config, and with it the reload of every deploy on the server after the apply.
+func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
+	if p.Ban == nil {
+		return nil
+	}
+	return checkModule(ctx, r, "http.handlers.boks_ban", "no ban handler")
+}
+
+// checkModule refuses a running proxy whose Caddy lacks module. A proxy that is not running is left
+// to the boot or the upgrade that starts it, which asks its image to validate the config.
+func checkModule(ctx context.Context, r remote.Runner, module, lacks string) error {
 	state, kind, err := State(ctx, r)
 	if err != nil || state != "running" || kind != Kind {
 		return err
@@ -158,12 +173,12 @@ func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
 	if err != nil {
 		return fmt.Errorf("asking the proxy for its modules: %w", err)
 	}
-	if !slices.Contains(strings.Fields(mods), "http.handlers.forward_proxy") {
+	if !slices.Contains(strings.Fields(mods), module) {
 		image, err := Image(ctx, r)
 		if err != nil {
 			return err
 		}
-		return fmt.Errorf("the proxy runs %s, which has no forward proxy; `boks proxy upgrade` with boks's own image first, then apply again", image)
+		return fmt.Errorf("the proxy runs %s, which has %s; `boks proxy upgrade` with boks's own image first, then apply again", image, lacks)
 	}
 	return nil
 }

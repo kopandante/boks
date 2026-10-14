@@ -14,6 +14,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -34,7 +35,39 @@ type Server struct {
 	// X-Forwarded-For it brings, with the proxy's address added after it. Without any, boks trusts no
 	// one, and every app sees the address of the connection (#48).
 	TrustedProxies []string `yaml:"trusted_proxies"`
+	// Ban, when given, has the proxy refuse an address that sends too many requests: 403 on every host
+	// of the server for a while, without the request reaching any app.
+	Ban *Ban `yaml:"ban"`
 }
+
+// Ban is the ban by request rate. An address that sends more than Limit requests within Window — on
+// all the server's hosts together — gets 403 for Duration. Not counted: loopback and the private
+// networks, what bots.allow lets through, Next.js's /_next/, a page's images, media, fonts, styles
+// and scripts by Sec-Fetch-Dest, ACME's challenge, and ExemptPaths and ExemptRanges.
+type Ban struct {
+	// Limit is 300 when not given.
+	Limit int `yaml:"limit"`
+	// Window is 1m when not given; Duration 24h. Go durations, in whole seconds.
+	Window   string `yaml:"window"`
+	Duration string `yaml:"duration"`
+	// ExemptPaths are regular expressions on the request's path, such as ^/api/[a-z]+/pics.
+	ExemptPaths []string `yaml:"exempt_paths"`
+	// ExemptRanges are addresses or CIDR ranges, such as a client's office.
+	ExemptRanges []string `yaml:"exempt_ranges"`
+}
+
+// The ban's defaults and bounds. A window past an hour or a ban past 30 days is a typo more often
+// than a policy, and both are memory the proxy holds per address.
+const (
+	DefaultBanLimit    = 300
+	DefaultBanWindow   = "1m"
+	DefaultBanDuration = "24h"
+	maxBanWindow       = time.Hour
+	maxBanDuration     = 30 * 24 * time.Hour
+)
+
+// ExemptPrefixes are ExemptRanges as CIDR ranges, as Prefixes are an egress's Allow.
+func (b *Ban) ExemptPrefixes() []netip.Prefix { return prefixes(b.ExemptRanges) }
 
 // Egress is the forward proxy the server's Caddy runs on a port of its own.
 type Egress struct {
@@ -96,6 +129,19 @@ func checkRanges(list []string, whom string) error {
 		}
 		if p.Bits() == 0 {
 			return fmt.Errorf("%q lets every address in; name the %s", a, whom)
+		}
+	}
+	return nil
+}
+
+// checkWrittenAsIPv4 refuses an IPv4 address written as IPv6 (::ffff:a.b.c.d): an IPv4 client
+// connects as an IPv4 address, and Caddy compares it with IPv4 ranges only, so the entry would be
+// applied and match no one. Told by the address as written: masked to a short prefix, it would lose
+// the ::ffff.
+func checkWrittenAsIPv4(list []string) error {
+	for _, a := range list {
+		if p, _ := rangeOf(a); p.Addr().Is4In6() {
+			return fmt.Errorf("%q is an IPv4 address written as IPv6; write it as IPv4", a)
 		}
 	}
 	return nil
@@ -187,7 +233,7 @@ func (s *Server) validate() error {
 	}
 	// A file of servers alone — what `boks server install` reads — has no policy to number. One with a
 	// policy needs its revision, and `boks server apply` asks for one either way.
-	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0) {
+	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0 || s.Ban != nil) {
 		return errors.New("revision: required, a whole number from 1 that grows by one with every edit")
 	}
 	if s.Egress != nil {
@@ -195,17 +241,17 @@ func (s *Server) validate() error {
 			return fmt.Errorf("egress: %w", err)
 		}
 	}
+	if s.Ban != nil {
+		if err := s.Ban.validate(); err != nil {
+			return fmt.Errorf("ban: %w", err)
+		}
+	}
 	// Trusting everyone hands every app the address a visitor writes into X-Forwarded-For.
 	if err := checkRanges(s.TrustedProxies, "proxies in front of boks"); err != nil {
 		return fmt.Errorf("trusted_proxies: %w", err)
 	}
-	// An IPv4 proxy connects as an IPv4 address, and Caddy compares it with IPv4 ranges only: written
-	// as IPv6 (::ffff:a.b.c.d), the entry would be applied and trust no one. Told by the address as
-	// written: masked to a short prefix, it would lose the ::ffff.
-	for _, a := range s.TrustedProxies {
-		if p, _ := rangeOf(a); p.Addr().Is4In6() {
-			return fmt.Errorf("trusted_proxies: %q is an IPv4 address written as IPv6; write it as IPv4", a)
-		}
+	if err := checkWrittenAsIPv4(s.TrustedProxies); err != nil {
+		return fmt.Errorf("trusted_proxies: %w", err)
 	}
 	names := map[string]bool{}
 	for i, b := range s.Bots.Block {
@@ -294,6 +340,73 @@ func (e *Egress) validate() error {
 }
 
 var egressUserRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// validate fills in the defaults and writes the durations one way, so the same ban is the same
+// policy whatever its file wrote (60s and 1m).
+func (b *Ban) validate() error {
+	if b.Limit == 0 {
+		b.Limit = DefaultBanLimit
+	}
+	if b.Window == "" {
+		b.Window = DefaultBanWindow
+	}
+	if b.Duration == "" {
+		b.Duration = DefaultBanDuration
+	}
+	if b.Limit < 1 {
+		return fmt.Errorf("limit %d: must be at least 1", b.Limit)
+	}
+	window, err := banDuration("window", b.Window, maxBanWindow)
+	if err != nil {
+		return err
+	}
+	duration, err := banDuration("duration", b.Duration, maxBanDuration)
+	if err != nil {
+		return err
+	}
+	b.Window, b.Duration = formatDuration(window), formatDuration(duration)
+	for _, p := range b.ExemptPaths {
+		if p == "" {
+			return errors.New("exempt_paths: an empty pattern matches every path, and would turn the ban off")
+		}
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("exempt_paths: %q is not a regular expression: %w", p, err)
+		}
+	}
+	if err := checkRanges(b.ExemptRanges, "addresses to leave uncounted"); err != nil {
+		return fmt.Errorf("exempt_ranges: %w", err)
+	}
+	if err := checkWrittenAsIPv4(b.ExemptRanges); err != nil {
+		return fmt.Errorf("exempt_ranges: %w", err)
+	}
+	return nil
+}
+
+// banDuration reads a ban's duration: whole seconds, from one second to max.
+func banDuration(key, s string, max time.Duration) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	switch {
+	case err != nil:
+		return 0, fmt.Errorf("%s: %q is not a duration such as 1m or 24h", key, s)
+	case d < time.Second || d%time.Second != 0:
+		return 0, fmt.Errorf("%s: %s must be whole seconds, at least 1s", key, s)
+	case d > max:
+		return 0, fmt.Errorf("%s: %s is longer than %s", key, s, formatDuration(max))
+	}
+	return d, nil
+}
+
+// formatDuration is d as Go writes it, without the zero units it ends in: 1m, 24h, 1h30m.
+func formatDuration(d time.Duration) string {
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
 
 // checkUserAgent compiles a pattern as Caddy will: both are Go's RE2, so what compiles here compiles there.
 func checkUserAgent(p string) error {

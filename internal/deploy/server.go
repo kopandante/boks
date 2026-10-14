@@ -61,6 +61,9 @@ func CheckApply(ctx context.Context, r remote.Runner, next proxy.Policy) error {
 	if err := CheckRevision(cur, next); err != nil {
 		return err
 	}
+	if err := proxy.CheckBan(ctx, r, next); err != nil {
+		return err
+	}
 	return proxy.CheckEgress(ctx, r, next)
 }
 
@@ -86,6 +89,9 @@ func CheckServerRollback(ctx context.Context, r remote.Runner, rev int) error {
 	}
 	p, err := policyOfRevision(ctx, r, rev)
 	if err != nil {
+		return err
+	}
+	if err := proxy.CheckBan(ctx, r, p); err != nil {
 		return err
 	}
 	return proxy.CheckEgress(ctx, r, p)
@@ -157,6 +163,9 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	}
 	if len(next.TrustedProxies) > 0 {
 		fmt.Fprintf(log, "  X-Forwarded-For trusted from %s\n", strings.Join(next.TrustedProxies, ", "))
+	}
+	if b := next.Ban; b != nil {
+		fmt.Fprintf(log, "  %s\n", b)
 	}
 	if !running {
 		fmt.Fprintf(log, "  %s is not running on this server: nothing is filtered until it starts and loads this policy\n", proxy.Container)
