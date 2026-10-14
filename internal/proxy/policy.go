@@ -86,7 +86,7 @@ type BanCluster struct {
 	MinAddresses int    `json:"min_addresses"`
 }
 
-// rules are the rules the handler runs: a ban of format 6 is its one limit as the rule default.
+// rules are the ban's rules, a ban of format 6 its one limit as the rule default.
 func (b *Ban) rules() []BanRule {
 	if len(b.Rules) > 0 || b.Limit == 0 {
 		return b.Rules
@@ -151,9 +151,20 @@ func egressSecretPath() string   { return path.Join(ServerDir, "egress.secret") 
 func historyPath(rev int) string { return path.Join(ServerDir, "history", strconv.Itoa(rev)+".json") }
 
 // SamePolicy says whether two policies filter alike, whatever their revisions.
+// A ban of format 6 is compared as its one rule: the same server.yml validates to that rule today.
 func SamePolicy(a, b Policy) bool {
 	a.Revision, a.Floor, b.Revision, b.Floor = 0, 0, 0, 0
-	return bytes.Equal(marshal(a), marshal(b))
+	return bytes.Equal(marshal(asRules(a)), marshal(asRules(b)))
+}
+
+// asRules is p with a ban of format 6 written as its rule default.
+func asRules(p Policy) Policy {
+	if b := p.Ban; b != nil && len(b.Rules) == 0 && b.Limit != 0 {
+		r := *b
+		r.Rules, r.Limit, r.Window = r.rules(), 0, ""
+		p.Ban = &r
+	}
+	return p
 }
 
 func marshal(p Policy) []byte {
@@ -267,8 +278,11 @@ func allowed(p Policy) []match {
 // `not`, as they do for the blocks, so the ban counts and refuses none of what they let through; the
 // handler leaves out the rest (private networks, /_next/, subresources, the exempt paths).
 func banRoute(b Ban, p Policy) caddyRoute {
-	return caddyRoute{Match: []match{{Not: allowed(p)}}, Handle: []handler{{Handler: "boks_ban", Rules: b.rules(),
-		Heuristics: b.Heuristics, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges}}}
+	// A ban of format 6 goes to the handler in its own form, which ban3 and every later handler take:
+	// as rules, it would be refused by the ban3 a server runs until its proxy is upgraded — every
+	// deploy's reload, and the upgrade's own.
+	return caddyRoute{Match: []match{{Not: allowed(p)}}, Handle: []handler{{Handler: "boks_ban", Limit: b.Limit, Window: b.Window,
+		Rules: b.Rules, Heuristics: b.Heuristics, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges}}}
 }
 
 // domainsPattern matches a Host that is one of domains or under one at any depth, with or without a

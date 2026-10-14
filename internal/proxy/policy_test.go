@@ -344,7 +344,7 @@ func TestConfigPutsTheBanFirst(t *testing.T) {
 		routes := dig(m, "apps", "http", "servers", name, "routes").([]any)
 		r := routes[0].(map[string]any)
 		h, _ := json.Marshal(r["handle"])
-		if want := `[{"duration":"24h","exempt_paths":["^/api/[a-z]+/pics","^/api/auctions/[^/]+/(image|video)"],"exempt_ranges":["198.51.100.0/24"],"handler":"boks_ban","rules":[{"class":"all","limit":300,"name":"default","window":"1m"}]}]`; string(h) != want {
+		if want := `[{"duration":"24h","exempt_paths":["^/api/[a-z]+/pics","^/api/auctions/[^/]+/(image|video)"],"exempt_ranges":["198.51.100.0/24"],"handler":"boks_ban","limit":300,"window":"1m"}]`; string(h) != want {
 			t.Errorf("%s route 0:\n got %s\nwant %s", name, h, want)
 		}
 		if r["terminal"] != false {
@@ -393,6 +393,17 @@ func TestSamePolicySeesTheBan(t *testing.T) {
 	a.Ban = &c
 	if SamePolicy(a, b) {
 		t.Error("want another limit to make another policy")
+	}
+	// The same server.yml validated today: its limit as the rule default.
+	d := *dbautoBan
+	d.Limit, d.Window, d.Rules = 0, "", []BanRule{{Name: "default", Limit: 300, Window: "1m", Class: "all"}}
+	a.Ban = &d
+	if !SamePolicy(a, b) || !SamePolicy(b, a) {
+		t.Error("want a ban of format 6 to be the same policy as its rule default")
+	}
+	d.Rules = []BanRule{{Name: "default", Limit: 300, Window: "10m", Class: "all"}}
+	if SamePolicy(a, b) {
+		t.Error("want another window of the rule default to make another policy")
 	}
 	a.Ban, b.Ban = hbSitesBan(), hbSitesBan()
 	if !SamePolicy(a, b) {
@@ -451,5 +462,28 @@ func TestBanString(t *testing.T) {
 	}
 	if got, want := dbautoBan.String(), "ban: an address past a rule is refused for 24h — default: 300 in 1m"; got != want {
 		t.Errorf("\n got %s\nwant %s", got, want)
+	}
+}
+
+// A revision a boks of format 6 recorded — the policy on hb-sites, and the history a rollback puts
+// back — goes to the handler in its own form, the bytes that boks assembled: the ban3 a server runs
+// until its proxy is upgraded refuses rules, and a config that changed under an unchanged policy would
+// make every deploy reload it, and the upgrade reload it into the old proxy before the swap.
+func TestConfigKeepsABanOfFormat6(t *testing.T) {
+	var p Policy
+	if err := json.Unmarshal([]byte(`{"revision":7,"ban":{"limit":1500,"window":"1m","duration":"24h","exempt_paths":["^/x"]}}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Config(p, []Fragment{{App: "a", Routes: web}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, b); err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"handler":"boks_ban","limit":1500,"window":"1m","duration":"24h","exempt_paths":["^/x"]}`; !strings.Contains(compact.String(), want) ||
+		strings.Contains(compact.String(), `"rules"`) {
+		t.Errorf("want the ban of format 6 as that boks wrote it, %s:\n%s", want, compact.String())
 	}
 }

@@ -427,7 +427,11 @@ type (
 		// AuthCredentials hold base64 of user:password each, as the plugin compares them with the
 		// header; JSON writes the bytes in base64 once more.
 		AuthCredentials [][]byte `json:"auth_credentials,omitempty"`
-		// boks_ban (proxy/ban)
+		// boks_ban (proxy/ban). Limit and Window are a ban of format 6, written as that boks wrote it:
+		// the handler of ban3 knows no rules, and the config — compared byte for byte with the applied
+		// one — stays what the proxy runs.
+		Limit        int            `json:"limit,omitempty"`
+		Window       string         `json:"window,omitempty"`
 		Rules        []BanRule      `json:"rules,omitempty"`
 		Heuristics   *BanHeuristics `json:"heuristics,omitempty"`
 		Duration     string         `json:"duration,omitempty"`

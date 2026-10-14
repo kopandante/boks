@@ -78,6 +78,12 @@ func TestCheckRevision(t *testing.T) {
 			t.Errorf("%s changed at the same revision: want a refusal, got %v", name, err)
 		}
 	}
+	// The revision a boks of format 6 applied, from its unchanged server.yml: the same ban, now its rule.
+	legacy := proxy.Policy{Revision: 7, Floor: 7, Ban: &proxy.Ban{Limit: 1500, Window: "1m", Duration: "24h"}}
+	again := proxy.Policy{Revision: 7, Ban: &proxy.Ban{Duration: "24h", Rules: []proxy.BanRule{{Name: "default", Limit: 1500, Window: "1m", Class: "all"}}}}
+	if err := CheckRevision(legacy, again); err != nil {
+		t.Errorf("the revision a boks of format 6 applied, again: %v", err)
+	}
 	// A server that never applied a policy takes whatever revision the fleet is at.
 	if err := CheckRevision(proxy.Policy{}, proxy.Policy{Revision: 9}); err != nil {
 		t.Errorf("a new server: %v", err)
