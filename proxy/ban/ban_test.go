@@ -202,6 +202,39 @@ func TestExemptRequestsAreNotCounted(t *testing.T) {
 	if serve(t, h, request(ip, "/en/encar/1", "Sec-Fetch-Dest", "document")) != 200 || serve(t, h, request(ip, "/api/encar/info/1")) != 403 {
 		t.Error("want pages counted from the first")
 	}
+
+}
+
+// A banned address gets 403 for what it would not be counted for too — Next.js's files and image
+// optimizer, subresources, exempt paths — and reaches no app; ACME's challenge and an exempt range
+// still pass, the range lifting the ban it is added for.
+func TestABanRefusesUncountedRequests(t *testing.T) {
+	fixture(t)
+	h, _ := provisioned(t, `{"limit": 1, "window": "1m", "duration": "24h", "exempt_paths": ["^/api/[a-z]+/pics"]}`)
+	const ip = "198.51.100.7"
+	if serve(t, h, request(ip, "/en/encar/1")) != 200 || serve(t, h, request(ip, "/en/encar/2")) != 403 {
+		t.Fatal("want the second page to ban")
+	}
+	for _, r := range []*http.Request{
+		request(ip, "/_next/image?url=x"),
+		request(ip, "/_next/static/chunks/main.js"),
+		request(ip, "/api/encar/info/1", "Sec-Fetch-Dest", "image"),
+		request(ip, "/api/encar/pics/123/1.jpg"),
+	} {
+		if code := serve(t, h, r); code != 403 {
+			t.Errorf("%s %v: want 403 to a banned address, got %d", r.URL.Path, r.Header, code)
+		}
+	}
+	if code := serve(t, h, request(ip, "/.well-known/acme-challenge/token")); code != 200 {
+		t.Errorf("ACME's challenge: %d", code)
+	}
+	if code := serve(t, h, request("198.51.100.8", "/_next/image?url=x")); code != 200 {
+		t.Errorf("an address not banned: %d", code)
+	}
+	exempted, _ := provisioned(t, `{"limit": 1, "window": "1m", "duration": "24h", "exempt_ranges": ["198.51.100.0/24"]}`)
+	if code := serve(t, exempted, request(ip, "/en/encar/3")); code != 200 {
+		t.Errorf("an exempt range added after the ban: want it lifted, got %d", code)
+	}
 }
 
 // The address is the one Caddy decided past the trusted proxies, not the connection's; without one
@@ -344,12 +377,12 @@ func TestValidateRefuses(t *testing.T) {
 func TestPrivateRanges(t *testing.T) {
 	h := Handler{ranges: private}
 	for _, s := range []string{"10.240.1.1", "172.31.255.255", "fc00::1", "fe80::1"} {
-		if !h.exempt(netip.MustParseAddr(s), request(s, "/")) {
+		if !h.exemptAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s: want exempt", s)
 		}
 	}
 	for _, s := range []string{"172.32.0.1", "8.8.8.8", "2001:db8::1"} {
-		if h.exempt(netip.MustParseAddr(s), request(s, "/")) {
+		if h.exemptAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s: want counted", s)
 		}
 	}

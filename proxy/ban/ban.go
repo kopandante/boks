@@ -117,10 +117,20 @@ func (h *Handler) Validate() error {
 	return nil
 }
 
-// ServeHTTP answers 403 to a banned address and passes everything else on, counting what counts.
+// ServeHTTP answers 403 to a banned address and passes everything else on, counting what counts. A
+// request left uncounted for what it asks for — /_next/, a subresource, an exempt path — is still
+// refused to a banned address: the ban keeps the address from every app, its images and Next.js's
+// image optimizer included. An address in an exempt range is neither counted nor refused, so adding
+// a banned address's range to exempt_ranges lifts its ban with the next apply.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	addr, ok := clientAddr(r)
-	if !ok || h.exempt(addr, r) {
+	if !ok || h.exemptAddr(addr) || isACME(r) {
+		return next.ServeHTTP(w, r)
+	}
+	if h.exemptRequest(r) {
+		if h.store.banned(addr) {
+			return refuse(w)
+		}
 		return next.ServeHTTP(w, r)
 	}
 	switch v := h.store.hit(addr, h.Limit, time.Duration(h.Window), time.Duration(h.Duration), h.MaxTracked); v.outcome {
@@ -161,16 +171,27 @@ func clientAddr(r *http.Request) (netip.Addr, bool) {
 	return a.WithZone("").Unmap(), true
 }
 
-// exempt says whether a request is not counted: from a private or exempt range, for Next.js's own
-// files, a subresource of a page, ACME's challenge, or a path an exemption names.
-func (h *Handler) exempt(a netip.Addr, r *http.Request) bool {
+// exemptAddr says whether an address is never counted: in a private or an exempt range.
+func (h *Handler) exemptAddr(a netip.Addr) bool {
 	for _, p := range h.ranges {
 		if p.Contains(a) {
 			return true
 		}
 	}
+	return false
+}
+
+// isACME says whether a request is for ACME's challenge, which neither counts nor is refused: a
+// certificate's renewal does not wait for a ban to end.
+func isACME(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/")
+}
+
+// exemptRequest says whether a request is not counted for what it asks for: Next.js's own files, a
+// subresource of a page, or a path an exemption names.
+func (h *Handler) exemptRequest(r *http.Request) bool {
 	p := r.URL.Path
-	if strings.HasPrefix(p, "/_next/") || strings.HasPrefix(p, "/.well-known/acme-challenge/") {
+	if strings.HasPrefix(p, "/_next/") {
 		return true
 	}
 	if slices.Contains(assetDest, strings.ToLower(r.Header.Get("Sec-Fetch-Dest"))) {

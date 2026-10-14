@@ -88,6 +88,14 @@ func (s *store) hit(a netip.Addr, limit int, window, duration time.Duration, max
 	return verdict{outcome: pass, count: e.count}
 }
 
+// banned says whether a is banned now, without counting a request.
+func (s *store) banned(a netip.Addr) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entries[a]
+	return e != nil && s.now().Before(e.banned)
+}
+
 // sweep removes the entries whose window passed and whose ban, if any, ended.
 func (s *store) sweep(now time.Time, window time.Duration) {
 	s.swept = now
