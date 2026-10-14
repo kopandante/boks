@@ -188,7 +188,6 @@ func TestExemptRequestsAreNotCounted(t *testing.T) {
 		request(ip, "/x.js", "Sec-Fetch-Dest", "Script"),
 		request(ip, "/v.mp4", "Sec-Fetch-Dest", "video"),
 		request(ip, "/a.mp3", "Sec-Fetch-Dest", "audio"),
-		request(ip, "/.well-known/acme-challenge/token"),
 		request(ip, "/api/encar/pics/123/1.jpg"),
 		request(ip, "/api/auctions/lotte/image/9"),
 	} {
@@ -198,6 +197,16 @@ func TestExemptRequestsAreNotCounted(t *testing.T) {
 			}
 		}
 	}
+	// A path is judged cleaned: dot segments do not make a page a file of Next.js or an exempt path.
+	other, _ := provisioned(t, `{"limit": 1, "window": "1m", "duration": "24h", "exempt_paths": ["^/api/[a-z]+/pics"]}`)
+	for _, p := range []string{"/_next/../en/encar/1", "/api/encar/pics/../../encar/info/1"} {
+		r := request("198.51.100.9", p)
+		r.URL.Path = p // httptest cleans nothing, but say it: the request target as the client sent it
+		serve(t, other, r)
+	}
+	if code := serve(t, other, request("198.51.100.9", "/_next/image?url=x")); code != 403 {
+		t.Errorf("dot segments past an exemption: want them counted to a ban, got %d", code)
+	}
 	// A page — even fetched as a document — counts: the first passes, the second bans.
 	if serve(t, h, request(ip, "/en/encar/1", "Sec-Fetch-Dest", "document")) != 200 || serve(t, h, request(ip, "/api/encar/info/1")) != 403 {
 		t.Error("want pages counted from the first")
@@ -206,8 +215,8 @@ func TestExemptRequestsAreNotCounted(t *testing.T) {
 }
 
 // A banned address gets 403 for what it would not be counted for too — Next.js's files and image
-// optimizer, subresources, exempt paths — and reaches no app; ACME's challenge and an exempt range
-// still pass, the range lifting the ban it is added for.
+// optimizer, subresources, exempt paths — and reaches no app; an exempt range still passes, lifting
+// the ban it is added for.
 func TestABanRefusesUncountedRequests(t *testing.T) {
 	fixture(t)
 	h, _ := provisioned(t, `{"limit": 1, "window": "1m", "duration": "24h", "exempt_paths": ["^/api/[a-z]+/pics"]}`)
@@ -224,9 +233,6 @@ func TestABanRefusesUncountedRequests(t *testing.T) {
 		if code := serve(t, h, r); code != 403 {
 			t.Errorf("%s %v: want 403 to a banned address, got %d", r.URL.Path, r.Header, code)
 		}
-	}
-	if code := serve(t, h, request(ip, "/.well-known/acme-challenge/token")); code != 200 {
-		t.Errorf("ACME's challenge: %d", code)
 	}
 	if code := serve(t, h, request("198.51.100.8", "/_next/image?url=x")); code != 200 {
 		t.Errorf("an address not banned: %d", code)

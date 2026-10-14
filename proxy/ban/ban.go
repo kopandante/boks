@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -121,10 +122,11 @@ func (h *Handler) Validate() error {
 // request left uncounted for what it asks for — /_next/, a subresource, an exempt path — is still
 // refused to a banned address: the ban keeps the address from every app, its images and Next.js's
 // image optimizer included. An address in an exempt range is neither counted nor refused, so adding
-// a banned address's range to exempt_ranges lifts its ban with the next apply.
+// a banned address's range to exempt_ranges lifts its ban with the next apply. ACME's challenge never
+// gets here: Caddy answers it before any route, and boks's ban route leaves it out by its matcher.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	addr, ok := clientAddr(r)
-	if !ok || h.exemptAddr(addr) || isACME(r) {
+	if !ok || h.exemptAddr(addr) {
 		return next.ServeHTTP(w, r)
 	}
 	if h.exemptRequest(r) {
@@ -181,16 +183,11 @@ func (h *Handler) exemptAddr(a netip.Addr) bool {
 	return false
 }
 
-// isACME says whether a request is for ACME's challenge, which neither counts nor is refused: a
-// certificate's renewal does not wait for a ban to end.
-func isACME(r *http.Request) bool {
-	return strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/")
-}
-
 // exemptRequest says whether a request is not counted for what it asks for: Next.js's own files, a
-// subresource of a page, or a path an exemption names.
+// subresource of a page, or a path an exemption names. The path is judged cleaned, as Caddy's path
+// matcher and the apps judge it: /_next/../en/encar/1 is the page it names, not a file of Next.js.
 func (h *Handler) exemptRequest(r *http.Request) bool {
-	p := r.URL.Path
+	p := path.Clean(r.URL.Path)
 	if strings.HasPrefix(p, "/_next/") {
 		return true
 	}
