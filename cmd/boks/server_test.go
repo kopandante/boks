@@ -292,6 +292,14 @@ ban:
 	if h := b.Heuristics; h == nil || *h != (proxy.BanHeuristics{Mode: "log", Cluster: proxy.BanCluster{Limit: 300, Window: "10m", MinAddresses: 10}}) {
 		t.Errorf("heuristics: %+v", h)
 	}
+	// The cluster's numbers as the file wrote them, not the defaults.
+	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\nban:\n  heuristics: {mode: ban, cluster: {limit: 50, window: 120s, min_addresses: 3}}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := policyOf(sc).Ban.Heuristics; h == nil || *h != (proxy.BanHeuristics{Mode: "ban", Cluster: proxy.BanCluster{Limit: 50, Window: "2m", MinAddresses: 3}}) {
+		t.Errorf("heuristics as written: %+v", h)
+	}
 	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\n"))
 	if err != nil || policyOf(sc).Ban != nil {
 		t.Errorf("want none without the key: %v", err)
