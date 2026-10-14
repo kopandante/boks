@@ -331,7 +331,9 @@ func TestCheckApplyRefusesAnEgressTheProxyCannotRun(t *testing.T) {
 // older image refuses the fields it does not know — whether the proxy runs or is stopped.
 func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
 	const old, current = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban3", "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban8"
-	validate := func(image string) string { return "docker run --rm -i --network none --entrypoint caddy " + image + " validate --config /dev/stdin" }
+	validate := func(image string) string {
+		return "docker run --rm -i --network none --entrypoint caddy " + image + " validate --config /dev/stdin"
+	}
 	unknown := errors.New(`exit status 1: loading module 'boks_ban': decoding module config: http.handlers.boks_ban: json: unknown field "heuristics"`)
 	ban := &proxy.Ban{Rules: []proxy.BanRule{{Name: "default", Limit: 300, Window: "1m", Class: "all"}}, Duration: "24h"}
 
