@@ -186,7 +186,11 @@ func checkModule(ctx context.Context, r remote.Runner, module, lacks string, sto
 		return fmt.Errorf("asking the proxy for its modules: %w", err)
 	}
 	if !slices.Contains(strings.Fields(mods), module) {
-		return fmt.Errorf("the proxy runs %s, which has %s; `boks proxy upgrade` with boks's own image first, then apply again", image, lacks)
+		verb := "runs"
+		if state != "running" {
+			verb = "is a stopped container of"
+		}
+		return fmt.Errorf("the proxy %s %s, which has %s; `boks proxy upgrade` with boks's own image first, then apply again", verb, image, lacks)
 	}
 	return nil
 }

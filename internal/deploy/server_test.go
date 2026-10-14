@@ -355,7 +355,7 @@ func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
 	h.out["docker ps -a --filter name=^boks-proxy$"] = "exited\tcaddy"
 	h.out[proxyImage] = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d"
 	h.out["docker run --rm --entrypoint caddy ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d list-modules"] = "http.handlers.forward_proxy"
-	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "no ban handler") {
+	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "no ban handler") || !strings.Contains(err.Error(), "stopped container") {
 		t.Errorf("want a stopped proxy whose image lacks the handler refused: %v", err)
 	}
 	h.out["docker run --rm --entrypoint caddy ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d list-modules"] = "http.handlers.boks_ban"
