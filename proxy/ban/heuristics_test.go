@@ -49,7 +49,8 @@ var storm = visitor{"the storm on dbauto", 1, [][2]string{
 }}
 
 // browsers are what real clients send. None carries the strong sign: a browser sends Fetch Metadata
-// as the three together or — before Chromium 76, Firefox 90, Safari 16.4 — not at all.
+// as the three together or — before Chromium 76, Firefox 90, Safari 16.4 — not at all, but for
+// Chromium 76–79, which sent Site and Mode without Dest.
 var browsers = []visitor{
 	// The crawler of the night of 14.10 (217.81.103.213): headless Chrome with a desktop Linux UA and
 	// the headers Chrome sends, client hints and Fetch Metadata whole. The rules' volume catches it,
@@ -181,6 +182,17 @@ var browsers = []visitor{
 		{"Accept-Language", "ko-KR,ko;q=0.9"},
 		{"Connection", "keep-alive"},
 		{"User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 15_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6.1 Mobile/15E148 Safari/604.1"},
+	}},
+	// Chromium 76–79 sent Site, Mode and User; Dest came with 80. Samsung Internet 12 is Chromium 79.
+	{"Samsung Internet 12, Chromium 79, without Sec-Fetch-Dest", 2, [][2]string{
+		{"upgrade-insecure-requests", "1"},
+		{"user-agent", "Mozilla/5.0 (Linux; Android 10; SM-A505F) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/12.1 Chrome/79.0.3945.136 Mobile Safari/537.36"},
+		{"accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9"},
+		{"sec-fetch-site", "same-origin"},
+		{"sec-fetch-mode", "navigate"},
+		{"sec-fetch-user", "?1"},
+		{"accept-encoding", "gzip, deflate, br"},
+		{"accept-language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"},
 	}},
 	// Chrome before 76 sent neither Fetch Metadata nor client hints.
 	{"Chrome 70, without Fetch Metadata", 1, [][2]string{
@@ -465,4 +477,84 @@ func (s *store) addressesOf(fp string) int {
 		return len(p.addrs)
 	}
 	return 0
+}
+
+// The strong sign is Mode without either of the others, whichever is missing; Site and Mode without
+// Dest only from a UA not of Chromium 76–79.
+func TestTheStrongSign(t *testing.T) {
+	const chrome149 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+	const edge79 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.74 Safari/537.36 Edg/79.0.309.43"
+	for _, c := range []struct {
+		name   string
+		header []string
+		want   bool
+	}{
+		{"nothing", []string{"User-Agent", chrome149}, false},
+		{"the three", []string{"User-Agent", chrome149, "Sec-Fetch-Mode", "cors", "Sec-Fetch-Site", "same-origin", "Sec-Fetch-Dest", "empty"}, false},
+		{"mode alone", []string{"User-Agent", chrome149, "Sec-Fetch-Mode", "cors"}, true},
+		{"without site", []string{"User-Agent", chrome149, "Sec-Fetch-Mode", "cors", "Sec-Fetch-Dest", "empty"}, true},
+		{"without dest", []string{"User-Agent", chrome149, "Sec-Fetch-Mode", "cors", "Sec-Fetch-Site", "same-origin"}, true},
+		{"without dest, Edge 79", []string{"User-Agent", edge79, "Sec-Fetch-Mode", "cors", "Sec-Fetch-Site", "same-origin"}, false},
+		{"without dest, Chrome 76", []string{"User-Agent", "Mozilla/5.0 Chrome/76.0.3809.100 Safari/537.36", "Sec-Fetch-Mode", "cors", "Sec-Fetch-Site", "none"}, false},
+		{"without dest, Chrome 75", []string{"User-Agent", "Mozilla/5.0 Chrome/75.0.3770.100 Safari/537.36", "Sec-Fetch-Mode", "cors", "Sec-Fetch-Site", "none"}, true},
+		{"without dest, Chrome 790", []string{"User-Agent", "Mozilla/5.0 Chrome/790.0 Safari/537.36", "Sec-Fetch-Mode", "cors", "Sec-Fetch-Site", "none"}, true},
+		{"mode alone, Chrome 79", []string{"User-Agent", edge79, "Sec-Fetch-Mode", "cors"}, true},
+		{"without site, Chrome 79", []string{"User-Agent", edge79, "Sec-Fetch-Mode", "cors", "Sec-Fetch-Dest", "empty"}, true},
+	} {
+		if got := forged(request("198.51.100.1", "/", c.header...).Header); got != c.want {
+			t.Errorf("%s: want %v, got %v", c.name, c.want, got)
+		}
+	}
+}
+
+// A reload that raises min_addresses within a cluster's window counts the addresses again: the
+// cluster reached under the old one does not ban under the new.
+func TestAReloadWithAnotherMinAddresses(t *testing.T) {
+	fixture(t)
+	h, _ := provisioned(t, heuristics("log"))
+	for n := range 6 {
+		serve(t, h, storm.as(home(n%3), "/"))
+	}
+	raised, logs := provisioned(t, `{"duration": "24h", "rules": [{"name": "all", "limit": 100000, "window": "1m"}],
+		"heuristics": {"mode": "ban", "cluster": {"limit": 5, "window": "10m", "min_addresses": 10}}}`)
+	for n := range 9 {
+		if code := serve(t, raised, storm.as(home(n%3), "/")); code != 200 {
+			t.Fatalf("three addresses under min_addresses 10: want 200, got %d", code)
+		}
+	}
+	if logs.FilterMessage("fingerprint banned").Len() != 0 {
+		t.Error("want no ban under the raised min_addresses")
+	}
+	for n := 3; n < 10; n++ {
+		serve(t, raised, storm.as(home(n), "/"))
+	}
+	if logs.FilterMessage("fingerprint banned").Len() != 1 {
+		t.Error("want the ban once ten addresses sent past the limit")
+	}
+}
+
+// A cluster's window starts again when it passed, whether or not a sweep came between: a second
+// fingerprint's window ends between two sweeps the first one's requests ran.
+func TestAClusterWindowStartsAgainBetweenSweeps(t *testing.T) {
+	c := fixture(t)
+	h, logs := provisioned(t, heuristics("log"))
+	other := storm.as(home(0), "/")
+	other.Header.Set("Accept-Language", "ja")
+	serve(t, h, storm.as(home(0), "/")) // sweeps at 0
+	c.add(5 * time.Minute)
+	for range 5 {
+		r := other.Clone(other.Context())
+		serve(t, h, r)
+	}
+	c.add(5 * time.Minute)
+	serve(t, h, storm.as(home(0), "/")) // sweeps at 10m: the other's window, from 5m, holds
+	c.add(6 * time.Minute)              // 16m: the other's window passed, no sweep due until 20m
+	for n := range 3 {
+		r := storm.as(home(n), "/")
+		r.Header.Set("Accept-Language", "ja")
+		serve(t, h, r)
+	}
+	if n := logs.FilterMessage("cluster flagged").Len(); n != 0 {
+		t.Errorf("want the other's count started again, not 8 past the limit of 5: %d flagged", n)
+	}
 }

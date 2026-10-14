@@ -44,6 +44,8 @@ type print struct {
 	reached bool
 	flagged bool
 	banned  time.Time
+	// min is the min_addresses reached was told by: a reload with another starts the window again.
+	min int
 }
 
 type entry struct {
@@ -235,8 +237,8 @@ func (s *store) forged(a netip.Addr, fp string, c cluster, mode string, duration
 	if ban && now.Before(p.banned) {
 		return printVerdict{refuse: true, until: p.banned}
 	}
-	if now.Sub(p.start) >= c.window {
-		p.start, p.count, p.addrs, p.reached, p.flagged = now, 0, nil, false, false
+	if now.Sub(p.start) >= c.window || p.min != c.minAddresses {
+		p.start, p.count, p.addrs, p.reached, p.flagged, p.min = now, 0, nil, false, false, c.minAddresses
 	}
 	p.count++
 	var v printVerdict

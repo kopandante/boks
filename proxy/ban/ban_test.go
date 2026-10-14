@@ -556,3 +556,53 @@ func TestAPolicyOfFormat6RunsAsTheRuleDefault(t *testing.T) {
 		t.Errorf("want one rule, default, of class all: %v", got)
 	}
 }
+
+// A rule's window starts again when it passed, whether or not a sweep came between: an address's
+// window ends between two sweeps another address's requests ran.
+func TestTheWindowStartsAgainBetweenSweeps(t *testing.T) {
+	c := fixture(t)
+	h, _ := provisioned(t, policy)
+	serve(t, h, request("198.51.100.1", "/")) // sweeps at 0
+	c.add(30 * time.Second)
+	for range 300 {
+		serve(t, h, request("198.51.100.2", "/"))
+	}
+	c.add(30 * time.Second)
+	serve(t, h, request("198.51.100.1", "/")) // sweeps at 1m: the second's window, from 30s, holds
+	c.add(45 * time.Second)                   // 1m45s: the second's window passed, no sweep due until 2m
+	if code := serve(t, h, request("198.51.100.2", "/")); code != 200 {
+		t.Fatalf("want the window started again, got %d", code)
+	}
+	if got := shared.counters("198.51.100.2")["default"]; got != 1 {
+		t.Errorf("want the count started again at 1, got %d", got)
+	}
+}
+
+// A rule of a class and paths counts what both select: its paths within its class, the path judged
+// cleaned, a subresource of its paths too.
+func TestARuleOfAClassAndPaths(t *testing.T) {
+	fixture(t)
+	h, _ := provisioned(t, `{"duration": "24h", "rules": [
+		{"name": "page-pics", "limit": 100, "window": "1m", "class": "page", "paths": ["^/pics/"]},
+		{"name": "api-pics", "limit": 100, "window": "1m", "class": "api", "paths": ["^/api/pics/"]}]}`)
+	post := request("198.51.100.2", "/pics/a")
+	post.Method = http.MethodPost
+	for _, c := range []struct {
+		r    *http.Request
+		want map[string]int
+	}{
+		{request("198.51.100.1", "/pics/a", "Sec-Fetch-Dest", "image"), map[string]int{"page-pics": 1}},
+		{post, map[string]int{}},
+		{request("198.51.100.3", "/else/../pics/a"), map[string]int{"page-pics": 1}},
+		{request("198.51.100.4", "/else/a"), map[string]int{}},
+		{request("198.51.100.5", "/api/pics/a", "Sec-Fetch-Dest", "image"), map[string]int{"api-pics": 1}},
+		{request("198.51.100.6", "/api/other"), map[string]int{}},
+		{request("198.51.100.7", "/pics/a", "Next-Router-Prefetch", "1"), map[string]int{}},
+	} {
+		serve(t, h, c.r)
+		ip, _ := clientAddr(c.r)
+		if got := shared.counters(ip.String()); !maps.Equal(got, c.want) {
+			t.Errorf("%s %s %v: want %v, got %v", c.r.Method, c.r.URL.Path, c.r.Header, c.want, got)
+		}
+	}
+}

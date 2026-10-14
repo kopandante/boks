@@ -1,9 +1,10 @@
 package ban
 
 // The heuristics look past the rate of one address, at requests no browser sends. A browser sends
-// Fetch Metadata — Sec-Fetch-Site, -Mode and -Dest — as the three together (Chromium 76+, Firefox
-// 90+, Safari 16.4+), or none of it when older; a request with Sec-Fetch-Mode and without one of the
-// others was made by something copying a browser's headers in part. That is the strong sign, read from
+// Fetch Metadata — Sec-Fetch-Site, -Mode and -Dest — as the three together (Chromium 80+, Firefox
+// 90+, Safari 16.4+), or none of it when older, but for Chromium 76–79, which sent Site and Mode
+// before Dest existed; a request with Sec-Fetch-Mode and without one of the others, and not of those
+// Chromiums, was made by something copying a browser's headers in part. That is the strong sign, read from
 // the headers alone, which reach boks as the client sent them on the direct path and through hb-edge
 // alike. Of a storm of many addresses each under every rule — the one on dbauto, 72 home addresses at
 // 37 requests an hour — the sign is what is common, and the cluster is its fingerprint across them.
@@ -84,12 +85,26 @@ func (h *Heuristics) cluster() cluster {
 }
 
 // forged is the strong sign: Sec-Fetch-Mode without Sec-Fetch-Site or Sec-Fetch-Dest. Told by the
-// headers' presence, as a browser either sends one or does not.
+// headers' presence, as a browser either sends one or does not; Site and Mode without Dest is what
+// Chromium 76–79 sent (Dest came with 80), so it is the sign only from another UA.
 func forged(h http.Header) bool {
 	_, mode := h["Sec-Fetch-Mode"]
 	_, site := h["Sec-Fetch-Site"]
 	_, dest := h["Sec-Fetch-Dest"]
-	return mode && !(site && dest)
+	switch {
+	case !mode || site && dest:
+		return false
+	case site:
+		return !beforeDest(h.Get("User-Agent"))
+	}
+	return true
+}
+
+// beforeDest says whether ua is of a Chromium from before Sec-Fetch-Dest: 76 to 79. Edge, Opera,
+// Samsung Internet and WebView on it name Chrome's token too.
+func beforeDest(ua string) bool {
+	_, rest, ok := strings.Cut(ua, "Chrome/")
+	return ok && len(rest) > 2 && rest[0] == '7' && rest[1] >= '6' && rest[1] <= '9' && (rest[2] < '0' || rest[2] > '9')
 }
 
 // weakSigns are what a browser may send too, so they go to the journal beside the strong sign and
