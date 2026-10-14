@@ -511,8 +511,9 @@ func TestClassesCountTheirOwn(t *testing.T) {
 	}
 }
 
-// A reload with other rules: a rule kept as it was keeps its count, and so does one whose limit alone
-// changed; one whose window changed starts again; one removed is dropped at the next sweep. A ban outlives any of it, rules
+// A reload with other rules: a rule kept as it was keeps its count, and so does one whose limit or
+// window changed — judged by the new ones, as v1's one count was; one removed is dropped at the next
+// sweep. A ban outlives any of it, rules
 // gone included, and provisioning changes nothing of the shared state.
 func TestAReloadWithOtherRules(t *testing.T) {
 	c := fixture(t)
@@ -534,7 +535,7 @@ func TestAReloadWithOtherRules(t *testing.T) {
 		t.Fatal("want provisioning to leave the shared state as it was")
 	}
 	serve(t, after, request("198.51.100.7", "/"))
-	if got := shared.counters("198.51.100.7"); got["kept"] != 4 || got["changed"] != 1 || got["relimited"] != 4 || got["new"] != 1 || got["gone"] != 3 {
+	if got := shared.counters("198.51.100.7"); got["kept"] != 4 || got["changed"] != 4 || got["relimited"] != 4 || got["new"] != 1 || got["gone"] != 3 {
 		t.Errorf("after the reload: %v", got)
 	}
 	c.add(time.Minute)
@@ -558,6 +559,21 @@ func TestALoweredLimitBansOnTheCountAlreadyMade(t *testing.T) {
 	after, _ := provisioned(t, `{"duration": "24h", "rules": [{"name": "default", "limit": 100, "window": "1m"}]}`)
 	if code := serve(t, after, request("198.51.100.7", "/")); code != 403 {
 		t.Errorf("want the lowered limit to ban on the count already made, got %d", code)
+	}
+}
+
+// A widened window keeps the count and the start an address already has, as v1 did across a reload:
+// 300 in 30 s under 300 a minute, then 2 minutes, and the next request bans.
+func TestAWidenedWindowKeepsTheCount(t *testing.T) {
+	c := fixture(t)
+	before, _ := provisioned(t, `{"duration": "24h", "rules": [{"name": "default", "limit": 300, "window": "1m"}]}`)
+	for range 300 {
+		serve(t, before, request("198.51.100.7", "/"))
+	}
+	c.add(30 * time.Second)
+	after, _ := provisioned(t, `{"duration": "24h", "rules": [{"name": "default", "limit": 300, "window": "2m"}]}`)
+	if code := serve(t, after, request("198.51.100.7", "/")); code != 403 {
+		t.Errorf("want the widened window to ban on the count already made, got %d", code)
 	}
 }
 

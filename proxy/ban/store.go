@@ -14,9 +14,9 @@ var shared = newStore(time.Now)
 // comparisons per rule, well under a microsecond, and the server's whole traffic passes it.
 //
 // The store knows rules only by what a hit hands it: the handler of a reload brings its own, and a
-// count belongs to the rule of its name and window. A rule whose window changed counts again from its
-// next request; one whose limit changed keeps its count and is held to the new limit at once, as v1
-// held a count across a reload; a rule no longer given loses its counts at the next sweep. A ban is
+// count belongs to the rule of its name. A rule whose limit or window changed keeps its count and
+// its window's start and is judged by the new limit and window at once, as v1 held its one count
+// across a reload; a rule no longer given loses its counts at the next sweep. A ban is
 // the address's, not a rule's, and outlives any reload.
 type store struct {
 	mu  sync.Mutex
@@ -138,15 +138,13 @@ func (s *store) hit(a netip.Addr, rules []rule, counts uint64, duration time.Dur
 	return verdict{outcome: pass}
 }
 
-// counter is e's count for r, a new one when e has none of r's name and window — a rule of that name
-// whose window changed since starts again. A changed limit keeps the count: the hit compares it with
-// the limit it is handed.
+// counter is e's count for r, a new one when e has none of r's name. A rule of that name whose limit
+// or window changed keeps its count and start: the hit judges them by the limit and window it is
+// handed, and the counter takes the new window for the sweep.
 func (e *entry) counter(r rule) *counter {
 	for i := range e.counters {
 		if c := &e.counters[i]; c.rule == r.name {
-			if c.window != r.window {
-				*c = counter{rule: r.name, window: r.window, start: -r.window}
-			}
+			c.window = r.window
 			return c
 		}
 	}
@@ -190,7 +188,7 @@ func (s *store) sweep(now time.Time, rules []rule) {
 // holds says whether rules still hold the rule c counts for.
 func holds(rules []rule, c counter) bool {
 	for _, r := range rules {
-		if r.name == c.rule && r.window == c.window {
+		if r.name == c.rule {
 			return true
 		}
 	}
