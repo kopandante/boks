@@ -258,3 +258,20 @@ func TestServerStatusSaysTheHairpinOfEveryServer(t *testing.T) {
 		t.Errorf("want b's rule named in place:\n%s", out.String())
 	}
 }
+
+// The policy carries server.yml's ban as the config checked it: defaults filled in, ranges as ranges.
+func TestPolicyOfCarriesTheBan(t *testing.T) {
+	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\nban:\n  window: 60s\n  exempt_paths: [\"^/api/[a-z]+/pics\"]\n  exempt_ranges: [203.0.113.7]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := policyOf(sc).Ban
+	if b == nil || b.Limit != 300 || b.Window != "1m" || b.Duration != "24h" || strings.Join(b.ExemptPaths, " ") != "^/api/[a-z]+/pics" ||
+		strings.Join(b.ExemptRanges, " ") != "203.0.113.7/32" {
+		t.Errorf("ban: %+v", b)
+	}
+	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\n"))
+	if err != nil || policyOf(sc).Ban != nil {
+		t.Errorf("want none without the key: %v", err)
+	}
+}

@@ -318,6 +318,52 @@ func TestCheckApplyRefusesAnEgressTheProxyCannotRun(t *testing.T) {
 	}
 }
 
+// A ban the running proxy has no handler for is refused before any changes, on apply and on rollback:
+// Caddy would refuse the config, and every deploy's reload after it.
+func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
+	ban := &proxy.Ban{Limit: 300, Window: "1m", Duration: "24h"}
+	f := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
+	f.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy\nhttp.handlers.forward_proxy"
+	f.out[proxyImage] = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d"
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "no ban handler") ||
+		!strings.Contains(err.Error(), "boks proxy upgrade") {
+		t.Errorf("want the image without the handler refused: %v", err)
+	}
+	f.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy\nhttp.handlers.boks_ban"
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}); err != nil {
+		t.Errorf("want the image with the handler taken: %v", err)
+	}
+
+	g := serverFake(t, proxy.Policy{Revision: 5, Floor: 5})
+	old, _ := json.Marshal(proxy.Policy{Revision: 3, Ban: ban})
+	g.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(old)
+	g.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy\nhttp.handlers.forward_proxy"
+	g.out[proxyImage] = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d"
+	if err := CheckServerRollback(context.Background(), g, 3); err == nil || !strings.Contains(err.Error(), "no ban handler") {
+		t.Errorf("want a rollback to a ban refused on the image without the handler: %v", err)
+	}
+	if len(g.uploads) > 0 || len(g.appends) > 0 {
+		t.Errorf("want nothing written: %v %v", g.uploads, g.appends)
+	}
+	g.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy\nhttp.handlers.boks_ban"
+	if err := CheckServerRollback(context.Background(), g, 3); err != nil {
+		t.Errorf("want the rollback taken on the image with the handler: %v", err)
+	}
+
+	// A stopped proxy is asked through its image: the boot after the apply starts it as it is.
+	h := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
+	h.out["docker ps -a --filter name=^boks-proxy$"] = "exited\tcaddy"
+	h.out[proxyImage] = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d"
+	h.out["docker run --rm --entrypoint caddy ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d list-modules"] = "http.handlers.forward_proxy"
+	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "no ban handler") || !strings.Contains(err.Error(), "stopped container") {
+		t.Errorf("want a stopped proxy whose image lacks the handler refused: %v", err)
+	}
+	h.out["docker run --rm --entrypoint caddy ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d list-modules"] = "http.handlers.boks_ban"
+	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err != nil {
+		t.Errorf("want a stopped proxy whose image has the handler taken: %v", err)
+	}
+}
+
 // Status reports the policy even when the running proxy cannot be compared with it.
 func TestServerStatusSaysWhatItCannotCompare(t *testing.T) {
 	f := serverFake(t, proxy.Policy{Revision: 2, Floor: 2, Egress: &proxy.Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}}})
