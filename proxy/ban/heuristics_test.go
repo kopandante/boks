@@ -386,12 +386,23 @@ func TestFingerprintsAreBounded(t *testing.T) {
 	c := fixture(t)
 	h, logs := provisioned(t, `{"duration": "24h", "rules": [{"name": "all", "limit": 100000, "window": "1m"}], "max_fingerprints": 3,
 		"heuristics": {"mode": "ban", "cluster": {"limit": 5, "window": "10m", "min_addresses": 3}}}`)
-	for v := range 5 {
+	as := func(v, n int) *http.Request {
+		r := storm.as(home(n), "/")
+		r.Header.Set("User-Agent", fmt.Sprintf("Mozilla/5.0 Chrome/%d.0.0.0 %s", 100+v, strings.Repeat("x", 300)))
+		return r
+	}
+	for n := range 6 { // the first fingerprint goes past its limit and is banned
+		serve(t, h, as(0, n%3))
+	}
+	for v := 1; v < 5; v++ {
 		for n := range 4 {
-			r := storm.as(home(n), "/")
-			r.Header.Set("User-Agent", fmt.Sprintf("Mozilla/5.0 Chrome/%d.0.0.0 %s", 100+v, strings.Repeat("x", 300)))
-			serve(t, h, r)
+			if code := serve(t, h, as(v, n)); code != 200 {
+				t.Fatalf("fingerprint %d: want it passed, tracked or not, got %d", v, code)
+			}
 		}
+	}
+	if code := serve(t, h, as(0, 7)); code != 403 {
+		t.Errorf("a banned fingerprint, the table full: want 403 held, got %d", code)
 	}
 	if n := shared.fingerprints(); n != 3 {
 		t.Errorf("want the fingerprints held at their bound, got %d", n)
@@ -411,8 +422,8 @@ func TestFingerprintsAreBounded(t *testing.T) {
 	r := storm.as(home(0), "/")
 	r.Header.Set("User-Agent", "Mozilla/5.0 Chrome/120.0.0.0")
 	serve(t, h, r)
-	if n := shared.fingerprints(); n != 1 {
-		t.Errorf("want the window's fingerprints swept, the new one tracked: %d", n)
+	if n := shared.fingerprints(); n != 2 {
+		t.Errorf("want the window's fingerprints swept but the banned one, the new one tracked: %d", n)
 	}
 }
 

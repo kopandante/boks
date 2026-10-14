@@ -34,7 +34,8 @@ func init() { caddy.RegisterModule(Handler{}) }
 // DefaultMaxTracked bounds the addresses tracked at once: an address is some 100 bytes with the map's
 // share, and 40 more for each rule that counted it. At the bound, with 16 rules each counting every
 // address, that is some 155 MB measured on the heap (TestTheWorstCaseMemory, Go 1.27); with one rule,
-// as in v1, 23 MB — the memory a flood of distinct addresses can take.
+// 30 MB, and with three 52 MB (append grows a counters slice by doubling) — the memory a flood of
+// distinct addresses can take.
 const DefaultMaxTracked = 200_000
 
 // private are the ranges never counted: loopback, the private networks — boks's own WireGuard and app
