@@ -213,9 +213,9 @@ func TestSetPolicyMarksTheRoutesForOlderBoks(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := d.files[Dir+"/routes/_server.json"]
-	// 5: a boks of format 4 knows the egress proxy but not the trusted proxies, and would drop them.
-	if marker != "5\n" || FragmentFormat <= 4 {
-		t.Errorf("want the marker to hold format %d, above the 4 of a boks without trusted proxies: %q", FragmentFormat, marker)
+	// 6: a boks of format 5 knows the trusted proxies but not the ban, and would drop it.
+	if marker != "6\n" || FragmentFormat <= 5 {
+		t.Errorf("want the marker to hold format %d, above the 5 of a boks without the ban: %q", FragmentFormat, marker)
 	}
 	if pol, mark := index(d.calls, "upload "+ServerDir+"/policy.json"), index(d.calls, "upload "+Dir+"/routes/_server.json"); mark < 0 || pol < mark {
 		t.Errorf("want the marker before the policy: %v", d.calls)
@@ -317,5 +317,77 @@ func TestAnUnreadablePolicyStopsTheReload(t *testing.T) {
 	}
 	if d.caddy != configOf(habsida) {
 		t.Errorf("want Caddy left on the filtered config")
+	}
+}
+
+var dbautoBan = &Ban{Limit: 300, Window: "1m", Duration: "24h",
+	ExemptPaths: []string{"^/api/[a-z]+/pics", "^/api/auctions/[^/]+/(image|video)"}, ExemptRanges: []string{"198.51.100.0/24"}}
+
+// The ban goes first on the servers on 80 and 443 — before the blocks, the apps' routes, the redirect
+// and the 404, so it holds on every host, one no app routes included — and passes on what it does not
+// refuse. The allows and ACME's challenge are exempt from it as from the blocks. The egress server has
+// no ban: its clients are the services the policy lets in.
+func TestConfigPutsTheBanFirst(t *testing.T) {
+	p := habsida
+	p.Ban, p.Egress = dbautoBan, encar
+	b, err := Config(p, []Fragment{{App: "a", Routes: []Route{
+		{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decoded(t, b)
+	for _, name := range []string{"http", "https"} {
+		routes := dig(m, "apps", "http", "servers", name, "routes").([]any)
+		r := routes[0].(map[string]any)
+		h, _ := json.Marshal(r["handle"])
+		if want := `[{"duration":"24h","exempt_paths":["^/api/[a-z]+/pics","^/api/auctions/[^/]+/(image|video)"],"exempt_ranges":["198.51.100.0/24"],"handler":"boks_ban","limit":300,"window":"1m"}]`; string(h) != want {
+			t.Errorf("%s route 0:\n got %s\nwant %s", name, h, want)
+		}
+		if r["terminal"] != false {
+			t.Errorf("%s: want the ban to pass on what it does not refuse: %v", name, r["terminal"])
+		}
+		match, _ := json.Marshal(r["match"])
+		if want := `[{"not":[{"path":["/.well-known/acme-challenge/*"]},{"header_regexp":{"User-Agent":{"pattern":"(?i)telegrambot"}},"host":["img.dev.habsidev.com"],"path":["/pics","/pics/*","/pics_i","/pics_i/*"]},{"header_regexp":{"User-Agent":{"pattern":"(?i)googlebot"}}}]}]`; string(match) != want {
+			t.Errorf("%s: want only ACME and the allows exempt, on every host:\n got %s\nwant %s", name, match, want)
+		}
+		for i := 1; i <= 2; i++ {
+			if h := dig(routes[i], "handle").([]any)[0].(map[string]any); h["status_code"] != float64(403) {
+				t.Errorf("%s route %d: want the blocks right after the ban: %v", name, i, h)
+			}
+		}
+		if last := dig(routes[len(routes)-1], "handle").([]any)[0].(map[string]any); last["status_code"] != float64(404) {
+			t.Errorf("%s: want the 404 last, behind the ban: %v", name, last)
+		}
+	}
+	if strings.Contains(string(mustJSON(t, dig(m, "apps", "http", "servers", "egress"))), "boks_ban") {
+		t.Error("want no ban on the egress server")
+	}
+	plain, _ := Config(habsida, []Fragment{{App: "a", Routes: web}})
+	if strings.Contains(string(plain), "boks_ban") {
+		t.Errorf("want no ban without one in the policy: %s", plain)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// Two policies with other bans filter otherwise.
+func TestSamePolicySeesTheBan(t *testing.T) {
+	a, b := habsida, habsida
+	b.Ban = dbautoBan
+	if SamePolicy(a, b) {
+		t.Error("want a ban to make another policy")
+	}
+	c := *dbautoBan
+	c.Limit = 301
+	a.Ban = &c
+	if SamePolicy(a, b) {
+		t.Error("want another limit to make another policy")
 	}
 }

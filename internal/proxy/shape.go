@@ -150,20 +150,47 @@ func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
 	if err := loadSecret(ctx, r, &p); err != nil {
 		return err
 	}
+	return checkModule(ctx, r, "http.handlers.forward_proxy", "no forward proxy", false)
+}
+
+// CheckBan refuses, before anything changes, a ban the proxy's image has no handler for: Caddy would
+// refuse the config, and with it the reload of every deploy on the server after the apply. A stopped
+// proxy is asked too, through its image: the boot that starts it again starts it as it is — a ban
+// changes nothing of its shape — and its Caddy would refuse the config instead of serving the sites.
+func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
+	if p.Ban == nil {
+		return nil
+	}
+	return checkModule(ctx, r, "http.handlers.boks_ban", "no ban handler", true)
+}
+
+// checkModule refuses a running proxy whose Caddy lacks module, and with stopped a stopped one whose
+// image lacks it. Any other proxy that is not running is left to the boot or the upgrade that creates
+// it from the image the config names.
+func checkModule(ctx context.Context, r remote.Runner, module, lacks string, stopped bool) error {
 	state, kind, err := State(ctx, r)
-	if err != nil || state != "running" || kind != Kind {
+	if err != nil || state == "" || kind != Kind || (state != "running" && !stopped) {
 		return err
 	}
-	mods, err := r.Run(ctx, "docker", "exec", Container, "caddy", "list-modules")
+	image, err := Image(ctx, r)
+	if err != nil {
+		return err
+	}
+	var mods string
+	if state == "running" {
+		mods, err = r.Run(ctx, "docker", "exec", Container, "caddy", "list-modules")
+	} else {
+		mods, err = r.Run(ctx, "docker", "run", "--rm", "--entrypoint", "caddy", image, "list-modules")
+	}
 	if err != nil {
 		return fmt.Errorf("asking the proxy for its modules: %w", err)
 	}
-	if !slices.Contains(strings.Fields(mods), "http.handlers.forward_proxy") {
-		image, err := Image(ctx, r)
-		if err != nil {
-			return err
+	if !slices.Contains(strings.Fields(mods), module) {
+		verb := "runs"
+		if state != "running" {
+			verb = "is a stopped container of"
 		}
-		return fmt.Errorf("the proxy runs %s, which has no forward proxy; `boks proxy upgrade` with boks's own image first, then apply again", image)
+		return fmt.Errorf("the proxy %s %s, which has %s; `boks proxy upgrade` with boks's own image first, then apply again", verb, image, lacks)
 	}
 	return nil
 }

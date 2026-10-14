@@ -521,6 +521,9 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			if len(p.TrustedProxies) > 0 {
 				fmt.Fprintf(out, "  X-Forwarded-For trusted from %s\n", strings.Join(p.TrustedProxies, ", "))
 			}
+			if b := p.Ban; b != nil {
+				fmt.Fprintf(out, "  %s\n", b)
+			}
 			for _, d := range drift {
 				fmt.Fprintf(out, "  ! %s\n", d)
 			}
@@ -572,6 +575,12 @@ func policyOf(sc *config.Server) proxy.Policy {
 	}
 	for _, pr := range sc.TrustedPrefixes() {
 		p.TrustedProxies = append(p.TrustedProxies, pr.String())
+	}
+	if b := sc.Ban; b != nil {
+		p.Ban = &proxy.Ban{Limit: b.Limit, Window: b.Window, Duration: b.Duration, ExemptPaths: b.ExemptPaths}
+		for _, pr := range b.ExemptPrefixes() {
+			p.Ban.ExemptRanges = append(p.Ban.ExemptRanges, pr.String())
+		}
 	}
 	return p
 }

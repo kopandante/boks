@@ -1,7 +1,7 @@
 package proxy
 
 // The server's policy: what the proxy applies to every app's traffic rather than to one app's routes —
-// the bot filter. Applied by `boks server apply`, read by every run that assembles the config.
+// the bot filter and the ban by request rate. Applied by `boks server apply`, read by every run that assembles the config.
 
 import (
 	"bytes"
@@ -37,6 +37,26 @@ type Policy struct {
 	// TrustedProxies are the CIDR ranges of the proxies in front of boks whose X-Forwarded-For the
 	// servers on 80 and 443 keep; none trusts no one.
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	Ban            *Ban     `json:"ban,omitempty"`
+}
+
+// Ban refuses, on every host the proxy serves, an address that sent more than Limit requests within
+// Window: for Duration it gets 403 and reaches no app. boks's own Caddy handler (proxy/ban) counts and
+// keeps the bans in the proxy's memory: a reload keeps them, a restart of the proxy loses them.
+// Window and Duration are written as Go durations without zero units (1m, 24h, 1h30m).
+type Ban struct {
+	Limit    int    `json:"limit"`
+	Window   string `json:"window"`
+	Duration string `json:"duration"`
+	// ExemptPaths are patterns on the cleaned path never counted, beside the handler's own: /_next/ and
+	// a page's subresources by Sec-Fetch-Dest. ACME's challenge the ban route leaves out by its matcher.
+	ExemptPaths []string `json:"exempt_paths,omitempty"`
+	// ExemptRanges are CIDR ranges never counted, beside loopback and the private networks.
+	ExemptRanges []string `json:"exempt_ranges,omitempty"`
+}
+
+func (b *Ban) String() string {
+	return fmt.Sprintf("ban: more than %d requests in %s bans an address for %s", b.Limit, b.Window, b.Duration)
 }
 
 // Egress is the forward proxy Caddy runs beside the apps' servers, on a port of its own, for the
@@ -154,6 +174,22 @@ func readPolicy(ctx context.Context, r remote.Runner, p string) (Policy, error) 
 // sets out to obtain a certificate for. The allows sit in `not`, which Caddy's certificate discovery
 // does not look into, so their host matcher stays a matcher.
 func botRoutes(p Policy) []caddyRoute {
+	exempt := allowed(p)
+	var rs []caddyRoute
+	for _, b := range p.Block {
+		h := map[string]regexpMatch{"User-Agent": {Pattern: b.UserAgent}}
+		if len(b.Domains) > 0 {
+			h["Host"] = regexpMatch{Pattern: domainsPattern(b.Domains)}
+		}
+		rs = append(rs, caddyRoute{Match: []match{{HeaderRegexp: h, Not: exempt}},
+			Handle: []handler{{Handler: "static_response", StatusCode: 403}}, Terminal: true})
+	}
+	return rs
+}
+
+// allowed are the matcher sets of what no filter of the policy refuses: ACME's challenge and the
+// policy's allows — search engines and monitoring, which neither a block nor the ban may touch.
+func allowed(p Policy) []match {
 	exempt := []match{{Path: []string{acmeChallenge}}}
 	for _, a := range p.Allow {
 		var m match
@@ -168,16 +204,17 @@ func botRoutes(p Policy) []caddyRoute {
 		}
 		exempt = append(exempt, m)
 	}
-	var rs []caddyRoute
-	for _, b := range p.Block {
-		h := map[string]regexpMatch{"User-Agent": {Pattern: b.UserAgent}}
-		if len(b.Domains) > 0 {
-			h["Host"] = regexpMatch{Pattern: domainsPattern(b.Domains)}
-		}
-		rs = append(rs, caddyRoute{Match: []match{{HeaderRegexp: h, Not: exempt}},
-			Handle: []handler{{Handler: "static_response", StatusCode: 403}}, Terminal: true})
-	}
-	return rs
+	return exempt
+}
+
+// banRoute is the policy's ban as a Caddy route, to go first on the servers on 80 and 443: on every
+// host, a host no app routes included, before a block or an app's route can answer. Not terminal —
+// the handler passes what it does not refuse on to the routes after it. The policy's allows sit in
+// `not`, as they do for the blocks, so the ban counts and refuses none of what they let through; the
+// handler leaves out the rest (private networks, /_next/, subresources, the exempt paths).
+func banRoute(b Ban, p Policy) caddyRoute {
+	return caddyRoute{Match: []match{{Not: allowed(p)}}, Handle: []handler{{Handler: "boks_ban", Limit: b.Limit,
+		Window: b.Window, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges}}}
 }
 
 // domainsPattern matches a Host that is one of domains or under one at any depth, with or without a

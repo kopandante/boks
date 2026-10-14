@@ -105,7 +105,10 @@ type Fragment struct {
 //
 // Format 5 is the trusted proxies: a boks of format 4 would assemble the config without them, and
 // every app would be handed the proxy's address in place of the visitor's without a word.
-const FragmentFormat = 5
+//
+// Format 6 is the ban: a boks of format 5 would assemble the config without it, and the next deploy
+// from it would lift every ban and stop counting without a word.
+const FragmentFormat = 6
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -283,6 +286,13 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 			s.Routes = append(slices.Clone(bots), s.Routes...)
 		}
 	}
+	// The ban before the blocks: a banned address is refused on any host before anything else is asked
+	// of its request, and a blocked bot's requests count toward a ban like anyone's.
+	if p.Ban != nil {
+		for _, s := range servers {
+			s.Routes = append([]caddyRoute{banRoute(*p.Ban, p)}, s.Routes...)
+		}
+	}
 	// A host no route names gets 404, as it did from kamal-proxy: Caddy alone answers it with an
 	// empty 200, which reads as a working site that lost its content.
 	for _, s := range servers {
@@ -414,6 +424,12 @@ type (
 		// AuthCredentials hold base64 of user:password each, as the plugin compares them with the
 		// header; JSON writes the bytes in base64 once more.
 		AuthCredentials [][]byte `json:"auth_credentials,omitempty"`
+		// boks_ban (proxy/ban)
+		Limit        int      `json:"limit,omitempty"`
+		Window       string   `json:"window,omitempty"`
+		Duration     string   `json:"duration,omitempty"`
+		ExemptPaths  []string `json:"exempt_paths,omitempty"`
+		ExemptRanges []string `json:"exempt_ranges,omitempty"`
 	}
 	proxyHeaders struct {
 		Request *headerOps `json:"request,omitempty"`

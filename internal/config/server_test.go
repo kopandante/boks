@@ -192,3 +192,71 @@ func TestParseServerTrustedProxiesRejects(t *testing.T) {
 		}
 	}
 }
+
+// A ban without fields is 300 requests a minute for a day; durations are written one way, ranges as
+// given.
+func TestParseServerBan(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [a]\nrevision: 1\nban: {}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := s.Ban; b.Limit != 300 || b.Window != "1m" || b.Duration != "24h" || b.ExemptPaths != nil || b.ExemptPrefixes() != nil {
+		t.Errorf("defaults: %+v", b)
+	}
+	s, err = ParseServer([]byte(`servers: [a]
+revision: 2
+ban:
+  limit: 120
+  window: 60s
+  duration: 1440m
+  exempt_paths: ["^/api/[a-z]+/pics", "^/api/auctions/[^/]+/(image|video)"]
+  exempt_ranges: [203.0.113.7, 198.51.100.9/24]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := s.Ban
+	var ranges []string
+	for _, p := range b.ExemptPrefixes() {
+		ranges = append(ranges, p.String())
+	}
+	if b.Limit != 120 || b.Window != "1m" || b.Duration != "24h" || len(b.ExemptPaths) != 2 || strings.Join(ranges, " ") != "203.0.113.7/32 198.51.100.0/24" {
+		t.Errorf("ban: %+v, ranges %v", b, ranges)
+	}
+	for in, want := range map[string]string{"90s": "1m30s", "1h": "1h", "5400s": "1h30m", "720h": "720h", "1h0m1s": "1h0m1s"} {
+		s, err := ParseServer([]byte("servers: [a]\nrevision: 1\nban: {duration: " + in + "}\n"))
+		if err != nil || s.Ban.Duration != want {
+			t.Errorf("duration %s: want %s, got %v %v", in, want, s, err)
+		}
+	}
+	if s, err := ParseServer([]byte(habsida)); err != nil || s.Ban != nil {
+		t.Errorf("want no ban without the key: %v", err)
+	}
+}
+
+func TestParseServerBanRejects(t *testing.T) {
+	ban := func(body string) string { return "servers: [a]\nrevision: 1\nban: " + body + "\n" }
+	for _, c := range []struct{ doc, want string }{
+		{"servers: [a]\nban: {}\n", "revision"},
+		{ban(`{limit: -1}`), "ban: limit -1: must be at least 1"},
+		{ban(`{window: 1x}`), `ban: window: "1x" is not a duration`},
+		{ban(`{window: 500ms}`), "whole seconds, at least 1s"},
+		{ban(`{window: 1500ms}`), "whole seconds"},
+		{ban(`{window: -1m}`), "at least 1s"},
+		{ban(`{window: 2h}`), "window: 2h is longer than 1h"},
+		{ban(`{duration: 721h}`), "duration: 721h is longer than 720h"},
+		{ban(`{exempt_paths: ["("]}`), `exempt_paths: "(" is not a regular expression`},
+		{ban(`{exempt_paths: [""]}`), "turn the ban off"},
+		{ban(`{exempt_ranges: [office]}`), `exempt_ranges: "office" is neither an address nor a CIDR range`},
+		{ban(`{exempt_ranges: [0.0.0.0/0]}`), "lets every address in"},
+		{ban(`{exempt_ranges: ["::ffff:203.0.113.7"]}`), "written as IPv6"},
+		{ban(`{limt: 3}`), "field limt not found"},
+		{ban(""), "ban: empty; write `ban: {}`"},
+		{"servers: [a]\nrevision: 1\nban:\n  # limit: 300\n", "ban: empty"},
+		{ban("~"), "ban: empty"},
+	} {
+		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc), c.want, err)
+		}
+	}
+}
