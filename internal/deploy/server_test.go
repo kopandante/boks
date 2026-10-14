@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -76,6 +77,12 @@ func TestCheckRevision(t *testing.T) {
 		if err := CheckRevision(full, next); err == nil || !strings.Contains(err.Error(), "older file") {
 			t.Errorf("%s changed at the same revision: want a refusal, got %v", name, err)
 		}
+	}
+	// The revision a boks of format 6 applied, from its unchanged server.yml: the same ban, now its rule.
+	legacy := proxy.Policy{Revision: 7, Floor: 7, Ban: &proxy.Ban{Limit: 1500, Window: "1m", Duration: "24h"}}
+	again := proxy.Policy{Revision: 7, Ban: &proxy.Ban{Duration: "24h", Rules: []proxy.BanRule{{Name: "default", Limit: 1500, Window: "1m", Class: "all"}}}}
+	if err := CheckRevision(legacy, again); err != nil {
+		t.Errorf("the revision a boks of format 6 applied, again: %v", err)
 	}
 	// A server that never applied a policy takes whatever revision the fleet is at.
 	if err := CheckRevision(proxy.Policy{}, proxy.Policy{Revision: 9}); err != nil {
@@ -318,49 +325,73 @@ func TestCheckApplyRefusesAnEgressTheProxyCannotRun(t *testing.T) {
 	}
 }
 
-// A ban the running proxy has no handler for is refused before any changes, on apply and on rollback:
-// Caddy would refuse the config, and every deploy's reload after it.
+// A ban the proxy's image cannot run is refused before any changes, on apply and on rollback: Caddy
+// would refuse the config, and every deploy's reload after it. The image is asked with a config that
+// has every field of the ban this boks writes — Caddy decodes a module strictly, so a handler of an
+// older image refuses the fields it does not know — whether the proxy runs or is stopped.
 func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
-	ban := &proxy.Ban{Limit: 300, Window: "1m", Duration: "24h"}
-	f := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
-	f.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy\nhttp.handlers.forward_proxy"
-	f.out[proxyImage] = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d"
-	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "no ban handler") ||
-		!strings.Contains(err.Error(), "boks proxy upgrade") {
-		t.Errorf("want the image without the handler refused: %v", err)
+	const old, current = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban3", "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban8"
+	validate := func(image string) string {
+		return "docker run --rm -i --network none --entrypoint caddy " + image + " validate --config /dev/stdin"
 	}
-	f.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy\nhttp.handlers.boks_ban"
+	unknown := errors.New(`exit status 1: loading module 'boks_ban': decoding module config: http.handlers.boks_ban: json: unknown field "heuristics"`)
+	ban := &proxy.Ban{Rules: []proxy.BanRule{{Name: "default", Limit: 300, Window: "1m", Class: "all"}}, Duration: "24h"}
+
+	f := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
+	f.out[proxyImage] = old
+	f.fail[validate(old)] = unknown
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "the proxy runs "+old) ||
+		!strings.Contains(err.Error(), "rules and heuristics") || !strings.Contains(err.Error(), `unknown field "heuristics"`) ||
+		!strings.Contains(err.Error(), "boks proxy upgrade") {
+		t.Errorf("want the image without the new fields refused: %v", err)
+	}
+	probe := f.stdin[validate(old)]
+	for _, field := range []string{`"handler":"boks_ban"`, `"rules":[`, `"class":"api"`, `"paths":[`, `"heuristics":{"mode":"log"`, `"min_addresses":`} {
+		if !strings.Contains(probe, field) {
+			t.Errorf("want the probe to carry %s: %s", field, probe)
+		}
+	}
+	f.out[proxyImage] = current
 	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}); err != nil {
-		t.Errorf("want the image with the handler taken: %v", err)
+		t.Errorf("want the image that takes the probe taken: %v", err)
+	}
+	// No ban, nothing asked.
+	n := len(f.calls)
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2}); err != nil || slices.ContainsFunc(f.calls[n:], func(c string) bool { return strings.HasPrefix(c, "docker run") }) {
+		t.Errorf("want a policy without a ban to ask no image: %v %v", err, f.calls[n:])
 	}
 
 	g := serverFake(t, proxy.Policy{Revision: 5, Floor: 5})
-	old, _ := json.Marshal(proxy.Policy{Revision: 3, Ban: ban})
-	g.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(old)
-	g.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy\nhttp.handlers.forward_proxy"
-	g.out[proxyImage] = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d"
-	if err := CheckServerRollback(context.Background(), g, 3); err == nil || !strings.Contains(err.Error(), "no ban handler") {
-		t.Errorf("want a rollback to a ban refused on the image without the handler: %v", err)
+	hist, _ := json.Marshal(proxy.Policy{Revision: 3, Ban: ban})
+	g.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(hist)
+	g.out[proxyImage] = old
+	g.fail[validate(old)] = unknown
+	if err := CheckServerRollback(context.Background(), g, 3); err == nil || !strings.Contains(err.Error(), "rules and heuristics") {
+		t.Errorf("want a rollback to a ban refused on the image without the fields: %v", err)
 	}
 	if len(g.uploads) > 0 || len(g.appends) > 0 {
 		t.Errorf("want nothing written: %v %v", g.uploads, g.appends)
 	}
-	g.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy\nhttp.handlers.boks_ban"
+	g.out[proxyImage] = current
 	if err := CheckServerRollback(context.Background(), g, 3); err != nil {
-		t.Errorf("want the rollback taken on the image with the handler: %v", err)
+		t.Errorf("want the rollback taken on the image with the fields: %v", err)
 	}
 
-	// A stopped proxy is asked through its image: the boot after the apply starts it as it is.
+	// A stopped proxy is asked through its image too: the boot after the apply starts it as it is.
 	h := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
 	h.out["docker ps -a --filter name=^boks-proxy$"] = "exited\tcaddy"
-	h.out[proxyImage] = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d"
-	h.out["docker run --rm --entrypoint caddy ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d list-modules"] = "http.handlers.forward_proxy"
-	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "no ban handler") || !strings.Contains(err.Error(), "stopped container") {
-		t.Errorf("want a stopped proxy whose image lacks the handler refused: %v", err)
+	h.out[proxyImage] = old
+	h.fail[validate(old)] = unknown
+	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "rules and heuristics") ||
+		!strings.Contains(err.Error(), "stopped container") {
+		t.Errorf("want a stopped proxy whose image lacks the fields refused: %v", err)
 	}
-	h.out["docker run --rm --entrypoint caddy ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d list-modules"] = "http.handlers.boks_ban"
+	h.out[proxyImage] = current
 	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err != nil {
-		t.Errorf("want a stopped proxy whose image has the handler taken: %v", err)
+		t.Errorf("want a stopped proxy whose image has the fields taken: %v", err)
+	}
+	if slices.ContainsFunc(h.calls, func(c string) bool { return strings.HasPrefix(c, "docker exec") }) {
+		t.Errorf("want a stopped proxy asked through its image alone: %v", h.calls)
 	}
 }
 

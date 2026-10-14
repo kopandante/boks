@@ -40,23 +40,77 @@ type Policy struct {
 	Ban            *Ban     `json:"ban,omitempty"`
 }
 
-// Ban refuses, on every host the proxy serves, an address that sent more than Limit requests within
-// Window: for Duration it gets 403 and reaches no app. boks's own Caddy handler (proxy/ban) counts and
-// keeps the bans in the proxy's memory: a reload keeps them, a restart of the proxy loses them.
-// Window and Duration are written as Go durations without zero units (1m, 24h, 1h30m).
+// Ban refuses, on every host the proxy serves, an address that went past one of its Rules: for
+// Duration it gets 403 and reaches no app. boks's own Caddy handler (proxy/ban) counts and keeps the
+// bans in the proxy's memory: a reload keeps them, a restart of the proxy loses them. Windows and
+// Duration are written as Go durations without zero units (1m, 24h, 1h30m).
 type Ban struct {
-	Limit    int    `json:"limit"`
-	Window   string `json:"window"`
+	Rules []BanRule `json:"rules,omitempty"`
+	// Limit and Window are a ban as a boks of format 6 recorded it, one limit over every request: a
+	// revision of the history a rollback puts back. It runs as the rule default of class all.
+	Limit    int    `json:"limit,omitempty"`
+	Window   string `json:"window,omitempty"`
 	Duration string `json:"duration"`
-	// ExemptPaths are patterns on the cleaned path never counted, beside the handler's own: /_next/ and
-	// a page's subresources by Sec-Fetch-Dest. ACME's challenge the ban route leaves out by its matcher.
+	// Heuristics are nil when off.
+	Heuristics *BanHeuristics `json:"heuristics,omitempty"`
+	// ExemptPaths are patterns on the cleaned path never counted, beside the handler's own: /_next/ and,
+	// for the rules of class all and page, a page's subresources by Sec-Fetch-Dest. ACME's challenge
+	// the ban route leaves out by its matcher.
 	ExemptPaths []string `json:"exempt_paths,omitempty"`
 	// ExemptRanges are CIDR ranges never counted, beside loopback and the private networks.
 	ExemptRanges []string `json:"exempt_ranges,omitempty"`
 }
 
+// BanRule counts an address's requests of Class — all, page or api — on a path one of Paths matches,
+// when there are any; more than Limit within Window bans the address.
+type BanRule struct {
+	Name   string   `json:"name"`
+	Limit  int      `json:"limit"`
+	Window string   `json:"window"`
+	Class  string   `json:"class"`
+	Paths  []string `json:"paths,omitempty"`
+}
+
+// BanHeuristics flag a request whose Fetch Metadata no browser sends, and in Mode ban refuse the
+// fingerprint a cluster of addresses sends them with.
+type BanHeuristics struct {
+	Mode    string     `json:"mode"`
+	Cluster BanCluster `json:"cluster"`
+}
+
+// BanCluster is more than Limit flagged requests of one fingerprint within Window, from at least
+// MinAddresses addresses.
+type BanCluster struct {
+	Limit        int    `json:"limit"`
+	Window       string `json:"window"`
+	MinAddresses int    `json:"min_addresses"`
+}
+
+// rules are the ban's rules, a ban of format 6 its one limit as the rule default.
+func (b *Ban) rules() []BanRule {
+	if len(b.Rules) > 0 || b.Limit == 0 {
+		return b.Rules
+	}
+	return []BanRule{{Name: "default", Limit: b.Limit, Window: b.Window, Class: "all"}}
+}
+
 func (b *Ban) String() string {
-	return fmt.Sprintf("ban: more than %d requests in %s bans an address for %s", b.Limit, b.Window, b.Duration)
+	var rs []string
+	for _, r := range b.rules() {
+		what := map[string]string{"page": " page requests", "api": " api requests"}[r.Class]
+		switch n := len(r.Paths); {
+		case n == 1:
+			what += " on 1 path"
+		case n > 1:
+			what += fmt.Sprintf(" on %d paths", n)
+		}
+		rs = append(rs, fmt.Sprintf("%s: %d%s in %s", r.Name, r.Limit, what, r.Window))
+	}
+	s := fmt.Sprintf("ban: an address past a rule is refused for %s — %s", b.Duration, strings.Join(rs, "; "))
+	if h := b.Heuristics; h != nil {
+		s += fmt.Sprintf("; heuristics %s, cluster of %d in %s from %d addresses", h.Mode, h.Cluster.Limit, h.Cluster.Window, h.Cluster.MinAddresses)
+	}
+	return s
 }
 
 // Egress is the forward proxy Caddy runs beside the apps' servers, on a port of its own, for the
@@ -97,9 +151,20 @@ func egressSecretPath() string   { return path.Join(ServerDir, "egress.secret") 
 func historyPath(rev int) string { return path.Join(ServerDir, "history", strconv.Itoa(rev)+".json") }
 
 // SamePolicy says whether two policies filter alike, whatever their revisions.
+// A ban of format 6 is compared as its one rule: the same server.yml validates to that rule today.
 func SamePolicy(a, b Policy) bool {
 	a.Revision, a.Floor, b.Revision, b.Floor = 0, 0, 0, 0
-	return bytes.Equal(marshal(a), marshal(b))
+	return bytes.Equal(marshal(asRules(a)), marshal(asRules(b)))
+}
+
+// asRules is p with a ban of format 6 written as its rule default.
+func asRules(p Policy) Policy {
+	if b := p.Ban; b != nil && len(b.Rules) == 0 && b.Limit != 0 {
+		r := *b
+		r.Rules, r.Limit, r.Window = r.rules(), 0, ""
+		p.Ban = &r
+	}
+	return p
 }
 
 func marshal(p Policy) []byte {
@@ -213,8 +278,11 @@ func allowed(p Policy) []match {
 // `not`, as they do for the blocks, so the ban counts and refuses none of what they let through; the
 // handler leaves out the rest (private networks, /_next/, subresources, the exempt paths).
 func banRoute(b Ban, p Policy) caddyRoute {
-	return caddyRoute{Match: []match{{Not: allowed(p)}}, Handle: []handler{{Handler: "boks_ban", Limit: b.Limit,
-		Window: b.Window, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges}}}
+	// A ban of format 6 goes to the handler in its own form, which ban3 and every later handler take:
+	// as rules, it would be refused by the ban3 a server runs until its proxy is upgraded — every
+	// deploy's reload, and the upgrade's own.
+	return caddyRoute{Match: []match{{Not: allowed(p)}}, Handle: []handler{{Handler: "boks_ban", Limit: b.Limit, Window: b.Window,
+		Rules: b.Rules, Heuristics: b.Heuristics, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges}}}
 }
 
 // domainsPattern matches a Host that is one of domains or under one at any depth, with or without a

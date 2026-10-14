@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -213,9 +214,10 @@ func TestSetPolicyMarksTheRoutesForOlderBoks(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := d.files[Dir+"/routes/_server.json"]
-	// 6: a boks of format 5 knows the trusted proxies but not the ban, and would drop it.
-	if marker != "6\n" || FragmentFormat <= 5 {
-		t.Errorf("want the marker to hold format %d, above the 5 of a boks without the ban: %q", FragmentFormat, marker)
+	// 7: a boks of format 6 knows the ban's one limit but not its rules and heuristics, and would
+	// assemble a handler without them.
+	if marker != "7\n" || FragmentFormat <= 6 {
+		t.Errorf("want the marker to hold format %d, above the 6 of a boks without the ban's rules: %q", FragmentFormat, marker)
 	}
 	if pol, mark := index(d.calls, "upload "+ServerDir+"/policy.json"), index(d.calls, "upload "+Dir+"/routes/_server.json"); mark < 0 || pol < mark {
 		t.Errorf("want the marker before the policy: %v", d.calls)
@@ -320,6 +322,8 @@ func TestAnUnreadablePolicyStopsTheReload(t *testing.T) {
 	}
 }
 
+// dbautoBan is a ban as a boks of format 6 recorded it, one limit: a revision of the history a
+// rollback puts back.
 var dbautoBan = &Ban{Limit: 300, Window: "1m", Duration: "24h",
 	ExemptPaths: []string{"^/api/[a-z]+/pics", "^/api/auctions/[^/]+/(image|video)"}, ExemptRanges: []string{"198.51.100.0/24"}}
 
@@ -389,5 +393,97 @@ func TestSamePolicySeesTheBan(t *testing.T) {
 	a.Ban = &c
 	if SamePolicy(a, b) {
 		t.Error("want another limit to make another policy")
+	}
+	// The same server.yml validated today: its limit as the rule default.
+	d := *dbautoBan
+	d.Limit, d.Window, d.Rules = 0, "", []BanRule{{Name: "default", Limit: 300, Window: "1m", Class: "all"}}
+	a.Ban = &d
+	if !SamePolicy(a, b) || !SamePolicy(b, a) {
+		t.Error("want a ban of format 6 to be the same policy as its rule default")
+	}
+	d.Rules = []BanRule{{Name: "default", Limit: 300, Window: "10m", Class: "all"}}
+	if SamePolicy(a, b) {
+		t.Error("want another window of the rule default to make another policy")
+	}
+	a.Ban, b.Ban = hbSitesBan(), hbSitesBan()
+	if !SamePolicy(a, b) {
+		t.Error("want the same rules to make the same policy")
+	}
+	b.Ban.Rules[2].Class = "api"
+	if SamePolicy(a, b) {
+		t.Error("want another class to make another policy")
+	}
+	b.Ban = hbSitesBan()
+	b.Ban.Heuristics.Mode = "ban"
+	if SamePolicy(a, b) {
+		t.Error("want another mode to make another policy")
+	}
+}
+
+// hbSitesBan is the ban the plan sets for hb-sites, with a rule on paths beside.
+func hbSitesBan() *Ban {
+	return &Ban{Duration: "24h", Rules: []BanRule{
+		{Name: "all-1m", Limit: 1500, Window: "1m", Class: "all"},
+		{Name: "all-10m", Limit: 2500, Window: "10m", Class: "all"},
+		{Name: "pages", Limit: 120, Window: "1m", Class: "page"},
+		{Name: "report", Limit: 30, Window: "1m", Class: "api", Paths: []string{"^/api/[a-z]+/report$"}},
+	}, Heuristics: &BanHeuristics{Mode: "log", Cluster: BanCluster{Limit: 300, Window: "10m", MinAddresses: 10}},
+		ExemptPaths: []string{"^/api/[a-z]+/pics"}}
+}
+
+// The handler gets the rules and the heuristics as the policy holds them, typed, in a stable order.
+func TestConfigCarriesTheBansRules(t *testing.T) {
+	p := habsida
+	p.Ban = hbSitesBan()
+	b, err := Config(p, []Fragment{{App: "a", Routes: web}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := json.Marshal(dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)[0].(map[string]any)["handle"])
+	want := `[{"duration":"24h","exempt_paths":["^/api/[a-z]+/pics"],"handler":"boks_ban",` +
+		`"heuristics":{"cluster":{"limit":300,"min_addresses":10,"window":"10m"},"mode":"log"},"rules":[` +
+		`{"class":"all","limit":1500,"name":"all-1m","window":"1m"},{"class":"all","limit":2500,"name":"all-10m","window":"10m"},` +
+		`{"class":"page","limit":120,"name":"pages","window":"1m"},` +
+		`{"class":"api","limit":30,"name":"report","paths":["^/api/[a-z]+/report$"],"window":"1m"}]}]`
+	if string(h) != want {
+		t.Errorf("handler:\n got %s\nwant %s", h, want)
+	}
+	again, _ := Config(p, []Fragment{{App: "a", Routes: web}})
+	if !bytes.Equal(b, again) {
+		t.Error("want the same policy to make the same bytes")
+	}
+}
+
+// The ban reads as its rules, and a ban of format 6 as its one rule.
+func TestBanString(t *testing.T) {
+	if got, want := hbSitesBan().String(), "ban: an address past a rule is refused for 24h — all-1m: 1500 in 1m; all-10m: 2500 in 10m; "+
+		"pages: 120 page requests in 1m; report: 30 api requests on 1 path in 1m; heuristics log, cluster of 300 in 10m from 10 addresses"; got != want {
+		t.Errorf("\n got %s\nwant %s", got, want)
+	}
+	if got, want := dbautoBan.String(), "ban: an address past a rule is refused for 24h — default: 300 in 1m"; got != want {
+		t.Errorf("\n got %s\nwant %s", got, want)
+	}
+}
+
+// A revision a boks of format 6 recorded — the policy on hb-sites, and the history a rollback puts
+// back — goes to the handler in its own form, the bytes that boks assembled: the ban3 a server runs
+// until its proxy is upgraded refuses rules, and a config that changed under an unchanged policy would
+// make every deploy reload it, and the upgrade reload it into the old proxy before the swap.
+func TestConfigKeepsABanOfFormat6(t *testing.T) {
+	var p Policy
+	if err := json.Unmarshal([]byte(`{"revision":7,"ban":{"limit":1500,"window":"1m","duration":"24h","exempt_paths":["^/x"]}}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Config(p, []Fragment{{App: "a", Routes: web}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, b); err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"handler":"boks_ban","limit":1500,"window":"1m","duration":"24h","exempt_paths":["^/x"]}`; !strings.Contains(compact.String(), want) ||
+		strings.Contains(compact.String(), `"rules"`) {
+		t.Errorf("want the ban of format 6 as that boks wrote it, %s:\n%s", want, compact.String())
 	}
 }

@@ -40,30 +40,75 @@ type Server struct {
 	Ban *Ban `yaml:"ban"`
 }
 
-// Ban is the ban by request rate. An address that sends more than Limit requests within Window — on
-// all the server's hosts together — gets 403 for Duration. Not counted: loopback and the private
-// networks, what bots.allow lets through, Next.js's /_next/, a page's images, media, fonts, styles
-// and scripts by Sec-Fetch-Dest, ACME's challenge, and ExemptPaths and ExemptRanges.
+// Ban is the ban by request rate. An address that sends more than a rule's Limit requests within its
+// Window — on all the server's hosts together — gets 403 for Duration. Not counted by any rule:
+// loopback and the private networks, what bots.allow lets through, Next.js's /_next/, ACME's
+// challenge, and ExemptPaths and ExemptRanges; a page's images, media, fonts, styles and scripts by
+// Sec-Fetch-Dest are left out of the rules of class all and page only.
 type Ban struct {
-	// Limit is 300 when not given.
-	Limit int `yaml:"limit"`
-	// Window is 1m when not given; Duration 24h. Go durations, in whole seconds.
-	Window   string `yaml:"window"`
+	// Limit and Window are the ban written before rules: one rule, default, of class all. They go
+	// without Rules; 300 and 1m when neither they nor Rules are given. validate turns them into that
+	// rule and clears them, so a policy holds rules alone.
+	Limit  int    `yaml:"limit"`
+	Window string `yaml:"window"`
+	// Duration is 24h when not given. Go durations, in whole seconds.
 	Duration string `yaml:"duration"`
+	// Rules each count on their own; the first one an address goes past bans it.
+	Rules []BanRule `yaml:"rules"`
+	// Heuristics, when given and not off, look for requests a browser would not send.
+	Heuristics *BanHeuristics `yaml:"heuristics"`
 	// ExemptPaths are regular expressions on the request's path, such as ^/api/[a-z]+/pics.
 	ExemptPaths []string `yaml:"exempt_paths"`
 	// ExemptRanges are addresses or CIDR ranges, such as a client's office.
 	ExemptRanges []string `yaml:"exempt_ranges"`
 }
 
+// BanRule counts the requests of an address its selector takes: those of Class and, when Paths are
+// given, on a path one of them matches.
+type BanRule struct {
+	Name   string `yaml:"name"`
+	Limit  int    `yaml:"limit"`
+	Window string `yaml:"window"`
+	// Class is all — every request counted — when not given; page is a GET outside /api/ that is not
+	// Next.js's prefetch; api is a request under /api/.
+	Class string `yaml:"class"`
+	// Paths are regular expressions on the cleaned path.
+	Paths []string `yaml:"paths"`
+}
+
+// BanHeuristics flag requests whose headers no browser sends together, and the clusters of addresses
+// that send them with one fingerprint. Mode is off, log — the journal only — or ban: 403 to the
+// cluster's requests for the ban's duration.
+type BanHeuristics struct {
+	Mode    string     `yaml:"mode"`
+	Cluster BanCluster `yaml:"cluster"`
+}
+
+// BanCluster is a fingerprint sending more than Limit flagged requests within Window from at least
+// MinAddresses addresses.
+type BanCluster struct {
+	Limit        int    `yaml:"limit"`
+	Window       string `yaml:"window"`
+	MinAddresses int    `yaml:"min_addresses"`
+}
+
 // The ban's defaults and bounds. A window past an hour or a ban past 30 days is a typo more often
-// than a policy, and both are memory the proxy holds per address.
+// than a policy, and both are memory the proxy holds per address; so is a rule past the 16th. The
+// cluster's defaults are the plan's for hb-sites: the storm on dbauto sent some 1 200 flagged requests
+// in 10 minutes from 72 addresses. Its addresses are held per fingerprint up to MinAddresses, so 100
+// bounds that memory.
 const (
-	DefaultBanLimit    = 300
-	DefaultBanWindow   = "1m"
-	DefaultBanDuration = "24h"
-	maxBanWindow       = time.Hour
-	maxBanDuration     = 30 * 24 * time.Hour
+	DefaultBanLimit         = 300
+	DefaultBanWindow        = "1m"
+	DefaultBanDuration      = "24h"
+	DefaultBanRule          = "default"
+	DefaultClusterLimit     = 300
+	DefaultClusterWindow    = "10m"
+	DefaultClusterAddresses = 10
+	maxBanWindow            = time.Hour
+	maxBanDuration          = 30 * 24 * time.Hour
+	maxBanRules             = 16
+	maxClusterAddresses     = 100
 )
 
 // ExemptPrefixes are ExemptRanges as CIDR ranges, as Prefixes are an egress's Allow.
@@ -350,42 +395,138 @@ func (e *Egress) validate() error {
 var egressUserRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // validate fills in the defaults and writes the durations one way, so the same ban is the same
-// policy whatever its file wrote (60s and 1m).
+// policy whatever its file wrote (60s and 1m, no class and all, limit and window and their rule).
 func (b *Ban) validate() error {
-	if b.Limit == 0 {
-		b.Limit = DefaultBanLimit
+	if b.Rules != nil && (b.Limit != 0 || b.Window != "") {
+		return errors.New("limit and window go without rules: write the limit as a rule of its own")
 	}
-	if b.Window == "" {
-		b.Window = DefaultBanWindow
+	if b.Rules == nil {
+		b.Rules = []BanRule{{Name: DefaultBanRule, Limit: b.Limit, Window: b.Window}}
+		if b.Rules[0].Limit == 0 {
+			b.Rules[0].Limit = DefaultBanLimit
+		}
+		if b.Rules[0].Window == "" {
+			b.Rules[0].Window = DefaultBanWindow
+		}
+		// Checked as the rule, but named as the file wrote them.
+		if err := b.Rules[0].validate(); err != nil {
+			return errors.New(strings.TrimPrefix(err.Error(), "rules[default]: "))
+		}
+		b.Limit, b.Window = 0, ""
 	}
 	if b.Duration == "" {
 		b.Duration = DefaultBanDuration
 	}
-	if b.Limit < 1 {
-		return fmt.Errorf("limit %d: must be at least 1", b.Limit)
+	switch n := len(b.Rules); {
+	case n == 0:
+		return errors.New("rules: empty, and would count nothing; remove the key for the default rule")
+	case n > maxBanRules:
+		return fmt.Errorf("rules: %d of them, more than %d", n, maxBanRules)
 	}
-	window, err := banDuration("window", b.Window, maxBanWindow)
-	if err != nil {
-		return err
+	names := map[string]bool{}
+	for i := range b.Rules {
+		r := &b.Rules[i]
+		if !nameRe.MatchString(r.Name) {
+			return fmt.Errorf("rules[%d]: name %q must match %s", i, r.Name, nameRe)
+		}
+		if names[r.Name] {
+			return fmt.Errorf("rules[%s]: the name is used twice", r.Name)
+		}
+		names[r.Name] = true
+		if err := r.validate(); err != nil {
+			return err
+		}
 	}
 	duration, err := banDuration("duration", b.Duration, maxBanDuration)
 	if err != nil {
 		return err
 	}
-	b.Window, b.Duration = formatDuration(window), formatDuration(duration)
-	for _, p := range b.ExemptPaths {
-		if p == "" {
-			return errors.New("exempt_paths: an empty pattern matches every path, and would turn the ban off")
+	b.Duration = formatDuration(duration)
+	if b.Heuristics != nil {
+		if err := b.Heuristics.validate(); err != nil {
+			return fmt.Errorf("heuristics: %w", err)
 		}
-		if _, err := regexp.Compile(p); err != nil {
-			return fmt.Errorf("exempt_paths: %q is not a regular expression: %w", p, err)
+		if b.Heuristics.Mode == "off" {
+			b.Heuristics = nil
 		}
+	}
+	if err := checkPatterns(b.ExemptPaths, "turn the ban off"); err != nil {
+		return fmt.Errorf("exempt_paths: %w", err)
 	}
 	if err := checkRanges(b.ExemptRanges, "addresses to leave uncounted"); err != nil {
 		return fmt.Errorf("exempt_ranges: %w", err)
 	}
 	if err := checkWrittenAsIPv4(b.ExemptRanges); err != nil {
 		return fmt.Errorf("exempt_ranges: %w", err)
+	}
+	return nil
+}
+
+func (r *BanRule) validate() error {
+	if r.Class == "" {
+		r.Class = "all"
+	}
+	if r.Limit < 1 {
+		return fmt.Errorf("rules[%s]: limit %d: must be at least 1", r.Name, r.Limit)
+	}
+	window, err := banDuration("window", r.Window, maxBanWindow)
+	if err != nil {
+		return fmt.Errorf("rules[%s]: %w", r.Name, err)
+	}
+	r.Window = formatDuration(window)
+	if r.Class != "all" && r.Class != "page" && r.Class != "api" {
+		return fmt.Errorf("rules[%s]: class %q must be all, page or api", r.Name, r.Class)
+	}
+	if err := checkPatterns(r.Paths, "count every path, which is what no paths say"); err != nil {
+		return fmt.Errorf("rules[%s]: paths: %w", r.Name, err)
+	}
+	return nil
+}
+
+// validate fills in the cluster's defaults, whatever the mode: off keeps the numbers the next mode
+// would use, though the policy drops them with it.
+func (h *BanHeuristics) validate() error {
+	if h.Mode == "" {
+		h.Mode = "off"
+	}
+	if h.Mode != "off" && h.Mode != "log" && h.Mode != "ban" {
+		return fmt.Errorf("mode %q must be off, log or ban", h.Mode)
+	}
+	c := &h.Cluster
+	if c.Limit == 0 {
+		c.Limit = DefaultClusterLimit
+	}
+	if c.Window == "" {
+		c.Window = DefaultClusterWindow
+	}
+	if c.MinAddresses == 0 {
+		c.MinAddresses = DefaultClusterAddresses
+	}
+	if c.Limit < 1 {
+		return fmt.Errorf("cluster: limit %d: must be at least 1", c.Limit)
+	}
+	window, err := banDuration("window", c.Window, maxBanWindow)
+	if err != nil {
+		return fmt.Errorf("cluster: %w", err)
+	}
+	c.Window = formatDuration(window)
+	// One address is the address's own rules' business; past the bound, the memory of every fingerprint grows.
+	if c.MinAddresses < 2 || c.MinAddresses > maxClusterAddresses {
+		return fmt.Errorf("cluster: min_addresses %d: must be from 2 to %d", c.MinAddresses, maxClusterAddresses)
+	}
+	return nil
+}
+
+// checkPatterns refuses an empty pattern, which matches everything — what would turns says — and one
+// that does not compile as Caddy's Go RE2 compiles it.
+func checkPatterns(list []string, would string) error {
+	for _, p := range list {
+		if p == "" {
+			return fmt.Errorf("an empty pattern matches every path, and would %s", would)
+		}
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("%q is not a regular expression: %w", p, err)
+		}
 	}
 	return nil
 }

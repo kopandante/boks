@@ -5,11 +5,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kopandante/boks/internal/config"
+	"github.com/kopandante/boks/internal/proxy"
 )
 
 const policyRead = "sh -c if [ -f '.boks/_server/policy.json' ]"
@@ -259,16 +261,44 @@ func TestServerStatusSaysTheHairpinOfEveryServer(t *testing.T) {
 	}
 }
 
-// The policy carries server.yml's ban as the config checked it: defaults filled in, ranges as ranges.
+// The policy carries server.yml's ban as the config checked it: defaults filled in, limit and window
+// as the rule default, ranges as ranges, the rules and the heuristics typed.
 func TestPolicyOfCarriesTheBan(t *testing.T) {
 	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\nban:\n  window: 60s\n  exempt_paths: [\"^/api/[a-z]+/pics\"]\n  exempt_ranges: [203.0.113.7]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := policyOf(sc).Ban
-	if b == nil || b.Limit != 300 || b.Window != "1m" || b.Duration != "24h" || strings.Join(b.ExemptPaths, " ") != "^/api/[a-z]+/pics" ||
-		strings.Join(b.ExemptRanges, " ") != "203.0.113.7/32" {
+	if b == nil || !reflect.DeepEqual(b.Rules, []proxy.BanRule{{Name: "default", Limit: 300, Window: "1m", Class: "all"}}) || b.Limit != 0 || b.Window != "" ||
+		b.Duration != "24h" || b.Heuristics != nil || strings.Join(b.ExemptPaths, " ") != "^/api/[a-z]+/pics" || strings.Join(b.ExemptRanges, " ") != "203.0.113.7/32" {
 		t.Errorf("ban: %+v", b)
+	}
+	sc, err = config.ParseServer([]byte(`servers: [a]
+revision: 1
+ban:
+  rules:
+    - {name: all-10m, limit: 2500, window: 10m}
+    - {name: report, limit: 30, window: 1m, class: api, paths: ["^/api/[a-z]+/report$"]}
+  heuristics: {mode: log}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = policyOf(sc).Ban
+	if want := []proxy.BanRule{{Name: "all-10m", Limit: 2500, Window: "10m", Class: "all"},
+		{Name: "report", Limit: 30, Window: "1m", Class: "api", Paths: []string{"^/api/[a-z]+/report$"}}}; !reflect.DeepEqual(b.Rules, want) {
+		t.Errorf("rules: %+v", b.Rules)
+	}
+	if h := b.Heuristics; h == nil || *h != (proxy.BanHeuristics{Mode: "log", Cluster: proxy.BanCluster{Limit: 300, Window: "10m", MinAddresses: 10}}) {
+		t.Errorf("heuristics: %+v", h)
+	}
+	// The cluster's numbers as the file wrote them, not the defaults.
+	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\nban:\n  heuristics: {mode: ban, cluster: {limit: 50, window: 120s, min_addresses: 3}}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := policyOf(sc).Ban.Heuristics; h == nil || *h != (proxy.BanHeuristics{Mode: "ban", Cluster: proxy.BanCluster{Limit: 50, Window: "2m", MinAddresses: 3}}) {
+		t.Errorf("heuristics as written: %+v", h)
 	}
 	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\n"))
 	if err != nil || policyOf(sc).Ban != nil {
