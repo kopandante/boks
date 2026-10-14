@@ -577,6 +577,26 @@ func TestAWidenedWindowKeepsTheCount(t *testing.T) {
 	}
 }
 
+// A sweep between a reload that widened a window and the address's next request judges the count by
+// the new window: 300 at 30 s under 1m, widened to 2m at 50 s, a sweep at 2m from another address,
+// and the 301st request of the first, 90 s into its window, bans.
+func TestASweepAfterAWidenedWindowKeepsTheCount(t *testing.T) {
+	c := fixture(t)
+	before, _ := provisioned(t, `{"duration": "24h", "rules": [{"name": "default", "limit": 300, "window": "1m"}]}`)
+	serve(t, before, request("192.0.2.1", "/")) // sweeps at 0
+	c.add(30 * time.Second)
+	for range 300 {
+		serve(t, before, request("198.51.100.7", "/"))
+	}
+	c.add(20 * time.Second)
+	after, _ := provisioned(t, `{"duration": "24h", "rules": [{"name": "default", "limit": 300, "window": "2m"}]}`)
+	c.add(70 * time.Second)
+	serve(t, after, request("192.0.2.2", "/")) // the sweep, at 2m
+	if code := serve(t, after, request("198.51.100.7", "/")); code != 403 {
+		t.Errorf("want the count kept through the sweep under the widened window, got %d", code)
+	}
+}
+
 func TestAPolicyOfFormat6RunsAsTheRuleDefault(t *testing.T) {
 	fixture(t)
 	h, _ := provisioned(t, `{"limit": 2, "window": "1m", "duration": "1h"}`)

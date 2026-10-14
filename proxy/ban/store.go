@@ -58,13 +58,12 @@ type entry struct {
 	counters []counter // one per rule that counted a request of the address, in no order
 }
 
-// counter is a rule's count of an address: 40 bytes, so that 16 rules over the tracked addresses stay
+// counter is a rule's count of an address: 32 bytes, so that 16 rules over the tracked addresses stay
 // within the memory DefaultMaxTracked is measured with.
 type counter struct {
-	rule   string
-	window time.Duration
-	start  time.Duration // the window's start, as an offset from the store's epoch
-	count  int32
+	rule  string
+	start time.Duration // the window's start, as an offset from the store's epoch
+	count int32
 }
 
 func newStore(now func() time.Time) *store {
@@ -140,15 +139,14 @@ func (s *store) hit(a netip.Addr, rules []rule, counts uint64, duration time.Dur
 
 // counter is e's count for r, a new one when e has none of r's name. A rule of that name whose limit
 // or window changed keeps its count and start: the hit judges them by the limit and window it is
-// handed, and the counter takes the new window for the sweep.
+// handed, and the sweep by the rule's current window.
 func (e *entry) counter(r rule) *counter {
 	for i := range e.counters {
 		if c := &e.counters[i]; c.rule == r.name {
-			c.window = r.window
 			return c
 		}
 	}
-	e.counters = append(e.counters, counter{rule: r.name, window: r.window, start: -r.window})
+	e.counters = append(e.counters, counter{rule: r.name, start: -r.window})
 	return &e.counters[len(e.counters)-1]
 }
 
@@ -173,7 +171,7 @@ func (s *store) sweep(now time.Time, rules []rule) {
 	for a, e := range s.entries {
 		kept := e.counters[:0]
 		for _, c := range e.counters {
-			if now.Sub(s.epoch)-c.start < c.window && holds(rules, c) {
+			if w, ok := window(rules, c); ok && now.Sub(s.epoch)-c.start < w {
 				kept = append(kept, c)
 			}
 		}
@@ -185,14 +183,15 @@ func (s *store) sweep(now time.Time, rules []rule) {
 	}
 }
 
-// holds says whether rules still hold the rule c counts for.
-func holds(rules []rule, c counter) bool {
+// window is the window rules now give the rule c counts for, and whether they still hold it: a sweep
+// judges a count by the current rule, so a reload that widened a window keeps the counts it covers.
+func window(rules []rule, c counter) (time.Duration, bool) {
 	for _, r := range rules {
 		if r.name == c.rule {
-			return true
+			return r.window, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // printVerdict is what to do with a flagged request, and what to write of it.
