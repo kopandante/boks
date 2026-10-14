@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -193,14 +195,15 @@ func TestParseServerTrustedProxiesRejects(t *testing.T) {
 	}
 }
 
-// A ban without fields is 300 requests a minute for a day; durations are written one way, ranges as
-// given.
+// A ban without fields is one rule, default: 300 requests a minute bans for a day; durations are
+// written one way, ranges as given.
 func TestParseServerBan(t *testing.T) {
 	s, err := ParseServer([]byte("servers: [a]\nrevision: 1\nban: {}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b := s.Ban; b.Limit != 300 || b.Window != "1m" || b.Duration != "24h" || b.ExemptPaths != nil || b.ExemptPrefixes() != nil {
+	if b := s.Ban; !reflect.DeepEqual(b.Rules, []BanRule{{Name: "default", Limit: 300, Window: "1m", Class: "all"}}) ||
+		b.Limit != 0 || b.Window != "" || b.Duration != "24h" || b.Heuristics != nil || b.ExemptPaths != nil || b.ExemptPrefixes() != nil {
 		t.Errorf("defaults: %+v", b)
 	}
 	s, err = ParseServer([]byte(`servers: [a]
@@ -220,7 +223,8 @@ ban:
 	for _, p := range b.ExemptPrefixes() {
 		ranges = append(ranges, p.String())
 	}
-	if b.Limit != 120 || b.Window != "1m" || b.Duration != "24h" || len(b.ExemptPaths) != 2 || strings.Join(ranges, " ") != "203.0.113.7/32 198.51.100.0/24" {
+	if !reflect.DeepEqual(b.Rules, []BanRule{{Name: "default", Limit: 120, Window: "1m", Class: "all"}}) || b.Duration != "24h" ||
+		len(b.ExemptPaths) != 2 || strings.Join(ranges, " ") != "203.0.113.7/32 198.51.100.0/24" {
 		t.Errorf("ban: %+v, ranges %v", b, ranges)
 	}
 	for in, want := range map[string]string{"90s": "1m30s", "1h": "1h", "5400s": "1h30m", "720h": "720h", "1h0m1s": "1h0m1s"} {
@@ -234,8 +238,64 @@ ban:
 	}
 }
 
+// hbSites is the ban the plan sets for hb-sites: two windows over everything, one over pages, and
+// the heuristics in the journal only.
+const hbSites = `servers: [hb-sites]
+revision: 3
+ban:
+  duration: 24h
+  rules:
+    - {name: all-1m, limit: 1500, window: 60s}
+    - {name: all-10m, limit: 2500, window: 10m, class: all}
+    - {name: pages, limit: 120, window: 1m, class: page}
+    - {name: report, limit: 30, window: 1m, class: api, paths: ["^/api/[a-z]+/report$"]}
+  heuristics:
+    mode: log
+    cluster: {limit: 300, window: 600s, min_addresses: 10}
+`
+
+// Rules are taken as written, their class and windows written one way; the heuristics fill in the
+// cluster's defaults and `mode: off` is no heuristics at all.
+func TestParseServerBanRules(t *testing.T) {
+	s, err := ParseServer([]byte(hbSites))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := s.Ban
+	want := []BanRule{
+		{Name: "all-1m", Limit: 1500, Window: "1m", Class: "all"},
+		{Name: "all-10m", Limit: 2500, Window: "10m", Class: "all"},
+		{Name: "pages", Limit: 120, Window: "1m", Class: "page"},
+		{Name: "report", Limit: 30, Window: "1m", Class: "api", Paths: []string{"^/api/[a-z]+/report$"}},
+	}
+	if !reflect.DeepEqual(b.Rules, want) || b.Limit != 0 || b.Window != "" {
+		t.Errorf("rules: %+v", b)
+	}
+	if h := b.Heuristics; h == nil || *h != (BanHeuristics{Mode: "log", Cluster: BanCluster{Limit: 300, Window: "10m", MinAddresses: 10}}) {
+		t.Errorf("heuristics: %+v", h)
+	}
+	s, err = ParseServer([]byte("servers: [a]\nrevision: 1\nban:\n  heuristics: {mode: ban}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := s.Ban.Heuristics; h == nil || *h != (BanHeuristics{Mode: "ban", Cluster: BanCluster{Limit: 300, Window: "10m", MinAddresses: 10}}) {
+		t.Errorf("cluster defaults: %+v", h)
+	}
+	for _, off := range []string{"{}", "{mode: off}", "{mode: off, cluster: {limit: 5}}"} {
+		s, err := ParseServer([]byte("servers: [a]\nrevision: 1\nban:\n  heuristics: " + off + "\n"))
+		if err != nil || s.Ban.Heuristics != nil {
+			t.Errorf("%s: want no heuristics, got %+v %v", off, s, err)
+		}
+	}
+}
+
 func TestParseServerBanRejects(t *testing.T) {
 	ban := func(body string) string { return "servers: [a]\nrevision: 1\nban: " + body + "\n" }
+	rules := func(list string) string { return ban(`{rules: ` + list + `}`) }
+	var seventeen []string
+	for i := range 17 {
+		seventeen = append(seventeen, fmt.Sprintf("{name: r%d, limit: 1, window: 1m}", i))
+	}
 	for _, c := range []struct{ doc, want string }{
 		{"servers: [a]\nban: {}\n", "revision"},
 		{ban(`{limit: -1}`), "ban: limit -1: must be at least 1"},
@@ -254,6 +314,26 @@ func TestParseServerBanRejects(t *testing.T) {
 		{ban(""), "ban: empty; write `ban: {}`"},
 		{"servers: [a]\nrevision: 1\nban:\n  # limit: 300\n", "ban: empty"},
 		{ban("~"), "ban: empty"},
+		// Rules replace limit and window: both at once would leave which one counts to a guess.
+		{ban(`{limit: 300, rules: [{name: a, limit: 1, window: 1m}]}`), "ban: limit and window go without rules"},
+		{ban(`{window: 1m, rules: [{name: a, limit: 1, window: 1m}]}`), "go without rules"},
+		{rules(`[]`), "ban: rules: empty"},
+		{rules("[" + strings.Join(seventeen, ", ") + "]"), "ban: rules: 17 of them, more than 16"},
+		{rules(`[{limit: 1, window: 1m}]`), `ban: rules[0]: name "" must match`},
+		{rules(`[{name: All, limit: 1, window: 1m}]`), "must match"},
+		{rules(`[{name: a, limit: 1, window: 1m}, {name: a, limit: 2, window: 10m}]`), "ban: rules[a]: the name is used twice"},
+		{rules(`[{name: a, window: 1m}]`), "ban: rules[a]: limit 0: must be at least 1"},
+		{rules(`[{name: a, limit: 1}]`), `ban: rules[a]: window: "" is not a duration`},
+		{rules(`[{name: a, limit: 1, window: 2h}]`), "ban: rules[a]: window: 2h is longer than 1h"},
+		{rules(`[{name: a, limit: 1, window: 1m, class: pages}]`), `ban: rules[a]: class "pages" must be all, page or api`},
+		{rules(`[{name: a, limit: 1, window: 1m, paths: [""]}]`), "ban: rules[a]: paths: an empty pattern"},
+		{rules(`[{name: a, limit: 1, window: 1m, paths: ["("]}]`), `ban: rules[a]: paths: "(" is not a regular expression`},
+		{rules(`[{name: a, limit: 1, window: 1m, path: [x]}]`), "field path not found"},
+		{ban(`{heuristics: {mode: block}}`), `ban: heuristics: mode "block" must be off, log or ban`},
+		{ban(`{heuristics: {mode: log, cluster: {limit: -1}}}`), "ban: heuristics: cluster: limit -1: must be at least 1"},
+		{ban(`{heuristics: {mode: log, cluster: {window: 2h}}}`), "ban: heuristics: cluster: window: 2h is longer than 1h"},
+		{ban(`{heuristics: {mode: log, cluster: {min_addresses: 1}}}`), "ban: heuristics: cluster: min_addresses 1: must be from 2 to 100"},
+		{ban(`{heuristics: {mode: log, cluster: {min_addresses: 101}}}`), "must be from 2 to 100"},
 	} {
 		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc), c.want, err)
