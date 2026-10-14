@@ -511,8 +511,8 @@ func TestClassesCountTheirOwn(t *testing.T) {
 	}
 }
 
-// A reload with other rules: a rule kept as it was keeps its count; one whose window or limit
-// changed starts again; one removed is dropped at the next sweep. A ban outlives any of it, rules
+// A reload with other rules: a rule kept as it was keeps its count, and so does one whose limit alone
+// changed; one whose window changed starts again; one removed is dropped at the next sweep. A ban outlives any of it, rules
 // gone included, and provisioning changes nothing of the shared state.
 func TestAReloadWithOtherRules(t *testing.T) {
 	c := fixture(t)
@@ -534,7 +534,7 @@ func TestAReloadWithOtherRules(t *testing.T) {
 		t.Fatal("want provisioning to leave the shared state as it was")
 	}
 	serve(t, after, request("198.51.100.7", "/"))
-	if got := shared.counters("198.51.100.7"); got["kept"] != 4 || got["changed"] != 1 || got["relimited"] != 1 || got["new"] != 1 || got["gone"] != 3 {
+	if got := shared.counters("198.51.100.7"); got["kept"] != 4 || got["changed"] != 1 || got["relimited"] != 4 || got["new"] != 1 || got["gone"] != 3 {
 		t.Errorf("after the reload: %v", got)
 	}
 	c.add(time.Minute)
@@ -544,6 +544,20 @@ func TestAReloadWithOtherRules(t *testing.T) {
 	}
 	if code := serve(t, after, request("198.51.100.9", "/")); code != 403 {
 		t.Errorf("want the ban kept though its rule is gone: %d", code)
+	}
+}
+
+// A lowered limit holds the count an address already has to it at once, as v1 did across a reload:
+// 200 requests under 300 a minute, then 100 a minute, and the next request bans.
+func TestALoweredLimitBansOnTheCountAlreadyMade(t *testing.T) {
+	fixture(t)
+	before, _ := provisioned(t, `{"duration": "24h", "rules": [{"name": "default", "limit": 300, "window": "1m"}]}`)
+	for range 200 {
+		serve(t, before, request("198.51.100.7", "/"))
+	}
+	after, _ := provisioned(t, `{"duration": "24h", "rules": [{"name": "default", "limit": 100, "window": "1m"}]}`)
+	if code := serve(t, after, request("198.51.100.7", "/")); code != 403 {
+		t.Errorf("want the lowered limit to ban on the count already made, got %d", code)
 	}
 }
 

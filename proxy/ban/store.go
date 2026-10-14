@@ -14,12 +14,17 @@ var shared = newStore(time.Now)
 // comparisons per rule, well under a microsecond, and the server's whole traffic passes it.
 //
 // The store knows rules only by what a hit hands it: the handler of a reload brings its own, and a
-// count belongs to the rule of its name, window and limit. A rule whose window or limit changed counts
-// again from its next request; a rule no longer given loses its counts at the next sweep. A ban is the
-// address's, not a rule's, and outlives any reload.
+// count belongs to the rule of its name and window. A rule whose window changed counts again from its
+// next request; one whose limit changed keeps its count and is held to the new limit at once, as v1
+// held a count across a reload; a rule no longer given loses its counts at the next sweep. A ban is
+// the address's, not a rule's, and outlives any reload.
 type store struct {
-	mu      sync.Mutex
-	now     func() time.Time
+	mu  sync.Mutex
+	now func() time.Time
+	// epoch is when the store began: counters keep their window's start as an offset from it, so a
+	// step of the wall clock (NTP, a resumed VM) neither stretches nor cuts a window — time.Time's
+	// monotonic reading carries the Sub.
+	epoch   time.Time
 	entries map[netip.Addr]*entry
 	// swept is when expired counts were last removed; a sweep runs at most once a shortest window.
 	swept time.Time
@@ -58,13 +63,12 @@ type entry struct {
 type counter struct {
 	rule   string
 	window time.Duration
-	start  int64 // the window's start, in Unix nanoseconds
-	limit  int32
+	start  time.Duration // the window's start, as an offset from the store's epoch
 	count  int32
 }
 
 func newStore(now func() time.Time) *store {
-	return &store{now: now, entries: map[netip.Addr]*entry{}, prints: map[string]*print{}}
+	return &store{now: now, epoch: now(), entries: map[netip.Addr]*entry{}, prints: map[string]*print{}}
 }
 
 type outcome int
@@ -122,8 +126,8 @@ func (s *store) hit(a netip.Addr, rules []rule, counts uint64, duration time.Dur
 			continue
 		}
 		c := e.counter(r)
-		if now.UnixNano()-c.start >= int64(r.window) {
-			c.start, c.count = now.UnixNano(), 0
+		if at := now.Sub(s.epoch); at-c.start >= r.window {
+			c.start, c.count = at, 0
 		}
 		c.count++
 		if int(c.count) > r.limit {
@@ -134,18 +138,19 @@ func (s *store) hit(a netip.Addr, rules []rule, counts uint64, duration time.Dur
 	return verdict{outcome: pass}
 }
 
-// counter is e's count for r, a new one when e has none of r's name, window and limit — a rule of
-// that name changed since starts again.
+// counter is e's count for r, a new one when e has none of r's name and window — a rule of that name
+// whose window changed since starts again. A changed limit keeps the count: the hit compares it with
+// the limit it is handed.
 func (e *entry) counter(r rule) *counter {
 	for i := range e.counters {
 		if c := &e.counters[i]; c.rule == r.name {
-			if c.window != r.window || int(c.limit) != r.limit {
-				*c = counter{rule: r.name, window: r.window, limit: int32(r.limit)}
+			if c.window != r.window {
+				*c = counter{rule: r.name, window: r.window, start: -r.window}
 			}
 			return c
 		}
 	}
-	e.counters = append(e.counters, counter{rule: r.name, window: r.window, limit: int32(r.limit)})
+	e.counters = append(e.counters, counter{rule: r.name, window: r.window, start: -r.window})
 	return &e.counters[len(e.counters)-1]
 }
 
@@ -170,7 +175,7 @@ func (s *store) sweep(now time.Time, rules []rule) {
 	for a, e := range s.entries {
 		kept := e.counters[:0]
 		for _, c := range e.counters {
-			if now.UnixNano()-c.start < int64(c.window) && holds(rules, c) {
+			if now.Sub(s.epoch)-c.start < c.window && holds(rules, c) {
 				kept = append(kept, c)
 			}
 		}
@@ -185,7 +190,7 @@ func (s *store) sweep(now time.Time, rules []rule) {
 // holds says whether rules still hold the rule c counts for.
 func holds(rules []rule, c counter) bool {
 	for _, r := range rules {
-		if r.name == c.rule && r.window == c.window && r.limit == int(c.limit) {
+		if r.name == c.rule && r.window == c.window {
 			return true
 		}
 	}
