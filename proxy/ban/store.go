@@ -26,6 +26,24 @@ type store struct {
 	// full is set while a new address could not be tracked, so the overflow is logged once per
 	// episode rather than per request.
 	full bool
+
+	// prints are the heuristics' clusters by fingerprint, swept at most once a cluster's window, and
+	// printsFull is full for them.
+	prints      map[string]*print
+	printsSwept time.Time
+	printsFull  bool
+}
+
+// print is a fingerprint's cluster in its window, and its ban.
+type print struct {
+	start time.Time
+	count int
+	// addrs are the cluster's addresses until it has minAddresses of them; nil after, when reached
+	// says the rest.
+	addrs   map[netip.Addr]struct{}
+	reached bool
+	flagged bool
+	banned  time.Time
 }
 
 type entry struct {
@@ -44,7 +62,7 @@ type counter struct {
 }
 
 func newStore(now func() time.Time) *store {
-	return &store{now: now, entries: map[netip.Addr]*entry{}}
+	return &store{now: now, entries: map[netip.Addr]*entry{}, prints: map[string]*print{}}
 }
 
 type outcome int
@@ -170,4 +188,77 @@ func holds(rules []rule, c counter) bool {
 		}
 	}
 	return false
+}
+
+// printVerdict is what to do with a flagged request, and what to write of it.
+type printVerdict struct {
+	refuse bool
+	// joined: the address is new to the fingerprint's cluster in the window, a line of its own.
+	joined bool
+	// flagged: the request made the cluster; newlyBanned: it started the fingerprint's ban.
+	flagged, newlyBanned bool
+	count                int
+	until                time.Time
+	// full: the fingerprint could not be tracked; first such request.
+	full bool
+}
+
+// forged counts a flagged request of a with fingerprint fp toward its cluster and says what to do with
+// it. Mode is the handler's, asked at each request: a ban is refused only while the mode is ban, so a
+// reload back to log stops refusing at once and the bans kept are not enforced.
+func (s *store) forged(a netip.Addr, fp string, c cluster, mode string, duration time.Duration, maxPrints int) printVerdict {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if now.Sub(s.printsSwept) >= c.window {
+		s.printsSwept = now
+		for k, p := range s.prints {
+			if now.Sub(p.start) >= c.window && !now.Before(p.banned) {
+				delete(s.prints, k)
+			}
+		}
+	}
+	p := s.prints[fp]
+	if p == nil {
+		if len(s.prints) >= maxPrints {
+			if s.printsFull {
+				return printVerdict{}
+			}
+			s.printsFull = true
+			return printVerdict{full: true}
+		}
+		s.printsFull = false
+		p = &print{}
+		s.prints[fp] = p
+	}
+	ban := mode == "ban"
+	if ban && now.Before(p.banned) {
+		return printVerdict{refuse: true, until: p.banned}
+	}
+	if now.Sub(p.start) >= c.window {
+		p.start, p.count, p.addrs, p.reached, p.flagged = now, 0, nil, false, false
+	}
+	p.count++
+	var v printVerdict
+	if !p.reached {
+		if _, ok := p.addrs[a]; !ok {
+			if p.addrs == nil {
+				p.addrs = map[netip.Addr]struct{}{}
+			}
+			p.addrs[a] = struct{}{}
+			v.joined = true
+			if len(p.addrs) >= c.minAddresses {
+				p.addrs, p.reached = nil, true
+			}
+		}
+	}
+	v.count = p.count
+	if p.count > c.limit && p.reached {
+		v.flagged, p.flagged = !p.flagged, true
+		if ban {
+			p.banned = now.Add(duration)
+			v.refuse, v.newlyBanned, v.until = true, true, p.banned
+		}
+	}
+	return v
 }

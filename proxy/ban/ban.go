@@ -1,7 +1,10 @@
 // Package ban is the Caddy handler behind a server's `ban:` policy: an address that sends more
 // requests than one of the Rules allows within its window gets 403 from every host of the server for
-// Duration, without a request reaching any app. boks puts it first on the servers on 80 and 443 (internal/proxy, banRoute), so it
-// counts what the whole server serves; xcaddy builds it into boks's proxy image (proxy/Dockerfile).
+// Duration, without a request reaching any app. boks puts it first on the servers on 80 and 443
+// (internal/proxy, banRoute), so it counts what the whole server serves; xcaddy builds it into boks's proxy image (proxy/Dockerfile).
+//
+// The heuristics (heuristics.go) flag the requests no browser sends, and the fingerprint a cluster of
+// addresses sends them with.
 //
 // The counts and the bans outlive the handler: boks reloads Caddy's config on every deploy of every
 // app, and each reload provisions a new handler. They live in the package (shared), so a reload keeps
@@ -28,9 +31,10 @@ import (
 
 func init() { caddy.RegisterModule(Handler{}) }
 
-// DefaultMaxTracked bounds the addresses tracked at once: an entry is some 120 bytes with the map's
-// share, so 200k is some 25 MB (23 MB measured on the heap, Go 1.26) — the memory a flood of distinct
-// addresses can take.
+// DefaultMaxTracked bounds the addresses tracked at once: an address is some 100 bytes with the map's
+// share, and 40 more for each rule that counted it. At the bound, with 16 rules each counting every
+// address, that is some 155 MB measured on the heap (TestTheWorstCaseMemory, Go 1.27); with one rule,
+// as in v1, 23 MB — the memory a flood of distinct addresses can take.
 const DefaultMaxTracked = 200_000
 
 // private are the ranges never counted: loopback, the private networks — boks's own WireGuard and app
@@ -72,6 +76,11 @@ type Handler struct {
 	ExemptPaths []string `json:"exempt_paths,omitempty"`
 	// ExemptRanges are CIDR ranges never counted, beside the private ones.
 	ExemptRanges []string `json:"exempt_ranges,omitempty"`
+	// Heuristics, when on, flag requests no browser sends and the clusters that send them.
+	Heuristics *Heuristics `json:"heuristics,omitempty"`
+	// MaxFingerprints bounds the heuristics' fingerprints tracked at once, DefaultMaxFingerprints when
+	// not given.
+	MaxFingerprints int `json:"max_fingerprints,omitempty"`
 
 	rules  []rule
 	paths  []*regexp.Regexp
@@ -123,6 +132,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.MaxTracked == 0 {
 		h.MaxTracked = DefaultMaxTracked
 	}
+	if h.MaxFingerprints == 0 {
+		h.MaxFingerprints = DefaultMaxFingerprints
+	}
 	h.rules = nil
 	for _, d := range h.declared() {
 		r := rule{name: d.Name, limit: d.Limit, window: time.Duration(d.Window), class: d.Class}
@@ -170,6 +182,11 @@ func (h *Handler) Validate() error {
 		return fmt.Errorf("duration %s: must be positive", time.Duration(h.Duration))
 	case h.MaxTracked < 1:
 		return fmt.Errorf("max_tracked %d: must be at least 1", h.MaxTracked)
+	case h.MaxFingerprints < 1:
+		return fmt.Errorf("max_fingerprints %d: must be at least 1", h.MaxFingerprints)
+	}
+	if err := h.Heuristics.validate(); err != nil {
+		return fmt.Errorf("heuristics: %w", err)
 	}
 	names := map[string]bool{}
 	for _, r := range h.declared() {
@@ -194,21 +211,26 @@ func (h *Handler) Validate() error {
 // request no rule counts for what it asks for — /_next/, a subresource, an exempt path — is still
 // refused to a banned address: the ban keeps the address from every app, its images and Next.js's
 // image optimizer included. An address in an exempt range is neither counted nor refused, so adding
-// a banned address's range to exempt_ranges lifts its ban with the next apply. ACME's challenge never
-// gets here: Caddy answers it before any route, and boks's ban route leaves it out by its matcher.
+// a banned address's range to exempt_ranges lifts its ban with the next apply — and its fingerprint's
+// too. With the heuristics on, a request with the strong sign goes to its fingerprint's cluster first,
+// and in mode ban a banned fingerprint's flagged requests get 403 from any address. ACME's challenge
+// never gets here: Caddy answers it before any route, and boks's ban route leaves it out by its matcher.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	addr, ok := clientAddr(r)
 	if !ok || h.exemptAddr(addr) {
 		return next.ServeHTTP(w, r)
 	}
+	if h.Heuristics.on() && forged(r.Header) && h.flag(r, addr) {
+		return refuse(w, "Forbidden\n")
+	}
 	switch v := h.store.hit(addr, h.rules, h.counting(r), time.Duration(h.Duration), h.MaxTracked); v.outcome {
 	case banned:
-		return refuse(w)
+		return refuse(w, tooMany)
 	case newlyBanned:
 		h.logger.Warn("address banned", zap.String("ip", addr.String()), zap.String("host", r.Host),
 			zap.String("rule", v.rule.name), zap.Int("count", v.count), zap.Stringer("window", v.rule.window),
 			zap.String("until", v.until.UTC().Format(time.RFC3339)))
-		return refuse(w)
+		return refuse(w, tooMany)
 	case full:
 		h.logger.Error("too many addresses tracked; new ones pass uncounted until old ones expire",
 			zap.Int("max_tracked", h.MaxTracked))
@@ -216,10 +238,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	return next.ServeHTTP(w, r)
 }
 
-func refuse(w http.ResponseWriter) error {
+// flag counts a flagged request toward its fingerprint's cluster, writes what the journal is to have
+// of it, and says whether to refuse it.
+func (h *Handler) flag(r *http.Request, addr netip.Addr) bool {
+	fp := fingerprint(r)
+	v := h.store.forged(addr, fp, h.Heuristics.cluster(), h.Heuristics.Mode, time.Duration(h.Duration), h.MaxFingerprints)
+	ua := r.UserAgent()
+	if len(ua) > uaSample {
+		ua = ua[:uaSample]
+	}
+	if v.joined {
+		h.logger.Info("forged request", zap.String("ip", addr.String()), zap.String("host", r.Host), zap.String("fingerprint", fp),
+			zap.String("user_agent", ua), zap.String("path", r.URL.Path), zap.String("weak", strings.Join(weakSigns(r), ", ")))
+	}
+	if v.flagged {
+		h.logger.Warn("cluster flagged", zap.String("fingerprint", fp), zap.Int("count", v.count),
+			zap.Stringer("window", time.Duration(h.Heuristics.Cluster.Window)), zap.String("user_agent", ua), zap.String("mode", h.Heuristics.Mode))
+	}
+	if v.newlyBanned {
+		h.logger.Warn("fingerprint banned", zap.String("fingerprint", fp), zap.String("until", v.until.UTC().Format(time.RFC3339)))
+	}
+	if v.full {
+		h.logger.Error("too many fingerprints tracked; new ones pass unflagged until old ones expire",
+			zap.Int("max_fingerprints", h.MaxFingerprints))
+	}
+	return v.refuse
+}
+
+const tooMany = "Forbidden: too many requests from this address\n"
+
+func refuse(w http.ResponseWriter, body string) error {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
-	_, err := io.WriteString(w, "Forbidden: too many requests from this address\n")
+	_, err := io.WriteString(w, body)
 	return err
 }
 

@@ -381,12 +381,16 @@ func TestValidateRefuses(t *testing.T) {
 		`{"rules": [{"name": "a", "limit": 0, "window": "1m"}], "duration": "1h"}`,
 		`{"rules": [{"name": "a", "limit": 1}], "duration": "1h"}`,
 		`{"rules": [{"name": "a", "limit": 1, "window": "1m", "class": "pages"}], "duration": "1h"}`,
+		`{"limit": 1, "window": "1m", "duration": "1h", "heuristics": {"mode": "block"}}`,
+		`{"limit": 1, "window": "1m", "duration": "1h", "heuristics": {"mode": "log", "cluster": {"window": "1m", "min_addresses": 2}}}`,
+		`{"limit": 1, "window": "1m", "duration": "1h", "heuristics": {"mode": "ban", "cluster": {"limit": 1, "min_addresses": 2}}}`,
+		`{"limit": 1, "window": "1m", "duration": "1h", "heuristics": {"mode": "ban", "cluster": {"limit": 1, "window": "1m", "min_addresses": 101}}}`,
 	} {
 		var h Handler
 		if err := json.Unmarshal([]byte(c), &h); err != nil {
 			t.Fatal(err)
 		}
-		h.MaxTracked = 1
+		h.MaxTracked, h.MaxFingerprints = 1, 1
 		if err := h.Validate(); err == nil {
 			t.Errorf("%s: want refused", c)
 		}
