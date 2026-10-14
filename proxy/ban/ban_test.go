@@ -165,7 +165,7 @@ func TestTheBanEnds(t *testing.T) {
 }
 
 // What is never counted: the private networks, loopback and the exempt ranges; Next.js's files, a
-// page's subresources, ACME's challenge and the exempt paths. None of it bans, and none of it adds to
+// page's subresources and the exempt paths. None of it bans, and none of it adds to
 // a count that would.
 func TestExemptRequestsAreNotCounted(t *testing.T) {
 	fixture(t)

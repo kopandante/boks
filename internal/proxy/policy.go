@@ -48,8 +48,8 @@ type Ban struct {
 	Limit    int    `json:"limit"`
 	Window   string `json:"window"`
 	Duration string `json:"duration"`
-	// ExemptPaths are patterns on the path never counted, beside the handler's own: /_next/, a page's
-	// subresources by Sec-Fetch-Dest, ACME's challenge.
+	// ExemptPaths are patterns on the cleaned path never counted, beside the handler's own: /_next/ and
+	// a page's subresources by Sec-Fetch-Dest. ACME's challenge the ban route leaves out by its matcher.
 	ExemptPaths []string `json:"exempt_paths,omitempty"`
 	// ExemptRanges are CIDR ranges never counted, beside loopback and the private networks.
 	ExemptRanges []string `json:"exempt_ranges,omitempty"`
