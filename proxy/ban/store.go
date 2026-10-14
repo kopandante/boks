@@ -10,27 +10,64 @@ import (
 // counts and the bans of the one it replaced.
 var shared = newStore(time.Now)
 
-// store holds, per address, its window's count and its ban. One lock: a hit is a map lookup and a few
-// comparisons, well under a microsecond, and the server's whole traffic passes it.
+// store holds, per address, its ban and a count per rule. One lock: a hit is a map lookup and a few
+// comparisons per rule, well under a microsecond, and the server's whole traffic passes it.
+//
+// The store knows rules only by what a hit hands it: the handler of a reload brings its own, and a
+// count belongs to the rule of its name. A rule whose limit or window changed keeps its count and
+// its window's start and is judged by the new limit and window at once, as v1 held its one count
+// across a reload; a rule no longer given loses its counts at the next sweep. A ban is
+// the address's, not a rule's, and outlives any reload.
 type store struct {
-	mu      sync.Mutex
-	now     func() time.Time
+	mu  sync.Mutex
+	now func() time.Time
+	// epoch is when the store began: counters keep their window's start as an offset from it, so a
+	// step of the wall clock (NTP, a resumed VM) neither stretches nor cuts a window — time.Time's
+	// monotonic reading carries the Sub.
+	epoch   time.Time
 	entries map[netip.Addr]*entry
-	// swept is when expired entries were last removed; a sweep runs at most once a window.
+	// swept is when expired counts were last removed; a sweep runs at most once a shortest window.
 	swept time.Time
 	// full is set while a new address could not be tracked, so the overflow is logged once per
 	// episode rather than per request.
 	full bool
+
+	// prints are the heuristics' clusters by fingerprint, swept at most once a cluster's window, and
+	// printsFull is full for them.
+	prints      map[string]*print
+	printsSwept time.Time
+	printsFull  bool
+}
+
+// print is a fingerprint's cluster in its window, and its ban.
+type print struct {
+	start time.Time
+	count int
+	// addrs are the cluster's addresses until it has minAddresses of them; nil after, when reached
+	// says the rest.
+	addrs   map[netip.Addr]struct{}
+	reached bool
+	flagged bool
+	banned  time.Time
+	// min is the min_addresses reached was told by: a reload with another starts the window again.
+	min int
 }
 
 type entry struct {
-	start  time.Time // the window's start
-	count  int       // requests in the window
-	banned time.Time // the ban's end; zero when not banned
+	banned   time.Time // the ban's end; zero when not banned
+	counters []counter // one per rule that counted a request of the address, in no order
+}
+
+// counter is a rule's count of an address: 32 bytes, so that 16 rules over the tracked addresses stay
+// within the memory DefaultMaxTracked is measured with.
+type counter struct {
+	rule  string
+	start time.Duration // the window's start, as an offset from the store's epoch
+	count int32
 }
 
 func newStore(now func() time.Time) *store {
-	return &store{now: now, entries: map[netip.Addr]*entry{}}
+	return &store{now: now, epoch: now(), entries: map[netip.Addr]*entry{}, prints: map[string]*print{}}
 }
 
 type outcome int
@@ -44,19 +81,31 @@ const (
 
 type verdict struct {
 	outcome outcome
+	rule    rule // the rule that started the ban
 	count   int
 	until   time.Time
 }
 
-// hit counts one request of a and says what to do with it.
-func (s *store) hit(a netip.Addr, limit int, window, duration time.Duration, maxTracked int) verdict {
+// hit counts one request of a toward each of rules that counts it — bit i of counts for rules[i] —
+// and says what to do with it. A request no rule counts only asks whether a is banned.
+func (s *store) hit(a netip.Addr, rules []rule, counts uint64, duration time.Duration, maxTracked int) verdict {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	if now.Sub(s.swept) >= window {
-		s.sweep(now, window)
+	if now.Sub(s.swept) >= shortest(rules) {
+		s.sweep(now, rules)
 	}
 	e := s.entries[a]
+	if e != nil && !e.banned.IsZero() {
+		if now.Before(e.banned) {
+			return verdict{outcome: banned, until: e.banned}
+		}
+		// The ban ended: the address starts fresh windows.
+		e.banned, e.counters = time.Time{}, nil
+	}
+	if counts == 0 {
+		return verdict{outcome: pass}
+	}
 	if e == nil {
 		if len(s.entries) >= maxTracked {
 			// Swept within the window and still full: the address passes uncounted rather than the
@@ -68,40 +117,152 @@ func (s *store) hit(a netip.Addr, limit int, window, duration time.Duration, max
 			return verdict{outcome: full}
 		}
 		s.full = false
-		e = &entry{start: now}
+		e = &entry{}
 		s.entries[a] = e
 	}
-	if !e.banned.IsZero() {
-		if now.Before(e.banned) {
-			return verdict{outcome: banned, until: e.banned}
+	for i, r := range rules {
+		if counts&(1<<i) == 0 {
+			continue
 		}
-		*e = entry{start: now}
+		c := e.counter(r)
+		if at := now.Sub(s.epoch); at-c.start >= r.window {
+			c.start, c.count = at, 0
+		}
+		c.count++
+		if int(c.count) > r.limit {
+			e.banned = now.Add(duration)
+			return verdict{outcome: newlyBanned, rule: r, count: int(c.count), until: e.banned}
+		}
 	}
-	if now.Sub(e.start) >= window {
-		e.start, e.count = now, 0
-	}
-	e.count++
-	if e.count > limit {
-		e.banned = now.Add(duration)
-		return verdict{outcome: newlyBanned, count: e.count, until: e.banned}
-	}
-	return verdict{outcome: pass, count: e.count}
+	return verdict{outcome: pass}
 }
 
-// banned says whether a is banned now, without counting a request.
-func (s *store) banned(a netip.Addr) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e := s.entries[a]
-	return e != nil && s.now().Before(e.banned)
+// counter is e's count for r, a new one when e has none of r's name. A rule of that name whose limit
+// or window changed keeps its count and start: the hit judges them by the limit and window it is
+// handed, and the sweep by the rule's current window.
+func (e *entry) counter(r rule) *counter {
+	for i := range e.counters {
+		if c := &e.counters[i]; c.rule == r.name {
+			return c
+		}
+	}
+	e.counters = append(e.counters, counter{rule: r.name, start: -r.window})
+	return &e.counters[len(e.counters)-1]
 }
 
-// sweep removes the entries whose window passed and whose ban, if any, ended.
-func (s *store) sweep(now time.Time, window time.Duration) {
+// shortest is the shortest window of rules, a minute without any.
+func shortest(rules []rule) time.Duration {
+	d := time.Duration(0)
+	for _, r := range rules {
+		if d == 0 || r.window < d {
+			d = r.window
+		}
+	}
+	if d == 0 {
+		d = time.Minute
+	}
+	return d
+}
+
+// sweep removes the counts whose window passed or whose rule rules no longer hold, and the entries
+// left with no count and no ban.
+func (s *store) sweep(now time.Time, rules []rule) {
 	s.swept = now
 	for a, e := range s.entries {
-		if now.Sub(e.start) >= window && !now.Before(e.banned) {
+		kept := e.counters[:0]
+		for _, c := range e.counters {
+			if w, ok := window(rules, c); ok && now.Sub(s.epoch)-c.start < w {
+				kept = append(kept, c)
+			}
+		}
+		clear(e.counters[len(kept):])
+		e.counters = kept
+		if len(kept) == 0 && !now.Before(e.banned) {
 			delete(s.entries, a)
 		}
 	}
+}
+
+// window is the window rules now give the rule c counts for, and whether they still hold it: a sweep
+// judges a count by the current rule, so a reload that widened a window keeps the counts it covers.
+func window(rules []rule, c counter) (time.Duration, bool) {
+	for _, r := range rules {
+		if r.name == c.rule {
+			return r.window, true
+		}
+	}
+	return 0, false
+}
+
+// printVerdict is what to do with a flagged request, and what to write of it.
+type printVerdict struct {
+	refuse bool
+	// joined: the address is new to the fingerprint's cluster in the window, a line of its own.
+	joined bool
+	// flagged: the request made the cluster; newlyBanned: it started the fingerprint's ban.
+	flagged, newlyBanned bool
+	count                int
+	until                time.Time
+	// full: the fingerprint could not be tracked; first such request.
+	full bool
+}
+
+// forged counts a flagged request of a with fingerprint fp toward its cluster and says what to do with
+// it. Mode is the handler's, asked at each request: a ban is refused only while the mode is ban, so a
+// reload back to log stops refusing at once and the bans kept are not enforced.
+func (s *store) forged(a netip.Addr, fp string, c cluster, mode string, duration time.Duration, maxPrints int) printVerdict {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if now.Sub(s.printsSwept) >= c.window {
+		s.printsSwept = now
+		for k, p := range s.prints {
+			if now.Sub(p.start) >= c.window && !now.Before(p.banned) {
+				delete(s.prints, k)
+			}
+		}
+	}
+	p := s.prints[fp]
+	if p == nil {
+		if len(s.prints) >= maxPrints {
+			if s.printsFull {
+				return printVerdict{}
+			}
+			s.printsFull = true
+			return printVerdict{full: true}
+		}
+		s.printsFull = false
+		p = &print{}
+		s.prints[fp] = p
+	}
+	ban := mode == "ban"
+	if ban && now.Before(p.banned) {
+		return printVerdict{refuse: true, until: p.banned}
+	}
+	if now.Sub(p.start) >= c.window || p.min != c.minAddresses {
+		p.start, p.count, p.addrs, p.reached, p.flagged, p.min = now, 0, nil, false, false, c.minAddresses
+	}
+	p.count++
+	var v printVerdict
+	if !p.reached {
+		if _, ok := p.addrs[a]; !ok {
+			if p.addrs == nil {
+				p.addrs = map[netip.Addr]struct{}{}
+			}
+			p.addrs[a] = struct{}{}
+			v.joined = true
+			if len(p.addrs) >= c.minAddresses {
+				p.addrs, p.reached = nil, true
+			}
+		}
+	}
+	v.count = p.count
+	if p.count > c.limit && p.reached {
+		v.flagged, p.flagged = !p.flagged, true
+		if ban {
+			p.banned = now.Add(duration)
+			v.refuse, v.newlyBanned, v.until = true, true, p.banned
+		}
+	}
+	return v
 }
