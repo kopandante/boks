@@ -97,10 +97,3 @@ func (s *store) sweep(now time.Time, window time.Duration) {
 		}
 	}
 }
-
-// len is the number of addresses tracked.
-func (s *store) len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.entries)
-}

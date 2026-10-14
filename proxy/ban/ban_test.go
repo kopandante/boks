@@ -30,6 +30,13 @@ func (c *clock) add(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
+// len is the number of addresses tracked.
+func (s *store) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
+}
+
 // fixture swaps the shared store for one on a hand-moved clock, as the process's would be.
 func fixture(t *testing.T) *clock {
 	t.Helper()
