@@ -251,6 +251,9 @@ func TestParseServerBanRejects(t *testing.T) {
 		{ban(`{exempt_ranges: [0.0.0.0/0]}`), "lets every address in"},
 		{ban(`{exempt_ranges: ["::ffff:203.0.113.7"]}`), "written as IPv6"},
 		{ban(`{limt: 3}`), "field limt not found"},
+		{ban(""), "ban: empty; write `ban: {}`"},
+		{"servers: [a]\nrevision: 1\nban:\n  # limit: 300\n", "ban: empty"},
+		{ban("~"), "ban: empty"},
 	} {
 		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc), c.want, err)

@@ -221,6 +221,14 @@ func ParseServer(data []byte) (*Server, error) {
 	if err := restIsEmpty(dec, "server.yml is read as one"); err != nil {
 		return nil, err
 	}
+	// `ban:` with nothing under it — its keys commented out — decodes as no ban at all: applied, it
+	// would lift the server's ban without a word.
+	var keys struct {
+		Ban yaml.Node `yaml:"ban"`
+	}
+	if s.Ban == nil && yaml.Unmarshal(data, &keys) == nil && keys.Ban.Kind != 0 {
+		return nil, errors.New("ban: empty; write `ban: {}` for the defaults (300 requests in 1m ban for 24h), or remove the key for no ban")
+	}
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
