@@ -577,8 +577,14 @@ func policyOf(sc *config.Server) proxy.Policy {
 		p.TrustedProxies = append(p.TrustedProxies, pr.String())
 	}
 	if b := sc.Ban; b != nil {
-		// The policy carries the first rule until it knows rules (the next commit of ban v2).
-		p.Ban = &proxy.Ban{Limit: b.Rules[0].Limit, Window: b.Rules[0].Window, Duration: b.Duration, ExemptPaths: b.ExemptPaths}
+		p.Ban = &proxy.Ban{Duration: b.Duration, ExemptPaths: b.ExemptPaths}
+		for _, r := range b.Rules {
+			p.Ban.Rules = append(p.Ban.Rules, proxy.BanRule{Name: r.Name, Limit: r.Limit, Window: r.Window, Class: r.Class, Paths: r.Paths})
+		}
+		if h := b.Heuristics; h != nil {
+			p.Ban.Heuristics = &proxy.BanHeuristics{Mode: h.Mode, Cluster: proxy.BanCluster{
+				Limit: h.Cluster.Limit, Window: h.Cluster.Window, MinAddresses: h.Cluster.MinAddresses}}
+		}
 		for _, pr := range b.ExemptPrefixes() {
 			p.Ban.ExemptRanges = append(p.Ban.ExemptRanges, pr.String())
 		}

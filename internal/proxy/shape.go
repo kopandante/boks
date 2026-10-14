@@ -150,47 +150,63 @@ func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
 	if err := loadSecret(ctx, r, &p); err != nil {
 		return err
 	}
-	return checkModule(ctx, r, "http.handlers.forward_proxy", "no forward proxy", false)
+	return checkModule(ctx, r, "http.handlers.forward_proxy", "no forward proxy")
 }
 
-// CheckBan refuses, before anything changes, a ban the proxy's image has no handler for: Caddy would
-// refuse the config, and with it the reload of every deploy on the server after the apply. A stopped
-// proxy is asked too, through its image: the boot that starts it again starts it as it is — a ban
-// changes nothing of its shape — and its Caddy would refuse the config instead of serving the sites.
+// CheckBan refuses, before anything changes, a ban the proxy's image cannot run: Caddy would refuse
+// the config, and with it the reload of every deploy on the server after the apply. The image — the
+// running proxy's, or a stopped one's, which the boot after the apply starts as it is: a ban changes
+// nothing of its shape — validates banProbe in a container of its own. Caddy decodes a module's
+// config strictly, so an image without the handler, or with one older than the fields this boks
+// writes, refuses it; asking for the module alone would take the handler of format 6, which refuses
+// the rules on the next reload.
 func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
 	if p.Ban == nil {
 		return nil
 	}
-	return checkModule(ctx, r, "http.handlers.boks_ban", "no ban handler", true)
-}
-
-// checkModule refuses a running proxy whose Caddy lacks module, and with stopped a stopped one whose
-// image lacks it. Any other proxy that is not running is left to the boot or the upgrade that creates
-// it from the image the config names.
-func checkModule(ctx context.Context, r remote.Runner, module, lacks string, stopped bool) error {
 	state, kind, err := State(ctx, r)
-	if err != nil || state == "" || kind != Kind || (state != "running" && !stopped) {
+	if err != nil || state == "" || kind != Kind {
 		return err
 	}
 	image, err := Image(ctx, r)
 	if err != nil {
 		return err
 	}
-	var mods string
-	if state == "running" {
-		mods, err = r.Run(ctx, "docker", "exec", Container, "caddy", "list-modules")
-	} else {
-		mods, err = r.Run(ctx, "docker", "run", "--rm", "--entrypoint", "caddy", image, "list-modules")
-	}
-	if err != nil {
-		return fmt.Errorf("asking the proxy for its modules: %w", err)
-	}
-	if !slices.Contains(strings.Fields(mods), module) {
+	if _, err := r.Pipe(ctx, banProbe, "docker", "run", "--rm", "-i", "--network", "none", "--entrypoint", "caddy", image, "validate", "--config", "/dev/stdin"); err != nil {
 		verb := "runs"
 		if state != "running" {
 			verb = "is a stopped container of"
 		}
-		return fmt.Errorf("the proxy %s %s, which has %s; `boks proxy upgrade` with boks's own image first, then apply again", verb, image, lacks)
+		return fmt.Errorf("the proxy %s %s, whose Caddy refuses a ban with rules and heuristics (%w); "+
+			"`boks proxy upgrade` with boks's own image first, then apply again", verb, image, err)
+	}
+	return nil
+}
+
+// banProbe is a config with every field of the ban handler this boks writes, and nothing else Caddy
+// would reach out for: no admin endpoint, one server no one connects to.
+var banProbe = []byte(`{"admin":{"disabled":true},"apps":{"http":{"servers":{"probe":{"listen":[":80"],"routes":[{"handle":[` +
+	`{"handler":"boks_ban","duration":"1h","rules":[{"name":"probe","limit":1,"window":"1m","class":"api","paths":["^/api/"]}],` +
+	`"heuristics":{"mode":"log","cluster":{"limit":1,"window":"1m","min_addresses":2}},` +
+	`"exempt_paths":["^/api/pics"],"exempt_ranges":["203.0.113.0/24"]}]}]}}}}}`)
+
+// checkModule refuses a running proxy whose Caddy lacks module. A proxy that is not running is left to
+// the boot or the upgrade that creates it from the image the config names.
+func checkModule(ctx context.Context, r remote.Runner, module, lacks string) error {
+	state, kind, err := State(ctx, r)
+	if err != nil || state != "running" || kind != Kind {
+		return err
+	}
+	image, err := Image(ctx, r)
+	if err != nil {
+		return err
+	}
+	mods, err := r.Run(ctx, "docker", "exec", Container, "caddy", "list-modules")
+	if err != nil {
+		return fmt.Errorf("asking the proxy for its modules: %w", err)
+	}
+	if !slices.Contains(strings.Fields(mods), module) {
+		return fmt.Errorf("the proxy runs %s, which has %s; `boks proxy upgrade` with boks's own image first, then apply again", image, lacks)
 	}
 	return nil
 }

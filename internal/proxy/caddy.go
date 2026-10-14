@@ -108,7 +108,10 @@ type Fragment struct {
 //
 // Format 6 is the ban: a boks of format 5 would assemble the config without it, and the next deploy
 // from it would lift every ban and stop counting without a word.
-const FragmentFormat = 6
+//
+// Format 7 is the ban's rules and heuristics: a boks of format 6 would assemble the handler with its
+// one limit, from fields the policy no longer holds, and the next deploy from it would drop the rules.
+const FragmentFormat = 7
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -425,11 +428,11 @@ type (
 		// header; JSON writes the bytes in base64 once more.
 		AuthCredentials [][]byte `json:"auth_credentials,omitempty"`
 		// boks_ban (proxy/ban)
-		Limit        int      `json:"limit,omitempty"`
-		Window       string   `json:"window,omitempty"`
-		Duration     string   `json:"duration,omitempty"`
-		ExemptPaths  []string `json:"exempt_paths,omitempty"`
-		ExemptRanges []string `json:"exempt_ranges,omitempty"`
+		Rules        []BanRule      `json:"rules,omitempty"`
+		Heuristics   *BanHeuristics `json:"heuristics,omitempty"`
+		Duration     string         `json:"duration,omitempty"`
+		ExemptPaths  []string       `json:"exempt_paths,omitempty"`
+		ExemptRanges []string       `json:"exempt_ranges,omitempty"`
 	}
 	proxyHeaders struct {
 		Request *headerOps `json:"request,omitempty"`
