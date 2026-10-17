@@ -633,6 +633,11 @@ func (c *Config) validate() error {
 	if len(c.App) > MaxAppLen {
 		return fmt.Errorf("app: %q is %d characters, more than %d: its containers' names would not resolve", c.App, len(c.App), MaxAppLen)
 	}
+	// An app name with no underscore keeps `<app>__` from being the start of another app's prefix:
+	// env_bws `shop__dev` would hand app `shop` the secret shop__dev__X as dev__X.
+	if c.EnvBWS != "" && !nameRe.MatchString(c.EnvBWS) {
+		return fmt.Errorf("env_bws: %q must match %s", c.EnvBWS, nameRe)
+	}
 	if c.Image == "" {
 		return fmt.Errorf("image is required")
 	}

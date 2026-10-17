@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeBWS replaces the BWS call for one test and counts how often it ran.
@@ -211,5 +212,41 @@ func TestBWSListNoToken(t *testing.T) {
 	t.Setenv("BWS_ACCESS_TOKEN", "")
 	if _, err := bwsList(); err == nil || !strings.Contains(err.Error(), "BWS_ACCESS_TOKEN is not set") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A bws that fails without a server line has its whole stderr reported, with the token cut out.
+func TestBWSListRedactsToken(t *testing.T) {
+	fakeBin(t, map[string]string{"bws": `echo "invalid access token $BWS_ACCESS_TOKEN" >&2; exit 1`})
+	t.Setenv("BWS_ACCESS_TOKEN", "tok-secret")
+	_, err := bwsList()
+	if err == nil || !strings.Contains(err.Error(), "invalid access token <token>") || strings.Contains(err.Error(), "tok-secret") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A bws that never answers is stopped and named, rather than holding the deploy.
+func TestBWSListTimeout(t *testing.T) {
+	fakeBin(t, map[string]string{"bws": "exec sleep 30"})
+	t.Setenv("BWS_ACCESS_TOKEN", "tok")
+	orig := bwsTimeout
+	bwsTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bwsTimeout = orig })
+	start := time.Now()
+	_, err := bwsList()
+	if err == nil || !strings.Contains(err.Error(), "no answer in") {
+		t.Fatalf("got %v", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Errorf("took %s", time.Since(start))
+	}
+}
+
+// env_bws is an app name: one with `__` would make its prefix the start of another app's.
+func TestParseEnvBWSRefusesBadName(t *testing.T) {
+	for _, v := range []string{"shop__dev", "Shop", "shop_"} {
+		if _, err := Parse([]byte("app: shop\nimage: x\nservers: [s1]\nenv_bws: " + v + "\n")); err == nil || !strings.Contains(err.Error(), "env_bws") {
+			t.Errorf("env_bws %q: got %v", v, err)
+		}
 	}
 }

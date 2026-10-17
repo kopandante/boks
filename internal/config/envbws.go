@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // env_bws: <app> takes the app's secrets from Bitwarden Secrets Manager at deploy time instead of an
@@ -33,12 +35,18 @@ type bwsSecret struct {
 	Value string `json:"value"`
 }
 
+// bwsTimeout bounds each outside call: a stalled BWS API or a keychain prompt nobody sees (a deploy
+// over SSH) would otherwise hold the deploy with no output. Nothing on a server has changed yet.
+var bwsTimeout = 2 * time.Minute
+
 // bwsList fetches every secret the access token can read. A variable, so tests run without BWS.
 var bwsList = func() ([]bwsSecret, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), bwsTimeout)
+	defer cancel()
 	token := os.Getenv("BWS_ACCESS_TOKEN")
 	if token == "" && runtime.GOOS == "darwin" {
 		// On the owner's Mac the token lives in the login keychain, not in the shell.
-		out, err := exec.Command("security", "find-generic-password", "-s", "bws-claude-token", "-w").Output()
+		out, err := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "bws-claude-token", "-w").Output()
 		if err == nil {
 			token = strings.TrimSpace(string(out))
 		}
@@ -46,7 +54,7 @@ var bwsList = func() ([]bwsSecret, error) {
 	if token == "" {
 		return nil, fmt.Errorf("env_bws: BWS_ACCESS_TOKEN is not set")
 	}
-	cmd := exec.Command("bws", "--output", "json", "secret", "list")
+	cmd := exec.CommandContext(ctx, "bws", "--output", "json", "secret", "list")
 	cmd.Env = append(os.Environ(), "BWS_ACCESS_TOKEN="+token)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -60,6 +68,10 @@ var bwsList = func() ([]bwsSecret, error) {
 				break
 			}
 		}
+		if ctx.Err() != nil {
+			reason = fmt.Sprintf("no answer in %s", bwsTimeout)
+		}
+		reason = strings.ReplaceAll(reason, token, "<token>")
 		return nil, fmt.Errorf("env_bws: bws secret list: %v: %s", err, reason)
 	}
 	var list []bwsSecret
