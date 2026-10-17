@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -21,6 +22,10 @@ import (
 
 // bwsSep separates the app from the variable name in a BWS secret key.
 const bwsSep = "__"
+
+// bwsNameRe is the variable name a BWS key may carry after the prefix. Anything else — a space, an
+// empty name — docker would read as another name or refuse on the server, after the duplicate check.
+var bwsNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // bwsSecret is one entry of `bws secret list --output json`.
 type bwsSecret struct {
@@ -84,6 +89,9 @@ func bwsEnv(app string) (map[string]string, error) {
 		name, ok := strings.CutPrefix(s.Key, prefix)
 		if !ok {
 			continue
+		}
+		if !bwsNameRe.MatchString(name) {
+			return nil, fmt.Errorf("env_bws: %q is not a variable name; rename the BWS secret %s<NAME>", name, prefix)
 		}
 		if _, dup := env[name]; dup {
 			return nil, fmt.Errorf("env_bws: %s%s is in BWS twice; keep one", prefix, name)
