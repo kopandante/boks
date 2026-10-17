@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -63,8 +64,8 @@ var bwsList = func() ([]bwsSecret, error) {
 	return list, nil
 }
 
-// One snapshot per boks process: a fleet deploy builds every app's env from the same list and makes
-// one request, because BWS rate-limits (429 «Slow down») a burst of calls.
+// One snapshot per boks process: every env_bws lookup of a run shares one request, because BWS
+// rate-limits (429 «Slow down») a burst of calls. Separate boks processes each make their own.
 var (
 	bwsOnce     sync.Once
 	bwsSnapshot []bwsSecret
@@ -100,17 +101,19 @@ func bwsEnv(app string) (map[string]string, error) {
 	return env, nil
 }
 
-// envFileKeys lists the variable names an env file sets, to refuse a name set twice.
+// envFileKeys lists the variable names an env file sets, to refuse a name set twice. It reads names
+// the way `docker run --env-file` does (docker/cli pkg/kvfile): a UTF-8 BOM before the first line is
+// dropped, and a bare `NAME` line sets NAME from the server's environment, so it counts too.
 func envFileKeys(data []byte) map[string]bool {
 	keys := map[string]bool{}
+	data = bytes.TrimPrefix(data, []byte("\uFEFF"))
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if k, _, ok := strings.Cut(line, "="); ok {
-			keys[strings.TrimSpace(k)] = true
-		}
+		k, _, _ := strings.Cut(line, "=")
+		keys[strings.TrimSpace(k)] = true
 	}
 	return keys
 }
