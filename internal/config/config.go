@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net"
 	"net/netip"
@@ -12,7 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -283,9 +284,11 @@ type Config struct {
 	// Network is read only to refuse it: every app now has its own network, AppNetwork. A key that
 	// went on being accepted would keep meaning something it no longer does. A node rather than a
 	// string, because only a node tells a key written with no value (`network:`) from no key at all.
-	Network       yaml.Node         `yaml:"network"`
-	ProxyImage    string            `yaml:"proxy_image"`
-	EnvFile       string            `yaml:"env_file"`
+	Network    yaml.Node `yaml:"network"`
+	ProxyImage string    `yaml:"proxy_image"`
+	EnvFile    string    `yaml:"env_file"`
+	// EnvBWS names the app whose secrets `<app>__NAME` come from BWS at deploy time (envbws.go).
+	EnvBWS        string            `yaml:"env_bws"`
 	Env           map[string]string `yaml:"env"`
 	Volumes       []string          `yaml:"volumes"`
 	Ports         []Port            `yaml:"ports"`
@@ -1121,10 +1124,12 @@ func (c *Config) FileContents() ([]FileContent, error) {
 	return out, nil
 }
 
-// EnvContent is the env-file body sent to the server: env_file contents (if any) followed by
-// inline env entries, sorted by key so the output is stable.
+// EnvContent is the env-file body sent to the server: env_file contents (if any), then the env_bws
+// secrets, then inline env entries, each group sorted by key so the output is stable. A name set by
+// env_bws and by env_file or env is refused: which value wins would depend on the order of lines.
 func (c *Config) EnvContent() ([]byte, error) {
 	var b strings.Builder
+	seen := map[string]bool{}
 	if c.EnvFile != "" {
 		data, err := os.ReadFile(c.resolve(c.EnvFile))
 		if err != nil {
@@ -1134,13 +1139,24 @@ func (c *Config) EnvContent() ([]byte, error) {
 		if len(data) > 0 && data[len(data)-1] != '\n' {
 			b.WriteByte('\n')
 		}
+		seen = envFileKeys(data)
 	}
-	keys := make([]string, 0, len(c.Env))
-	for k := range c.Env {
-		keys = append(keys, k)
+	if c.EnvBWS != "" {
+		secrets, err := bwsEnv(c.EnvBWS)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range slices.Sorted(maps.Keys(secrets)) {
+			if seen[k] {
+				return nil, fmt.Errorf("env_bws: %s is set by env_file too; keep it in one place", k)
+			}
+			if _, inline := c.Env[k]; inline {
+				return nil, fmt.Errorf("env_bws: %s is set by env too; keep it in one place", k)
+			}
+			fmt.Fprintf(&b, "%s=%s\n", k, secrets[k])
+		}
 	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range slices.Sorted(maps.Keys(c.Env)) {
 		fmt.Fprintf(&b, "%s=%s\n", k, c.Env[k])
 	}
 	return []byte(b.String()), nil
