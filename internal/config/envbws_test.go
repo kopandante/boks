@@ -250,3 +250,22 @@ func TestParseEnvBWSRefusesBadName(t *testing.T) {
 		}
 	}
 }
+
+// A keychain lookup that never answers (a prompt nobody sees) is stopped too, not waited on.
+func TestBWSListKeychainTimeout(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("keychain fallback is macOS only")
+	}
+	fakeBin(t, map[string]string{"security": "exec sleep 30", "bws": "exit 99"})
+	t.Setenv("BWS_ACCESS_TOKEN", "")
+	orig := bwsTimeout
+	bwsTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bwsTimeout = orig })
+	start := time.Now()
+	if _, err := bwsList(); err == nil {
+		t.Fatal("want an error")
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Errorf("keychain lookup held bwsList for %s", time.Since(start))
+	}
+}
