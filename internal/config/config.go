@@ -1127,9 +1127,11 @@ func (c *Config) FileContents() ([]FileContent, error) {
 // EnvContent is the env-file body sent to the server: env_file contents (if any), then the env_bws
 // secrets, then inline env entries, each group sorted by key so the output is stable. A name set by
 // env_bws and by env_file or env is refused: which value wins would depend on the order of lines.
+// Names are compared as docker will read the uploaded lines (envFileKeys), not as the YAML spells
+// them: a key with a leading space or a value carrying a newline still lands on a docker name.
 func (c *Config) EnvContent() ([]byte, error) {
 	var b strings.Builder
-	seen := map[string]bool{}
+	fileKeys := map[string]bool{}
 	if c.EnvFile != "" {
 		data, err := os.ReadFile(c.resolve(c.EnvFile))
 		if err != nil {
@@ -1139,26 +1141,29 @@ func (c *Config) EnvContent() ([]byte, error) {
 		if len(data) > 0 && data[len(data)-1] != '\n' {
 			b.WriteByte('\n')
 		}
-		seen = envFileKeys(data)
+		fileKeys = envFileKeys(data)
+	}
+	var inline strings.Builder
+	for _, k := range slices.Sorted(maps.Keys(c.Env)) {
+		fmt.Fprintf(&inline, "%s=%s\n", k, c.Env[k])
 	}
 	if c.EnvBWS != "" {
 		secrets, err := bwsEnv(c.EnvBWS)
 		if err != nil {
 			return nil, err
 		}
+		inlineKeys := envFileKeys([]byte(inline.String()))
 		for _, k := range slices.Sorted(maps.Keys(secrets)) {
-			if seen[k] {
+			if fileKeys[k] {
 				return nil, fmt.Errorf("env_bws: %s is set by env_file too; keep it in one place", k)
 			}
-			if _, inline := c.Env[k]; inline {
+			if inlineKeys[k] {
 				return nil, fmt.Errorf("env_bws: %s is set by env too; keep it in one place", k)
 			}
 			fmt.Fprintf(&b, "%s=%s\n", k, secrets[k])
 		}
 	}
-	for _, k := range slices.Sorted(maps.Keys(c.Env)) {
-		fmt.Fprintf(&b, "%s=%s\n", k, c.Env[k])
-	}
+	b.WriteString(inline.String())
 	return []byte(b.String()), nil
 }
 
