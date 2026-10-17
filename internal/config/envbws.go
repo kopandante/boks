@@ -27,6 +27,8 @@ const bwsSep = "__"
 
 // bwsNameRe is the variable name a BWS key may carry after the prefix. Anything else — a space, an
 // empty name — docker would read as another name or refuse on the server, after the duplicate check.
+// A `__` inside it is refused too (bwsEnv): `shop__dev__X` reads as an app `shop__dev`, and app
+// `shop` must not take it as dev__X.
 var bwsNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // bwsSecret is one entry of `bws secret list --output json`.
@@ -39,23 +41,32 @@ type bwsSecret struct {
 // over SSH) would otherwise hold the deploy with no output. Nothing on a server has changed yet.
 var bwsTimeout = 2 * time.Minute
 
+// bwsWaitDelay stops waiting for the output pipes once the timeout has killed the process: a child
+// it started could hold them open and the deploy would hang anyway (as in internal/remote).
+const bwsWaitDelay = 2 * time.Second
+
 // bwsList fetches every secret the access token can read. A variable, so tests run without BWS.
 var bwsList = func() ([]bwsSecret, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), bwsTimeout)
 	defer cancel()
-	token := os.Getenv("BWS_ACCESS_TOKEN")
+	token := strings.TrimSpace(os.Getenv("BWS_ACCESS_TOKEN"))
 	if token == "" && runtime.GOOS == "darwin" {
-		// On the owner's Mac the token lives in the login keychain, not in the shell.
-		out, err := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "bws-claude-token", "-w").Output()
-		if err == nil {
-			token = strings.TrimSpace(string(out))
+		// On the owner's Mac the token lives in the login keychain, not in the shell. A locked
+		// keychain (a deploy over SSH) is named as such, not as a missing variable.
+		sec := exec.CommandContext(ctx, "security", "find-generic-password", "-s", "bws-claude-token", "-w")
+		sec.WaitDelay = bwsWaitDelay
+		out, err := sec.Output()
+		if err != nil {
+			return nil, fmt.Errorf("env_bws: BWS_ACCESS_TOKEN is not set, and the keychain item bws-claude-token gave none: %v", err)
 		}
+		token = strings.TrimSpace(string(out))
 	}
 	if token == "" {
 		return nil, fmt.Errorf("env_bws: BWS_ACCESS_TOKEN is not set")
 	}
 	cmd := exec.CommandContext(ctx, "bws", "--output", "json", "secret", "list")
 	cmd.Env = append(os.Environ(), "BWS_ACCESS_TOKEN="+token)
+	cmd.WaitDelay = bwsWaitDelay
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -102,7 +113,7 @@ func bwsEnv(app string) (map[string]string, error) {
 		if !ok {
 			continue
 		}
-		if !bwsNameRe.MatchString(name) {
+		if !bwsNameRe.MatchString(name) || strings.Contains(name, bwsSep) {
 			return nil, fmt.Errorf("env_bws: %q is not a variable name; rename the BWS secret %s<NAME>", name, prefix)
 		}
 		if _, dup := env[name]; dup {

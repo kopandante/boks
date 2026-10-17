@@ -90,6 +90,8 @@ func TestEnvBWSRefuses(t *testing.T) {
 			Config{EnvBWS: "s"}, "in BWS twice"},
 		{"name with a space", []bwsSecret{{Key: "s__ TOKEN", Value: "sv-space"}}, nil,
 			Config{Dir: dir, EnvFile: ".env", EnvBWS: "s"}, "is not a variable name"},
+		{"name with __", []bwsSecret{{Key: "s__dev__T", Value: "sv-dev"}}, nil,
+			Config{EnvBWS: "s"}, "is not a variable name"},
 		{"empty name", []bwsSecret{{Key: "s__", Value: "sv-empty"}}, nil,
 			Config{EnvBWS: "s"}, "is not a variable name"},
 		{"multi-line", []bwsSecret{{Key: "s__PEM", Value: "sv-first\nsv-second"}}, nil,
@@ -158,7 +160,7 @@ func TestBWSListRunsCLI(t *testing.T) {
 		"bws": `echo "$BWS_ACCESS_TOKEN $*" > "$(dirname "$0")/seen"
 echo '[{"key":"shop__A","value":"1","id":"x"}]'`,
 	})
-	t.Setenv("BWS_ACCESS_TOKEN", "tok-env")
+	t.Setenv("BWS_ACCESS_TOKEN", "tok-env\n") // pasted with its newline
 	list, err := bwsList()
 	if err != nil {
 		t.Fatal(err)
@@ -209,7 +211,7 @@ echo tok-keychain`,
 // Neither the environment nor the keychain has a token: refused before bws runs.
 func TestBWSListNoToken(t *testing.T) {
 	fakeBin(t, map[string]string{"security": "exit 44", "bws": "exit 99"})
-	t.Setenv("BWS_ACCESS_TOKEN", "")
+	t.Setenv("BWS_ACCESS_TOKEN", " ")
 	if _, err := bwsList(); err == nil || !strings.Contains(err.Error(), "BWS_ACCESS_TOKEN is not set") {
 		t.Fatalf("got %v", err)
 	}
@@ -227,7 +229,8 @@ func TestBWSListRedactsToken(t *testing.T) {
 
 // A bws that never answers is stopped and named, rather than holding the deploy.
 func TestBWSListTimeout(t *testing.T) {
-	fakeBin(t, map[string]string{"bws": "exec sleep 30"})
+	// Not exec: the shell is killed, the sleep it started keeps the output pipes open.
+	fakeBin(t, map[string]string{"bws": "sleep 30; echo late"})
 	t.Setenv("BWS_ACCESS_TOKEN", "tok")
 	orig := bwsTimeout
 	bwsTimeout = 300 * time.Millisecond
@@ -256,14 +259,14 @@ func TestBWSListKeychainTimeout(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("keychain fallback is macOS only")
 	}
-	fakeBin(t, map[string]string{"security": "exec sleep 30", "bws": "exit 99"})
+	fakeBin(t, map[string]string{"security": "sleep 30; echo late", "bws": "exit 99"})
 	t.Setenv("BWS_ACCESS_TOKEN", "")
 	orig := bwsTimeout
 	bwsTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { bwsTimeout = orig })
 	start := time.Now()
-	if _, err := bwsList(); err == nil {
-		t.Fatal("want an error")
+	if _, err := bwsList(); err == nil || !strings.Contains(err.Error(), "keychain item bws-claude-token gave none") {
+		t.Fatalf("got %v", err)
 	}
 	if time.Since(start) > 10*time.Second {
 		t.Errorf("keychain lookup held bwsList for %s", time.Since(start))
