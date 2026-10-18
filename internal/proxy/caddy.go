@@ -111,7 +111,11 @@ type Fragment struct {
 //
 // Format 7 is the ban's rules and heuristics: a boks of format 6 would assemble the handler with its
 // one limit, from fields the policy no longer holds, and the next deploy from it would drop the rules.
-const FragmentFormat = 7
+//
+// Format 8 is a block's paths and an allow's ranges: a boks of format 7 would assemble a block meant
+// for an API on every path, and an allow of ranges alone as one that matches every request — no block
+// and no ban for anyone.
+const FragmentFormat = 8
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -391,6 +395,9 @@ type (
 		Not []match `json:"not,omitempty"`
 		// RemoteIP matches the address of the connection — the client's, past Docker's DNAT.
 		RemoteIP *remoteIP `json:"remote_ip,omitempty"`
+		// ClientIP matches the client's address as Caddy tells it: past trusted_proxies, the address
+		// they forwarded, else the connection's.
+		ClientIP *remoteIP `json:"client_ip,omitempty"`
 		// Expression is a CEL expression over the request and its placeholders.
 		Expression string `json:"expression,omitempty"`
 	}

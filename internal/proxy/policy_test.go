@@ -71,6 +71,29 @@ func TestConfigPutsTheBotFilterFirst(t *testing.T) {
 	}
 }
 
+// A block with paths refuses its User-Agent on those prefixes only, and an allow of ranges exempts the
+// client's address — as Caddy tells it past trusted_proxies — from every block and from the ban.
+func TestConfigBlockPathsAndAllowRanges(t *testing.T) {
+	p := Policy{Revision: 1,
+		Allow: []BotAllow{{Ranges: []string{"203.0.113.7/32"}}},
+		Block: []BotBlock{{Name: "api-clients", Paths: []string{"/api"}, UserAgent: "(?i)axios/"}},
+		Ban:   &Ban{Duration: "24h", Rules: []BanRule{{Name: "all-1m", Limit: 1500, Window: "1m", Class: "all"}}}}
+	b, err := Config(p, []Fragment{{App: "a", Routes: web}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)
+	ban, _ := json.Marshal(routes[0].(map[string]any)["match"])
+	block, _ := json.Marshal(routes[1].(map[string]any)["match"])
+	exempt := `{"path":["/.well-known/acme-challenge/*"]},{"client_ip":{"ranges":["203.0.113.7/32"]}}`
+	if want := `[{"header_regexp":{"User-Agent":{"pattern":"(?i)axios/"}},"not":[` + exempt + `],"path":["/api","/api/*"]}]`; string(block) != want {
+		t.Errorf("block:\n got %s\nwant %s", block, want)
+	}
+	if want := `[{"not":[` + exempt + `]}]`; string(ban) != want {
+		t.Errorf("ban:\n got %s\nwant %s", ban, want)
+	}
+}
+
 // A domain covers itself and every host under it at any depth — Caddy's `*.` covers one label — with
 // or without a port, and nothing that merely ends in the same letters. Go's regexp is Caddy's.
 func TestDomainsPatternCoversEveryDepth(t *testing.T) {
@@ -214,10 +237,10 @@ func TestSetPolicyMarksTheRoutesForOlderBoks(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := d.files[Dir+"/routes/_server.json"]
-	// 7: a boks of format 6 knows the ban's one limit but not its rules and heuristics, and would
-	// assemble a handler without them.
-	if marker != "7\n" || FragmentFormat <= 6 {
-		t.Errorf("want the marker to hold format %d, above the 6 of a boks without the ban's rules: %q", FragmentFormat, marker)
+	// 8: a boks of format 7 knows neither a block's paths nor an allow's ranges, and would assemble a
+	// block meant for an API on every path and an allow of ranges alone that matches every request.
+	if marker != "8\n" || FragmentFormat <= 7 {
+		t.Errorf("want the marker to hold format %d, above the 7 of a boks without block paths: %q", FragmentFormat, marker)
 	}
 	if pol, mark := index(d.calls, "upload "+ServerDir+"/policy.json"), index(d.calls, "upload "+Dir+"/routes/_server.json"); mark < 0 || pol < mark {
 		t.Errorf("want the marker before the policy: %v", d.calls)

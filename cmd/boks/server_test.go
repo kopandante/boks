@@ -192,6 +192,21 @@ func TestPolicyOfCarriesTheTrustedProxies(t *testing.T) {
 	}
 }
 
+// The policy carries a block's paths and an allow's ranges, an address alone as its own range.
+func TestPolicyOfCarriesBlockPathsAndAllowRanges(t *testing.T) {
+	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\nbots:\n  block:\n    - {name: api, paths: [/api], user_agent: axios}\n  allow:\n    - {ranges: [203.0.113.7, 10.1.2.3/16]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := policyOf(sc)
+	if got := strings.Join(p.Block[0].Paths, " "); got != "/api" {
+		t.Errorf("block paths: %s", got)
+	}
+	if got := strings.Join(p.Allow[0].Ranges, " "); got != "203.0.113.7/32 10.1.0.0/16" {
+		t.Errorf("allow ranges: %s", got)
+	}
+}
+
 // The firewall step runs after the policy is on every server, and on every server whatever fails: a's
 // firewall cannot be read, b's is still changed, and the error names a.
 func TestServerApplyKeepsTheHairpinOnEveryServer(t *testing.T) {

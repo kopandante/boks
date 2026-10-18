@@ -127,17 +127,21 @@ type Egress struct {
 }
 
 // BotBlock answers 403 to a User-Agent matching UserAgent on Domains — each and every host under it —
-// or on every host when there are none, unless an allow matches the request.
+// or on every host when there are none, on Paths when there are any, unless an allow matches the
+// request.
 type BotBlock struct {
 	Name      string   `json:"name"`
 	Domains   []string `json:"domains,omitempty"`
+	Paths     []string `json:"paths,omitempty"`
 	UserAgent string   `json:"user_agent"`
 }
 
-// BotAllow is a request no block refuses: every field given must match.
+// BotAllow is a request no block refuses: every field given must match. Ranges are the client's
+// address as Caddy tells it — past trusted_proxies.
 type BotAllow struct {
 	Host      string   `json:"host,omitempty"`
 	Paths     []string `json:"paths,omitempty"`
+	Ranges    []string `json:"ranges,omitempty"`
 	UserAgent string   `json:"user_agent,omitempty"`
 }
 
@@ -246,7 +250,8 @@ func botRoutes(p Policy) []caddyRoute {
 		if len(b.Domains) > 0 {
 			h["Host"] = regexpMatch{Pattern: domainsPattern(b.Domains)}
 		}
-		rs = append(rs, caddyRoute{Match: []match{{HeaderRegexp: h, Not: exempt}},
+		m := match{HeaderRegexp: h, Path: prefixPaths(b.Paths), Not: exempt}
+		rs = append(rs, caddyRoute{Match: []match{m},
 			Handle: []handler{{Handler: "static_response", StatusCode: 403}}, Terminal: true})
 	}
 	return rs
@@ -261,8 +266,9 @@ func allowed(p Policy) []match {
 		if a.Host != "" {
 			m.Host = []string{a.Host}
 		}
-		for _, p := range a.Paths {
-			m.Path = append(m.Path, p, p+"/*")
+		m.Path = prefixPaths(a.Paths)
+		if len(a.Ranges) > 0 {
+			m.ClientIP = &remoteIP{Ranges: a.Ranges}
 		}
 		if a.UserAgent != "" {
 			m.HeaderRegexp = map[string]regexpMatch{"User-Agent": {Pattern: a.UserAgent}}
@@ -270,6 +276,15 @@ func allowed(p Policy) []match {
 		exempt = append(exempt, m)
 	}
 	return exempt
+}
+
+// prefixPaths are Caddy's path matcher for prefixes: each the path itself and everything below it.
+func prefixPaths(prefixes []string) []string {
+	var out []string
+	for _, p := range prefixes {
+		out = append(out, p, p+"/*")
+	}
+	return out
 }
 
 // banRoute is the policy's ban as a Caddy route, to go first on the servers on 80 and 443: on every

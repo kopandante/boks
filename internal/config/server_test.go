@@ -45,6 +45,20 @@ func TestParseServerWithServersOnly(t *testing.T) {
 	}
 }
 
+// A block narrowed to paths and an allow by the client's address alone are read as written.
+func TestParseServerBlockPathsAndAllowRanges(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [lab]\nrevision: 1\nbots:\n  block:\n    - {name: api-clients, paths: [/api], user_agent: '(?i)axios/'}\n  allow:\n    - {ranges: [203.0.113.7, 2001:db8::/32]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := s.Bots.Block[0]; len(b.Paths) != 1 || b.Paths[0] != "/api" {
+		t.Errorf("block paths: %+v", b)
+	}
+	if a := s.Bots.Allow[0]; len(a.Ranges) != 2 || a.Ranges[1] != "2001:db8::/32" {
+		t.Errorf("allow ranges: %+v", a)
+	}
+}
+
 func TestParseServerRejects(t *testing.T) {
 	block := func(rule string) string {
 		return "servers: [lab]\nrevision: 1\nbots:\n  block:\n    - " + rule + "\n"
@@ -69,6 +83,10 @@ func TestParseServerRejects(t *testing.T) {
 		"nothing to match":       allow(`{}`),
 		"one lowercase host":     allow(`{host: "*.habsidev.com"}`),
 		"absolute prefix":        allow(`{paths: [pics]}`),
+		"such as /api":           block(`{name: a, paths: [api/], user_agent: axios}`),
+		"neither an address":     allow(`{ranges: [office]}`),
+		"lets every address in":  allow(`{ranges: [0.0.0.0/0]}`),
+		"written as IPv6":        allow(`{ranges: ["::ffff:203.0.113.7"]}`),
 	}
 	for want, doc := range cases {
 		if _, err := ParseServer([]byte(doc)); err == nil || !strings.Contains(err.Error(), want) {

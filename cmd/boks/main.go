@@ -561,10 +561,14 @@ func installOn(ctx context.Context, s string, out io.Writer, o deploy.Options) e
 func policyOf(sc *config.Server) proxy.Policy {
 	p := proxy.Policy{Revision: sc.Revision}
 	for _, b := range sc.Bots.Block {
-		p.Block = append(p.Block, proxy.BotBlock{Name: b.Name, Domains: b.Domains, UserAgent: b.UserAgent})
+		p.Block = append(p.Block, proxy.BotBlock{Name: b.Name, Domains: b.Domains, Paths: b.Paths, UserAgent: b.UserAgent})
 	}
 	for _, a := range sc.Bots.Allow {
-		p.Allow = append(p.Allow, proxy.BotAllow{Host: a.Host, Paths: a.Paths, UserAgent: a.UserAgent})
+		var ranges []string
+		for _, pr := range a.RangePrefixes() {
+			ranges = append(ranges, pr.String())
+		}
+		p.Allow = append(p.Allow, proxy.BotAllow{Host: a.Host, Paths: a.Paths, Ranges: ranges, UserAgent: a.UserAgent})
 	}
 	if e := sc.Egress; e != nil {
 		var allow []string

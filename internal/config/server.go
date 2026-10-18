@@ -139,6 +139,9 @@ const DefaultEgressPort = 3128
 // Prefixes are Allow as CIDR ranges, an address alone as the range of that one address.
 func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
 
+// RangePrefixes are Ranges as CIDR ranges, an address alone as its own.
+func (a BotAllow) RangePrefixes() []netip.Prefix { return prefixes(a.Ranges) }
+
 // TrustedPrefixes are TrustedProxies as CIDR ranges, as Prefixes are Allow.
 func (s *Server) TrustedPrefixes() []netip.Prefix { return prefixes(s.TrustedProxies) }
 
@@ -220,18 +223,23 @@ type Bots struct {
 }
 
 // BotBlock refuses a User-Agent matching UserAgent on Domains — each domain and every host under it,
-// at any depth — or on every host the proxy serves when Domains is empty.
+// at any depth — or on every host the proxy serves when Domains is empty. Paths, when given, narrow it
+// to those prefixes, each the path itself and everything below it: a client library refused on an
+// API keeps the site's pages.
 type BotBlock struct {
 	Name      string   `yaml:"name"`
 	Domains   []string `yaml:"domains"`
+	Paths     []string `yaml:"paths"`
 	UserAgent string   `yaml:"user_agent"`
 }
 
 // BotAllow lets through what a rule would refuse: every field it gives must match. Host is one exact
-// host; Paths are prefixes, each the path itself and everything below it.
+// host; Paths are prefixes, each the path itself and everything below it; Ranges are the client's
+// addresses or CIDR ranges, as the proxy tells the client behind trusted_proxies.
 type BotAllow struct {
 	Host      string   `yaml:"host"`
 	Paths     []string `yaml:"paths"`
+	Ranges    []string `yaml:"ranges"`
 	UserAgent string   `yaml:"user_agent"`
 }
 
@@ -320,6 +328,11 @@ func (s *Server) validate() error {
 				return fmt.Errorf("bots.block[%s]: domains: %q must be a lowercase domain such as example.com — it covers every host under it", b.Name, d)
 			}
 		}
+		for _, p := range b.Paths {
+			if !pathRe.MatchString(p) {
+				return fmt.Errorf("bots.block[%s]: path %q must be an absolute prefix without a trailing slash, such as /api", b.Name, p)
+			}
+		}
 		if b.UserAgent == "" {
 			return fmt.Errorf("bots.block[%s]: user_agent is required — without it the rule would refuse every visitor", b.Name)
 		}
@@ -328,7 +341,7 @@ func (s *Server) validate() error {
 		}
 	}
 	for i, a := range s.Bots.Allow {
-		if a.Host == "" && len(a.Paths) == 0 && a.UserAgent == "" {
+		if a.Host == "" && len(a.Paths) == 0 && len(a.Ranges) == 0 && a.UserAgent == "" {
 			return fmt.Errorf("bots.allow[%d] gives nothing to match, and would let every bot through", i)
 		}
 		if a.Host != "" && !domainRe.MatchString(a.Host) {
@@ -338,6 +351,12 @@ func (s *Server) validate() error {
 			if !pathRe.MatchString(p) {
 				return fmt.Errorf("bots.allow[%d]: path %q must be an absolute prefix without a trailing slash, such as /pics", i, p)
 			}
+		}
+		if err := checkRanges(a.Ranges, "clients"); err != nil {
+			return fmt.Errorf("bots.allow[%d]: ranges: %w", i, err)
+		}
+		if err := checkWrittenAsIPv4(a.Ranges); err != nil {
+			return fmt.Errorf("bots.allow[%d]: ranges: %w", i, err)
 		}
 		if a.UserAgent != "" {
 			if err := checkUserAgent(a.UserAgent); err != nil {
