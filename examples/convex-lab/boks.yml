@@ -1,10 +1,11 @@
 # Self-hosted Convex on boks-lab: one container, two routed ports.
-# Secrets (INSTANCE_NAME, INSTANCE_SECRET) live in ./.env, which is gitignored.
+# INSTANCE_SECRET comes from BWS at deploy time (convex-lab-prod__INSTANCE_SECRET); nothing secret is on disk.
 app: convex-lab
 image: ghcr.io/get-convex/convex-backend
 servers: [boks-lab]
-env_file: .env
+env_bws: convex-lab-prod
 env:
+  INSTANCE_NAME: convex-lab
   DISABLE_BEACON: "true"
   DO_NOT_REQUIRE_SSL: "true"
   CONVEX_CLOUD_ORIGIN: https://api.lab.kopanda.ru
