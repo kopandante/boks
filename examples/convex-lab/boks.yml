@@ -1,5 +1,5 @@
 # Self-hosted Convex on boks-lab: one container, two routed ports.
-# INSTANCE_SECRET comes from BWS at deploy time (convex-lab-prod__INSTANCE_SECRET); nothing secret is on disk.
+# INSTANCE_SECRET comes from BWS at deploy time as <env_bws>__INSTANCE_SECRET; no .env is read.
 app: convex-lab
 image: ghcr.io/get-convex/convex-backend
 servers: [boks-lab]
