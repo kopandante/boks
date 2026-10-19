@@ -296,12 +296,28 @@ func TestSetPolicyPutsTheMarkerBack(t *testing.T) {
 			t.Fatal(err)
 		}
 		c.to.Revision, c.to.Floor = 17, 17
-		d.fail[reloadNext] = errors.New("refused")
-		if err := SetPolicy(context.Background(), d, io.Discard, c.to); err == nil {
-			t.Fatalf("%s: want the apply to fail", c.name)
-		}
-		if got := d.files[Dir+"/routes/_server.json"]; got != c.wantMarker {
-			t.Errorf("%s: marker %q, want %q back", c.name, got, c.wantMarker)
+		// A refused reload, and a write of the secrets that fails before the policy is written.
+		for _, fail := range []string{reloadNext, "upload " + ServerDir + "/gate.secret"} {
+			if fail != reloadNext && len(c.to.Gate) == 0 {
+				continue
+			}
+			to := c.to
+			if len(to.Gate) > 0 {
+				to.GateSecrets = map[string][]string{"SHOP_SECRET": {strings.Repeat("n", 32)}, "SHOP_DIGESTS": {digest}, "BLOG_SECRET": {siteSecret}}
+			}
+			if fail == reloadNext {
+				d.fail[fail] = errors.New("refused")
+			} else {
+				d.lost[fail] = errors.New("connection reset") // written, the answer lost
+			}
+			if err := SetPolicy(context.Background(), d, io.Discard, to); err == nil {
+				t.Fatalf("%s, %s: want the apply to fail", c.name, fail)
+			}
+			delete(d.fail, fail)
+			delete(d.lost, fail)
+			if got := d.files[Dir+"/routes/_server.json"]; got != c.wantMarker {
+				t.Errorf("%s, %s: marker %q, want %q back", c.name, fail, got, c.wantMarker)
+			}
 		}
 	}
 }

@@ -360,16 +360,15 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if _, err := Config(p, fs); err != nil {
 		return err
 	}
-	// The marker first: alone, it only stops an older boks. Then the secret, before the policy that
-	// needs it; until the policy is applied, a failure puts the previous secret back — or removes the
-	// one written — with the previous policy: a secret left changed under the old policy would be
-	// taken by the next deploy's reload, and clients on the old password refused.
+	// The marker first: alone, it only stops an older boks. Then the secrets, before the policy that
+	// needs them; until the policy is applied, a failure puts the previous marker and secrets back — or
+	// removes those written — with the previous policy: a secret left changed under the old policy
+	// would be taken by the next deploy's reload, and clients on the old password refused; a marker
+	// left at the new format would turn away every boks of format 7 for nothing (a gate added), or let
+	// one drop the gate (a gate removed). Everything to put back is read before anything is written.
 	prevMarker, markerPresent, err := readFile(ctx, r, policyMarker())
 	if err != nil {
 		return err
-	}
-	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", policyFormat(p)), policyMarker()); err != nil {
-		return fmt.Errorf("marking the server's routes for this boks: %w", err)
 	}
 	prevSecret, secretPresent, err := readFile(ctx, r, egressSecretPath())
 	if err != nil {
@@ -379,21 +378,21 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if err != nil {
 		return err
 	}
+	putBack := func(back context.Context, path, prev string, present bool) error {
+		if present {
+			return remote.UploadAtomic(back, r, []byte(prev), path)
+		}
+		_, err := r.Run(back, "rm", "-f", path)
+		return err
+	}
 	restoreSecret := func(back context.Context) error {
-		var errs []error
-		if secretPresent {
-			errs = append(errs, remote.UploadAtomic(back, r, []byte(prevSecret), egressSecretPath()))
-		} else {
-			_, err := r.Run(back, "rm", "-f", egressSecretPath())
-			errs = append(errs, err)
-		}
-		if gatePresent {
-			errs = append(errs, remote.UploadAtomic(back, r, []byte(prevGate), gateSecretPath()))
-		} else {
-			_, err := r.Run(back, "rm", "-f", gateSecretPath())
-			errs = append(errs, err)
-		}
-		return errors.Join(errs...)
+		return errors.Join(putBack(back, policyMarker(), prevMarker, markerPresent),
+			putBack(back, egressSecretPath(), prevSecret, secretPresent),
+			putBack(back, gateSecretPath(), prevGate, gatePresent))
+	}
+	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", policyFormat(p)), policyMarker()); err != nil {
+		// Its answer may be lost after the file was replaced.
+		return fmt.Errorf("marking the server's routes for this boks: %w", errors.Join(err, restoreSecret(context.WithoutCancel(ctx))))
 	}
 	if e := p.Egress; e != nil && e.User != "" && prevSecret != e.User+":"+e.Password+"\n" {
 		if err := remote.UploadAtomic(ctx, r, []byte(e.User+":"+e.Password+"\n"), egressSecretPath()); err != nil {
@@ -442,14 +441,6 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 		}
 		if restore {
 			err = errors.Join(err, restoreSecret(back))
-			// The marker follows the policy too: a format 8 left beside a policy without the gate would
-			// turn away every boks of format 7 for nothing, a 7 beside the gate would let one drop it.
-			if markerPresent {
-				err = errors.Join(err, remote.UploadAtomic(back, r, []byte(prevMarker), policyMarker()))
-			} else {
-				_, rmErr := r.Run(back, "rm", "-f", policyMarker())
-				err = errors.Join(err, rmErr)
-			}
 		}
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
 		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))
