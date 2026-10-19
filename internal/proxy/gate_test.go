@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -393,6 +394,34 @@ func TestReshapeTakesTheGatesSecretsFromTheServer(t *testing.T) {
 	next.Gate = gated().Gate
 	if err := Reshape(context.Background(), s, io.Discard, next); err != nil {
 		t.Errorf("want the secrets taken from the server: %v", err)
+	}
+}
+
+// The marker goes up before the policy with the gate and down only after Caddy runs the policy
+// without it: a run cut in between leaves an 8, which turns a boks of format 7 away, never a 7 beside
+// the gate, which would let one drop it.
+func TestTheMarkerGoesDownLast(t *testing.T) {
+	plain := gated()
+	plain.Revision, plain.Floor, plain.Gate, plain.GateSecrets = 17, 17, nil, nil
+	up := gated()
+	up.Revision, up.Floor = 18, 18
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		p     Policy
+		after bool
+	}{{gated(), false}, {plain, true}, {up, false}} {
+		before := len(d.calls)
+		if err := SetPolicy(context.Background(), d, io.Discard, c.p); err != nil {
+			t.Fatal(err)
+		}
+		calls := d.calls[before:]
+		marker, reload := slices.Index(calls, "upload "+Dir+"/routes/_server.json"), slices.IndexFunc(calls, func(s string) bool { return strings.HasPrefix(s, reloadNext) })
+		if marker < 0 || reload < 0 || (marker > reload) != c.after {
+			t.Errorf("revision %d: marker at %d, reload at %d: %v", c.p.Revision, marker, reload, calls)
+		}
 	}
 }
 
