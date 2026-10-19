@@ -113,11 +113,15 @@ func (h *Handler) exempted(p, method string) bool {
 // the other way round — so such a path is refused on any route, a page's included. Without one, a path
 // that is under /api/ to either reading is refused too: the gate would judge a route the app never
 // serves (/api/auth%2Ftoken is the token's issue to Go, nothing to Next.js), or miss one it does
-// (/api\encar is /api/encar to Next.js). Browsers send none of these.
+// (/api\encar is /api/encar to Next.js). An escaped letter, digit or -._~ is a third: Next.js matches
+// static segments escaped, so /api/%61dmin/x is the exempt /api/admin/x to Go and a dynamic sibling
+// route to Next.js. Browsers send none of these.
+var escapedUnreserved = regexp.MustCompile(`%(2d|2e|3[0-9]|[46][1-9a-f]|[57][0-9a]|5f|7e)`)
+
 func unclean(u *url.URL) bool {
 	esc := strings.ToLower(u.EscapedPath())
 	backslash := strings.Contains(u.Path, `\`)
-	if !backslash && !strings.Contains(u.Path, "//") && !strings.Contains(esc, "%2f") && !strings.Contains(esc, "%5c") {
+	if !backslash && !strings.Contains(u.Path, "//") && !strings.Contains(esc, "%2f") && !strings.Contains(esc, "%5c") && !escapedUnreserved.MatchString(esc) {
 		return false
 	}
 	slashed := strings.ReplaceAll(u.Path, `\`, "/")

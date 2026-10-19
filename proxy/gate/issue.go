@@ -30,14 +30,10 @@ func (h *Handler) issue(w http.ResponseWriter, r *http.Request, ip string) error
 	if err != nil || len(body) > maxIssueBody {
 		return refuse(w, forbidden)
 	}
-	var req struct {
-		Fingerprint any `json:"fingerprint"`
-	}
-	if json.Unmarshal(body, &req) != nil {
-		return refuse(w, forbidden)
-	}
-	fp, _ := req.Fingerprint.(string)
-	if !fingerprintRe.MatchString(fp) {
+	// The key exactly as route.ts reads body.fingerprint: Go's struct decoder would match any case.
+	var fields map[string]json.RawMessage
+	var fp string
+	if json.Unmarshal(body, &fields) != nil || json.Unmarshal(fields["fingerprint"], &fp) != nil || !fingerprintRe.MatchString(fp) {
 		return refuse(w, forbidden)
 	}
 	http.SetCookie(w, h.cookie(h.sign(fp, ip), r))

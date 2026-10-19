@@ -106,11 +106,22 @@ const tokens: Token[] = [
 	{ name: "ip only (page token of the proxy)", class: "valid", token: issued({ ip: IP }) },
 	{ name: "fp+ip ipv6", class: "valid", token: issued({ fp: FP, ip: IPV6 }) },
 	{ name: "fp+ip signed with previous", class: "previous", token: issued({ fp: FP, ip: IP, secret: PREVIOUS }) },
+	{ name: "previous, age ttl+1", class: "ttl", token: issued({ fp: FP, ip: IP, secret: PREVIOUS, age: TTL + 1 }) },
 	{ name: "fp+ip signed with a stranger", class: "signature", token: issued({ fp: FP, ip: IP, secret: STRANGER }) },
 	{ name: "age exactly ttl", class: "ttl", token: issued({ fp: FP, ip: IP, age: TTL }) },
 	{ name: "age ttl+1", class: "ttl", token: issued({ fp: FP, ip: IP, age: TTL + 1 }) },
 	{ name: "iat in the future", class: "ttl", token: issued({ fp: FP, ip: IP, age: -1 }) },
 	{ name: "other address", class: "ip", token: issued({ fp: FP, ip: OTHER }) },
+	{ name: "ip only, other address", class: "ip", token: issued({ ip: OTHER }) },
+	// The address is compared as a string: another spelling of the client's own is another address.
+	{ name: "own address v4-mapped", class: "ip", token: issued({ fp: FP, ip: `::ffff:${IP}` }) },
+	{ name: "own address ipv6 upper case", class: "ip", token: issued({ fp: FP, ip: IPV6.toUpperCase() }) },
+	{ name: "iat fractional, signed", class: "valid", token: signed(b64url(JSON.stringify({ iat: NOW - 1000.5, nonce: "00", fp: FP, ip: IP }))) },
+	{ name: "nonce a number, signed", class: "no_ip", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: 1, fp: FP, ip: IP }))) },
+	{ name: "nonce null, signed", class: "no_ip", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: null, fp: FP, ip: IP }))) },
+	// fp or ip of another type only a holder of the secret writes: the proxy refuses the payload.
+	{ name: "fp a number, signed", class: "stricter", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: "00", fp: 123, ip: IP }))) },
+	{ name: "fp false, signed", class: "stricter", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: "00", fp: false, ip: IP }))) },
 	{ name: "fp only, no ip", class: "no_ip", token: issued({ fp: FP }) },
 	{ name: "no fp, no ip (page token of a site)", class: "no_ip", token: issued({}) },
 	{
@@ -128,6 +139,15 @@ const tokens: Token[] = [
 	{ name: "trailing dot", class: "garbage", token: `${fresh.split(".")[0]}.` },
 	{ name: "signature padded with =", class: "stricter", token: `${fresh}=` },
 	{
+		// The last of 43 characters carries two bits the decoder drops: a sibling decodes to the same bytes.
+		name: "signature, other unused trailing bits",
+		class: "stricter",
+		token: (() => {
+			const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+			return fresh.slice(0, -1) + abc[abc.indexOf(fresh.at(-1) ?? "A") ^ 1];
+		})(),
+	},
+	{
 		name: "signature in the standard alphabet",
 		class: "stricter",
 		token: (() => {
@@ -143,31 +163,39 @@ const tokens: Token[] = [
 	{ name: "payload in the standard alphabet, signed", class: "stricter", token: signed(stdAlphabetPayload()) },
 ];
 
-type Req = { name: string; method: string; path: string; fingerprint?: string; via?: "header" | "cookie-empty" };
+type Req = { name: string; method: string; path: string; fingerprint?: string };
+// How the token comes: the cookie (no via), the header alone, the header behind an empty cookie, or the
+// cookie with another token in the header.
+type Delivery = { via?: "header" | "cookie-empty" | "cookie+header"; header?: string };
 const requests: Req[] = [
 	{ name: "GET with its fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP },
 	{ name: "GET with another fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP2 },
+	{ name: "GET with its fp upper case", method: "GET", path: "/api/encar/catalog", fingerprint: FP.toUpperCase() },
 	{ name: "GET without fp", method: "GET", path: "/api/encar/catalog" },
 	{ name: "POST with its fp", method: "POST", path: "/api/encar/catalog", fingerprint: FP },
+	{ name: "POST with another fp", method: "POST", path: "/api/encar/catalog", fingerprint: FP2 },
 	{ name: "POST without fp", method: "POST", path: "/api/encar/catalog" },
+	// The fp relaxation is GET's alone: HEAD and PUT compare it as POST does.
+	{ name: "HEAD with its fp", method: "HEAD", path: "/api/encar/catalog", fingerprint: FP },
+	{ name: "HEAD with another fp", method: "HEAD", path: "/api/encar/catalog", fingerprint: FP2 },
+	{ name: "HEAD without fp", method: "HEAD", path: "/api/encar/catalog" },
+	{ name: "PUT without fp", method: "PUT", path: "/api/encar/catalog" },
 	{ name: "GET pics, fp skipped", method: "GET", path: "/api/encar/pics/1.jpg" },
 	{ name: "GET pics with another fp, skipped", method: "GET", path: "/api/encar/pics/1.jpg", fingerprint: FP2 },
 	{ name: "POST pics without fp, skipped", method: "POST", path: "/api/encar/pics/1.jpg" },
+	{ name: "POST picsX without fp, skipped by raw prefix", method: "POST", path: "/api/encar/picsX" },
 ];
 
 const gate = createProxy({ api: { skipFingerprintPrefixes: ["/api/encar/pics"] } });
 
-async function site(token: string | undefined, req: Req, ip: string) {
+async function site(token: string | undefined, req: Req, ip: string, d: Delivery) {
 	const headers = new Headers({ host: "cars.example.com", "x-forwarded-for": ip });
 	if (req.fingerprint) headers.set("x-fingerprint", req.fingerprint);
 	let cookie: string | undefined = token;
-	if (req.via === "header") {
-		cookie = undefined;
-		if (token) headers.set("x-api-token", token);
-	} else if (req.via === "cookie-empty") {
-		cookie = "";
-		if (token) headers.set("x-api-token", token);
-	}
+	const header = d.via === "cookie+header" ? d.header : d.via ? token : undefined;
+	if (d.via === "header") cookie = undefined;
+	if (d.via === "cookie-empty") cookie = "";
+	if (header) headers.set("x-api-token", header);
 	const request = {
 		method: req.method,
 		headers,
@@ -184,28 +212,28 @@ async function site(token: string | undefined, req: Req, ip: string) {
 	}
 }
 
-const vectors = [];
+const vectors: object[] = [];
+// The proxy's column is the site's, but for the classes the plan lets it be stricter in.
+async function push(t: Token, req: Req, ip: string, d: Delivery = {}) {
+	const s = await site(t.token || undefined, req, ip, d);
+	const proxy = t.class === "no_ip" || t.class === "stricter" ? { status: 401, body: '{"error":"Access denied"}' } : s;
+	const name = `${t.name} / ${req.name}${d.via ? `, token by ${d.via}${d.via === "cookie+header" ? (d.header === fresh ? " (valid)" : " (bad)") : ""}` : ""}`;
+	vectors.push({ name, class: t.class, token: t.token, ...(d.via && { via: d.via }), ...(d.header && { header_token: d.header }), method: req.method, path: req.path, fingerprint: req.fingerprint ?? "", client_ip: ip, site: s, proxy });
+}
 for (const t of tokens) {
-	for (const req of requests) {
-		const ip = t.name.includes("ipv6") ? IPV6 : IP;
-		const s = await site(t.token, req, ip);
-		let proxy = s;
-		if (t.class === "no_ip" || t.class === "stricter") proxy = { status: 401, body: '{"error":"Access denied"}' };
-		vectors.push({ name: `${t.name} / ${req.name}`, class: t.class, token: t.token, method: req.method, path: req.path, fingerprint: req.fingerprint ?? "", client_ip: ip, site: s, proxy });
-	}
+	for (const req of requests) await push(t, req, t.name.includes("ipv6") ? IPV6 : IP);
 }
-// The token's way in: the X-Api-Token header, and an empty cookie that leaves it to the header.
-for (const via of ["header", "cookie-empty"] as const) {
-	const req: Req = { name: `GET with its fp, token by ${via}`, method: "GET", path: "/api/encar/catalog", fingerprint: FP, via };
-	const s = await site(fresh, req, IP);
-	vectors.push({ name: `fp+ip / ${req.name}`, class: "valid", token: fresh, via, method: "GET", path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy: s });
+// The delivery axis, on tokens that pass and that fail each check: a header token is checked, not
+// just let through, and the cookie decides over the header whatever the header holds.
+const viaTokens = tokens.filter((t) => ["fp+ip", "fp+ip signed with a stranger", "age ttl+1", "other address", "no fp, no ip (page token of a site)"].includes(t.name));
+const strangerToken = viaTokens.find((t) => t.class === "signature")?.token ?? "";
+const deliveries: Delivery[] = [{ via: "header" }, { via: "cookie-empty" }, { via: "cookie+header", header: fresh }, { via: "cookie+header", header: strangerToken }];
+for (const d of deliveries) {
+	for (const t of viaTokens) await push(t, requests[0], IP, d);
 }
-// No token at all.
-{
-	const req = requests[0];
-	const s = await site(undefined, req, IP);
-	vectors.push({ name: `no token / ${req.name}`, class: "garbage", token: "", method: req.method, path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy: s });
-}
+// The other methods a valid token may come with: without fp, every one but GET is refused.
+for (const method of ["OPTIONS", "DELETE", "PATCH"]) await push(tokens[0], { name: `${method} without fp`, method, path: "/api/encar/catalog" }, IP);
+await push({ name: "no token", class: "garbage", token: "" }, requests[0], IP);
 
 // One vector per line: the file stays reviewable as a diff without tripling its length.
 const head = JSON.stringify({ key_current: CURRENT, key_previous: PREVIOUS, now_ms: NOW, skip_fp: ["/api/encar/pics"] });
