@@ -121,6 +121,25 @@ func TestGateHostsAreTheAppsAlone(t *testing.T) {
 	if string(got) != `[{"host":["*.shop.example.com"],"not":[{"host":["api.shop.example.com"],"path":["/assets","/assets/*"]},{"host":["plain.shop.example.com"]}]}]` {
 		t.Errorf("want only the other app's path left out: %s", got)
 	}
+	// Hosts compare as Caddy matches them, in any case: a shared host spelled otherwise is still shared,
+	// and another app's exact host spelled otherwise is still left out of the wildcard.
+	upper := append(shopAndBlog, Fragment{App: "img", Routes: []Route{{Host: "SHOP.example.com", Path: "/img", Dial: "img:1", TLS: true}}})
+	if _, err := Config(gated(), upper); err == nil || !strings.Contains(err.Error(), "routed by img too") {
+		t.Errorf("want a shared host in capitals refused, got %v", err)
+	}
+	// The app's own exact host beside its wildcard stays under the gate.
+	wild = []Fragment{
+		{App: "shop", Routes: []Route{{Host: "*.shop.example.com", Dial: "shop:1", TLS: true}, {Host: "foo.shop.example.com", Dial: "shop:1", TLS: true}}},
+		{App: "api", Routes: []Route{{Host: "api.SHOP.example.com", Dial: "api:1", TLS: true}}},
+	}
+	if b, err = Config(gated(), wild); err != nil {
+		t.Fatal(err)
+	}
+	gate = dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)[2].(map[string]any)
+	got, _ = json.Marshal(gate["match"])
+	if string(got) != `[{"host":["*.shop.example.com","foo.shop.example.com"],"not":[{"host":["api.SHOP.example.com"]}]}]` {
+		t.Errorf("want the app's own host gated and the other's left out: %s", got)
+	}
 	// A route of the gated app by path: the gate would judge the visitor's path, not the app's.
 	byPath := []Fragment{{App: "shop", Routes: []Route{{Host: "cars.example.com", Path: "/shop", StripPath: true, Dial: "shop:1", TLS: true}}}}
 	if _, err := Config(gated(), byPath); err == nil || !strings.Contains(err.Error(), "by path") {
