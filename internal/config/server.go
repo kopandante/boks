@@ -38,6 +38,9 @@ type Server struct {
 	// Ban, when given, has the proxy refuse an address that sends too many requests: 403 on every host
 	// of the server for a while, without the request reaching any app.
 	Ban *Ban `yaml:"ban"`
+	// Gate, when given, has the proxy check the sites' API token on the hosts of the apps it names, in
+	// place of each site (gate.go).
+	Gate *Gate `yaml:"gate"`
 }
 
 // Ban is the ban by request rate. An address that sends more than a rule's Limit requests within its
@@ -269,10 +272,15 @@ func ParseServer(data []byte) (*Server, error) {
 	// `ban:` with nothing under it — its keys commented out — decodes as no ban at all: applied, it
 	// would lift the server's ban without a word.
 	var keys struct {
-		Ban yaml.Node `yaml:"ban"`
+		Ban  yaml.Node `yaml:"ban"`
+		Gate yaml.Node `yaml:"gate"`
 	}
 	if s.Ban == nil && yaml.Unmarshal(data, &keys) == nil && keys.Ban.Kind != 0 {
 		return nil, errors.New("ban: empty; write `ban: {}` for the defaults (300 requests in 1m ban for 24h), or remove the key for no ban")
+	}
+	// The same for the gate: applied, an empty one would lift it from every group.
+	if s.Gate == nil && keys.Gate.Kind != 0 {
+		return nil, errors.New("gate: empty; remove the key for no gate")
 	}
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -286,7 +294,7 @@ func (s *Server) validate() error {
 	}
 	// A file of servers alone — what `boks server install` reads — has no policy to number. One with a
 	// policy needs its revision, and `boks server apply` asks for one either way.
-	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0 || s.Ban != nil) {
+	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0 || s.Ban != nil || s.Gate != nil) {
 		return errors.New("revision: required, a whole number from 1 that grows by one with every edit")
 	}
 	if s.Egress != nil {
@@ -297,6 +305,11 @@ func (s *Server) validate() error {
 	if s.Ban != nil {
 		if err := s.Ban.validate(); err != nil {
 			return fmt.Errorf("ban: %w", err)
+		}
+	}
+	if s.Gate != nil {
+		if err := s.Gate.validate(); err != nil {
+			return fmt.Errorf("gate: %w", err)
 		}
 	}
 	// Trusting everyone hands every app the address a visitor writes into X-Forwarded-For.
