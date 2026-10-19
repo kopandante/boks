@@ -172,10 +172,10 @@ func TestApplyServerRefusesKamalProxy(t *testing.T) {
 	if len(f.uploads) > 0 || len(f.appends) > 0 {
 		t.Errorf("want nothing written: %v %v", f.uploads, f.appends)
 	}
-	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 1}); err == nil {
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 1}, false); err == nil {
 		t.Errorf("want the check before any server changes to refuse it too")
 	}
-	if err := CheckServerRollback(context.Background(), f, 1); err == nil {
+	if err := CheckServerRollback(context.Background(), f, 1, false); err == nil {
 		t.Errorf("want the rollback check to refuse it too")
 	}
 }
@@ -205,12 +205,12 @@ func TestApplyServerSaysWhenNoProxyRuns(t *testing.T) {
 // The check before any server changes refuses a rollback to a revision the server never applied.
 func TestCheckServerRollback(t *testing.T) {
 	f := serverFake(t, proxy.Policy{Revision: 5, Floor: 5})
-	if err := CheckServerRollback(context.Background(), f, 3); err == nil || !strings.Contains(err.Error(), "never applied revision 3") {
+	if err := CheckServerRollback(context.Background(), f, 3, false); err == nil || !strings.Contains(err.Error(), "never applied revision 3") {
 		t.Errorf("want a refusal, got %v", err)
 	}
 	old, _ := json.Marshal(proxy.Policy{Revision: 3, Block: crawlers})
 	f.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(old)
-	if err := CheckServerRollback(context.Background(), f, 3); err != nil {
+	if err := CheckServerRollback(context.Background(), f, 3, false); err != nil {
 		t.Errorf("want revision 3 taken: %v", err)
 	}
 }
@@ -320,7 +320,7 @@ func TestCheckApplyRefusesAnEgressTheProxyCannotRun(t *testing.T) {
 	f.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.reverse_proxy"
 	f.out[proxyImage] = "caddy:2.11.7-alpine"
 	next := proxy.Policy{Revision: 2, Egress: &proxy.Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}}}
-	if err := CheckApply(context.Background(), f, next); err == nil || !strings.Contains(err.Error(), "no forward proxy") {
+	if err := CheckApply(context.Background(), f, next, false); err == nil || !strings.Contains(err.Error(), "no forward proxy") {
 		t.Errorf("want the stock image refused: %v", err)
 	}
 }
@@ -340,7 +340,7 @@ func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
 	f := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
 	f.out[proxyImage] = old
 	f.fail[validate(old)] = unknown
-	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "the proxy runs "+old) ||
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}, false); err == nil || !strings.Contains(err.Error(), "the proxy runs "+old) ||
 		!strings.Contains(err.Error(), "rules and heuristics") || !strings.Contains(err.Error(), `unknown field "heuristics"`) ||
 		!strings.Contains(err.Error(), "boks proxy upgrade") {
 		t.Errorf("want the image without the new fields refused: %v", err)
@@ -352,12 +352,12 @@ func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
 		}
 	}
 	f.out[proxyImage] = current
-	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}); err != nil {
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2, Ban: ban}, false); err != nil {
 		t.Errorf("want the image that takes the probe taken: %v", err)
 	}
 	// No ban, nothing asked.
 	n := len(f.calls)
-	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2}); err != nil || slices.ContainsFunc(f.calls[n:], func(c string) bool { return strings.HasPrefix(c, "docker run") }) {
+	if err := CheckApply(context.Background(), f, proxy.Policy{Revision: 2}, false); err != nil || slices.ContainsFunc(f.calls[n:], func(c string) bool { return strings.HasPrefix(c, "docker run") }) {
 		t.Errorf("want a policy without a ban to ask no image: %v %v", err, f.calls[n:])
 	}
 
@@ -366,14 +366,14 @@ func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
 	g.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(hist)
 	g.out[proxyImage] = old
 	g.fail[validate(old)] = unknown
-	if err := CheckServerRollback(context.Background(), g, 3); err == nil || !strings.Contains(err.Error(), "rules and heuristics") {
+	if err := CheckServerRollback(context.Background(), g, 3, false); err == nil || !strings.Contains(err.Error(), "rules and heuristics") {
 		t.Errorf("want a rollback to a ban refused on the image without the fields: %v", err)
 	}
 	if len(g.uploads) > 0 || len(g.appends) > 0 {
 		t.Errorf("want nothing written: %v %v", g.uploads, g.appends)
 	}
 	g.out[proxyImage] = current
-	if err := CheckServerRollback(context.Background(), g, 3); err != nil {
+	if err := CheckServerRollback(context.Background(), g, 3, false); err != nil {
 		t.Errorf("want the rollback taken on the image with the fields: %v", err)
 	}
 
@@ -382,12 +382,12 @@ func TestCheckApplyRefusesABanTheProxyCannotRun(t *testing.T) {
 	h.out["docker ps -a --filter name=^boks-proxy$"] = "exited\tcaddy"
 	h.out[proxyImage] = old
 	h.fail[validate(old)] = unknown
-	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err == nil || !strings.Contains(err.Error(), "rules and heuristics") ||
+	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}, false); err == nil || !strings.Contains(err.Error(), "rules and heuristics") ||
 		!strings.Contains(err.Error(), "stopped container") {
 		t.Errorf("want a stopped proxy whose image lacks the fields refused: %v", err)
 	}
 	h.out[proxyImage] = current
-	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}); err != nil {
+	if err := CheckApply(context.Background(), h, proxy.Policy{Revision: 2, Ban: ban}, false); err != nil {
 		t.Errorf("want a stopped proxy whose image has the fields taken: %v", err)
 	}
 	if slices.ContainsFunc(h.calls, func(c string) bool { return strings.HasPrefix(c, "docker exec") }) {

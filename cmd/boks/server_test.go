@@ -305,3 +305,94 @@ ban:
 		t.Errorf("want none without the key: %v", err)
 	}
 }
+
+// The gate goes to the policy as written, without a secret: those come from the environment.
+func TestPolicyOfCarriesTheGate(t *testing.T) {
+	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\ngate:\n  groups:\n    - {name: shop, app: shop, mode: log, secret_env: SHOP_SECRET, skip_fp: [/api/encar/pics]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := policyOf(sc)
+	if string(p.Gate) != `{"groups":[{"app":"shop","mode":"log","name":"shop","secret_env":"SHOP_SECRET","skip_fp":["/api/encar/pics"]}]}` || p.GateSecrets != nil {
+		t.Errorf("gate: %s %v", p.Gate, p.GateSecrets)
+	}
+}
+
+// A rollback that would leave a site whose own check is gone without the proxy's is refused on every
+// server before any changes, naming --force; with --force it goes past that refusal.
+func TestServerRollbackKeepsTheGate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cur := `{"revision":5,"floor":5,"gate":{"groups":[{"name":"shop","app":"shop","mode":"enforce","site_gate":"off","secret_env":"S"}]}}`
+	for _, args := range [][]string{{"server", "rollback", path, "4"}, {"server", "rollback", "--force", path, "4"}} {
+		a := &recorder{server: server{policyRead: "present\n" + cur, "sh -c if [ -f '.boks/_server/history/4.json' ]": "present\n{\"revision\":4}"}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		var errw strings.Builder
+		run(args, io.Discard, &errw)
+		forced := args[2] == "--force"
+		if refused := strings.Contains(errw.String(), "no gate group for it"); refused == forced {
+			t.Errorf("%v: %q", args, errw.String())
+		}
+		if !forced && (a.ran("ln -sn") || len(a.stdin) > 0) {
+			t.Errorf("%v: changed the server: %v", args, a.calls)
+		}
+	}
+}
+
+// An apply takes --force too, past the refusal to leave a site whose own check is gone without the
+// proxy's; and it brings the gate's secrets from the environment, where a server that keeps none would
+// refuse the gate.
+func TestServerApplyKeepsTheGate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 6\ngate:\n  groups:\n    - {name: shop, app: shop, mode: log, secret_env: SHOP_GATE_SECRET}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	frags := "sh -c for f in '.boks/_proxy/routes'/*.json; do [ -f \"$f\" ] && cat \"$f\"; done; true"
+	shop := `7
+{"app": "shop", "routes": [{"host": "shop.example.com", "dial": "shop:1", "tls": true}]}`
+	cur := `{"revision":5,"floor":5,"gate":{"groups":[{"name":"shop","app":"shop","mode":"enforce","site_gate":"off","secret_env":"SHOP_GATE_SECRET"}]}}`
+	t.Setenv("SHOP_GATE_SECRET", strings.Repeat("s", 32))
+	for _, args := range [][]string{{"server", "apply", path}, {"server", "apply", path, "--force"}} {
+		a := &recorder{server: server{policyRead: "present\n" + cur, frags: shop}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		var errw strings.Builder
+		run(args, io.Discard, &errw)
+		forced := len(args) == 4
+		if refused := strings.Contains(errw.String(), "site_gate off"); refused == forced {
+			t.Errorf("%v: %q", args, errw.String())
+		}
+		// Refused, nothing is touched; forced, the apply goes on to the server's admission, past the
+		// check under the lock as well.
+		if changed := a.ran("ln -sn"); changed != forced {
+			t.Errorf("%v: changed=%v: %q %v", args, changed, errw.String(), a.calls)
+		}
+	}
+	plain := `{"revision":5,"floor":5}`
+	// A secret set wrong stops the apply before any server is asked.
+	t.Setenv("SHOP_GATE_SECRET", "short")
+	a := &recorder{server: server{policyRead: "present\n" + plain, frags: shop}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "shorter than 32") || len(a.calls) > 0 {
+		t.Errorf("want the apply refused before any server is asked: %d %q %v", code, errw.String(), a.calls)
+	}
+	for _, set := range []bool{false, true} {
+		if !set {
+			t.Setenv("SHOP_GATE_SECRET", "")
+			os.Unsetenv("SHOP_GATE_SECRET")
+		} else {
+			t.Setenv("SHOP_GATE_SECRET", strings.Repeat("s", 32))
+		}
+		a := &recorder{server: server{policyRead: "present\n" + plain, frags: shop}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		var errw strings.Builder
+		run([]string{"server", "apply", path}, io.Discard, &errw)
+		if missing := strings.Contains(errw.String(), "keeps no gate secret SHOP_GATE_SECRET"); missing == set {
+			t.Errorf("secret set=%v: %q", set, errw.String())
+		}
+	}
+}

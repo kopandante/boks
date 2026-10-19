@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -38,10 +39,56 @@ func CheckRevision(cur, next proxy.Policy) error {
 		next.Revision, cur.Floor+1)
 }
 
-// ApplyServer makes next the server's policy, when CheckRevision lets it.
+// CheckGateTransition refuses a change of the policy that would leave a site without the token check
+// once its own is gone: a group whose site no longer checks (site_gate off) in cur must be, in next —
+// matched by app — still in enforce with site_gate off. Otherwise a rollback to an older revision or an
+// apply of a file with mode log, off or no gate at all would quietly open the site's API. force lifts
+// this refusal alone, for the emergency it is meant for. It is asked twice: before anything changes on
+// any server, and again under the admission lock against the policy read there — another apply may
+// have changed the server in between.
+func CheckGateTransition(cur, next proxy.Policy, force bool) error {
+	if force {
+		return nil
+	}
+	curGroups, err := proxy.GateGroups(cur)
+	if err != nil {
+		return err
+	}
+	nextGroups, err := proxy.GateGroups(next)
+	if err != nil {
+		return err
+	}
+	for _, c := range curGroups {
+		if !c.SiteGateOff() {
+			continue
+		}
+		i := slices.IndexFunc(nextGroups, func(n proxy.GateGroup) bool { return n.App == c.App })
+		switch {
+		case i < 0:
+			return fmt.Errorf("gate: %s no longer checks the token itself (site_gate off), and revision %d has no gate group for it: "+
+				"its API would be open; nothing was changed (--force for an emergency)", c.App, next.Revision)
+		case nextGroups[i].Mode != "enforce" || !nextGroups[i].SiteGateOff():
+			return fmt.Errorf("gate: %s no longer checks the token itself (site_gate off), and revision %d puts its group in mode %s, site_gate %s: "+
+				"its API would go unchecked; nothing was changed (--force for an emergency)", c.App, next.Revision, nextGroups[i].Mode, siteGate(nextGroups[i]))
+		}
+	}
+	return nil
+}
+
+func siteGate(g proxy.GateGroup) string {
+	if g.SiteGateOff() {
+		return "off"
+	}
+	return "on"
+}
+
+// ApplyServer makes next the server's policy, when CheckRevision and CheckGateTransition let it.
 func ApplyServer(ctx context.Context, r remote.Runner, log io.Writer, next proxy.Policy, o Options) error {
 	return withServer(ctx, r, log, o, "server apply", func(cur proxy.Policy) (proxy.Policy, error) {
 		if err := CheckRevision(cur, next); err != nil {
+			return next, err
+		}
+		if err := CheckGateTransition(cur, next, o.Force); err != nil {
 			return next, err
 		}
 		next.Floor = max(cur.Floor, next.Revision)
@@ -50,7 +97,7 @@ func ApplyServer(ctx context.Context, r remote.Runner, log io.Writer, next proxy
 }
 
 // CheckApply asks a server, before anything changes on any server of the file, whether it takes next.
-func CheckApply(ctx context.Context, r remote.Runner, next proxy.Policy) error {
+func CheckApply(ctx context.Context, r remote.Runner, next proxy.Policy, force bool) error {
 	if _, err := policyProxy(ctx, r); err != nil {
 		return err
 	}
@@ -61,7 +108,13 @@ func CheckApply(ctx context.Context, r remote.Runner, next proxy.Policy) error {
 	if err := CheckRevision(cur, next); err != nil {
 		return err
 	}
+	if err := CheckGateTransition(cur, next, force); err != nil {
+		return err
+	}
 	if err := proxy.CheckBan(ctx, r, next); err != nil {
+		return err
+	}
+	if err := proxy.CheckGate(ctx, r, next); err != nil {
 		return err
 	}
 	return proxy.CheckEgress(ctx, r, next)
@@ -77,13 +130,13 @@ func RollbackServer(ctx context.Context, r remote.Runner, log io.Writer, rev int
 			return p, err
 		}
 		p.Revision, p.Floor = rev, cur.Floor
-		return p, nil
+		return p, CheckGateTransition(cur, p, o.Force)
 	})
 }
 
 // CheckServerRollback asks a server, before anything changes on any server of the file, whether it has rev
 // to go back to: a server that joined the fleet later never applied it.
-func CheckServerRollback(ctx context.Context, r remote.Runner, rev int) error {
+func CheckServerRollback(ctx context.Context, r remote.Runner, rev int, force bool) error {
 	if _, err := policyProxy(ctx, r); err != nil {
 		return err
 	}
@@ -91,7 +144,18 @@ func CheckServerRollback(ctx context.Context, r remote.Runner, rev int) error {
 	if err != nil {
 		return err
 	}
+	cur, err := proxy.ReadPolicy(ctx, r)
+	if err != nil {
+		return err
+	}
+	p.Revision = rev
+	if err := CheckGateTransition(cur, p, force); err != nil {
+		return err
+	}
 	if err := proxy.CheckBan(ctx, r, p); err != nil {
+		return err
+	}
+	if err := proxy.CheckGate(ctx, r, p); err != nil {
 		return err
 	}
 	return proxy.CheckEgress(ctx, r, p)
@@ -166,6 +230,9 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	}
 	if b := next.Ban; b != nil {
 		fmt.Fprintf(log, "  %s\n", b)
+	}
+	if line := proxy.GateString(next); line != "" {
+		fmt.Fprintf(log, "  %s\n", line)
 	}
 	if !running {
 		fmt.Fprintf(log, "  %s is not running on this server: nothing is filtered until it starts and loads this policy\n", proxy.Container)
