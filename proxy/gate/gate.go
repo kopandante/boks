@@ -264,10 +264,15 @@ func signedFP(pl payload, reason string) string {
 }
 
 // requestToken is the token a request brings: the cookie, or the header when the cookie is missing or
-// empty, as request-gate reads it.
+// empty, as request-gate reads it. Of two cookies of the name the last counts, as Next.js's parser keeps
+// it (Map.set per pair); r.Cookie would take the first.
 func requestToken(r *http.Request) string {
-	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
-		return c.Value
+	tok := ""
+	for _, c := range r.CookiesNamed(cookieName) {
+		tok = c.Value
+	}
+	if tok != "" {
+		return tok
 	}
 	return r.Header.Get(tokenHeader)
 }
@@ -285,6 +290,9 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 		return deny("unclean_path", badPath)
 	}
 	p := path.Clean(r.URL.Path)
+	if nextData(p) {
+		return deny("next_data", badPath)
+	}
 	if !strings.HasPrefix(p, "/api/") {
 		return decision{verdict: "page"}
 	}

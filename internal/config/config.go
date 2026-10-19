@@ -29,7 +29,7 @@ const (
 	// routing. It is boks's own build (proxy/Dockerfile): Caddy 2.11.7 — the newest on Docker Hub on
 	// 2026-10-06, and the one boks-lab was measured with — the forward proxy a server's egress needs, the
 	// ban handler (proxy/ban) a server's ban needs and the gate (proxy/gate) a server's gate needs.
-	DefaultProxyImage = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban8-gate1@sha256:9bc5f128ea3c20ae710b4a89c70d82646e37dc99fc14dde4310a061e8c211f7a"
+	DefaultProxyImage = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban8-gate1@sha256:068938012af93038080f44d2397c0099c1d6718e9930fece82819157ab8daf2f"
 	DefaultKeep       = 3
 	// MaxAppLen keeps a copy's name (app-tag-time) one DNS label.
 	MaxAppLen            = 51

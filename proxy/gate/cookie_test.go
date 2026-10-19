@@ -182,7 +182,6 @@ func TestLogLeavesResponse(t *testing.T) {
 }
 
 // A streamed response — Next.js's RSC — is flushed as it comes, the cookie fixed before the headers
-// A streamed response — Next.js's RSC — is flushed as it comes, the cookie fixed before the headers
 // leave, whichever comes first: the status, the body or a flush; an early hint goes ahead without it.
 // Checked on the wire, through a real server: the headers the client receives, and the stream reaching
 // it while the app still holds the response open.
@@ -282,4 +281,48 @@ func TestStreamedResponse(t *testing.T) {
 		return nil
 	})
 	through(t, h, request("GET", "/catalog", visitor), app)
+}
+
+// The race T9 names: a page response of pakim that left before the client's token issue arrives after
+// it and overwrites the fp token with one without fp (pakim copies fp only from the request's token,
+// and that request had none). Through the proxy a GET still passes — the 1.7.0 relaxation — and a
+// write gets 403 with "mismatch", on which the client refreshes once; the refreshed token passes.
+func TestDelayedPageResponseCostsOneRefresh(t *testing.T) {
+	now := time.Now()
+	h := enforcing(t, &Handler{}, now)
+	issue := func() *http.Cookie {
+		w := serve(t, h, issueRequest(`{"fingerprint":"`+fp+`"}`, "application/json"))
+		if w.Code != 200 {
+			t.Fatalf("issue: %d", w.Code)
+		}
+		return w.Result().Cookies()[0]
+	}
+	jar := issue()
+	// The delayed page response: its request carried no token, pakim set one without fp.
+	page := through(t, h, request("GET", "/catalog", visitor), site(200, cookieName+"="+h.sign("", "")+"; Path=/"))
+	jar = page.Result().Cookies()[0]
+	if pl, _ := h.verify(jar.Value, now); pl.fp != "" || pl.ip != visitor {
+		t.Fatalf("the page's cookie: %+v", pl)
+	}
+	api := func(method string, c *http.Cookie) *httptest.ResponseRecorder {
+		r := request(method, "/api/encar/catalog", visitor)
+		r.AddCookie(c)
+		r.Header.Set(fpHeader, fp)
+		return serve(t, h, r)
+	}
+	if w := api("GET", jar); w.Code != 200 {
+		t.Errorf("GET after the overwrite: %d %s", w.Code, w.Body.String())
+	}
+	refreshes := 0
+	w := api("POST", jar)
+	for w.Code == 401 || (w.Code == 403 && strings.Contains(w.Body.String(), "mismatch")) {
+		if refreshes++; refreshes > 1 {
+			t.Fatalf("more than one refresh: %d %s", w.Code, w.Body.String())
+		}
+		jar = issue()
+		w = api("POST", jar)
+	}
+	if refreshes != 1 || w.Code != 200 {
+		t.Errorf("want one refresh, then 200: %d refreshes, %d %s", refreshes, w.Code, w.Body.String())
+	}
 }

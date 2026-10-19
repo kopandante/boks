@@ -3,6 +3,7 @@ package gate
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -221,13 +222,15 @@ func TestBearer(t *testing.T) {
 			t.Errorf("%s: %d, want %d", c.name, w.Code, c.status)
 		}
 	}
-	// A POST with a valid Bearer still passes with a valid token: the Bearer only adds a way in.
-	r := request("POST", "/api/encar/catalog", visitor)
-	r.Header.Set("Authorization", "Bearer "+partner)
-	r.Header.Set(fpHeader, fp)
-	r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, visitor)})
-	if w := serve(t, h, r); w.Code != 200 {
-		t.Errorf("POST with Bearer and a token: %d", w.Code)
+	// A Bearer that does not let a request in leaves it to the token: the Bearer only adds a way in.
+	for method, bearer := range map[string]string{"POST": partner, "GET": strings.Repeat("q", 40)} {
+		r := request(method, "/api/encar/catalog", visitor)
+		r.Header.Set("Authorization", "Bearer "+bearer)
+		r.Header.Set(fpHeader, fp)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, visitor)})
+		if w := serve(t, h, r); w.Code != 200 {
+			t.Errorf("%s with a Bearer that does not pass and a token: %d", method, w.Code)
+		}
 	}
 }
 
@@ -240,8 +243,8 @@ func TestUncleanPaths(t *testing.T) {
 		status int
 	}{
 		{"/api/admin/../encar/catalog", 401},
-		{"/api/admin/%2e%2e/encar/catalog", 401},
-		{"/api/admin/%2E%2E/encar/catalog", 401},
+		{"/api/admin/%2e%2e/encar/catalog", 400},
+		{"/api/admin/%2E%2E/encar/catalog", 400},
 		{"/api/admin/..%2fencar/catalog", 400},
 		{"/api/admin/..%2Fencar/catalog", 400},
 		{"/api/admin/..%5cencar/catalog", 400},
@@ -256,6 +259,14 @@ func TestUncleanPaths(t *testing.T) {
 		{"/p%5cq/../api/encar/catalog", 400},
 		{`/api\encar\catalog`, 400},
 		{"/api/admin/x", 200},
+		// Next.js's data URLs, which it unwraps into any route, an API route included: refused whole.
+		{"/_next/data/b1d/api/encar/catalog.json", 400},
+		{"/_next/data/b1d/index/api/encar/catalog.json", 400},
+		{"/_next/data/b1d/_next/data/b1d/api/encar/catalog.json.json", 400},
+		{"/_next/data/b1d/catalog.json", 400},
+		{"/_next/data", 400},
+		{"/_next/static/chunks/a.js", 200},
+		{"/_next/database", 200},
 		// A page with the same characters is the app's business, not the gate's.
 		{"/catalog/a%2fb", 200},
 		{`/catalog/a\b`, 200},
@@ -263,6 +274,15 @@ func TestUncleanPaths(t *testing.T) {
 		// An escaped slash under /api/ is refused without a dot segment too.
 		{"/api/auth%2Ftoken", 400},
 		{"/api%2fencar/catalog", 400},
+		{"/%61bout", 200},
+	}
+	// An escaped letter, digit or -._~ under /api/ (the ends of each range): Go reads /api/admin/x, exempt, and
+	// Next.js matches a dynamic sibling.
+	for _, c := range "AOPZaopz09-._~" {
+		cases = append(cases, struct {
+			target string
+			status int
+		}{fmt.Sprintf("/api/adm%%%02xn/x", c), 400})
 	}
 	for _, c := range cases {
 		// Parsed as the server parses a request's target: no reference resolution, no host in "//".
@@ -303,6 +323,29 @@ func TestValidateRefuses(t *testing.T) {
 		h.now = time.Now
 		if err := h.Provision(ctxForTest(t)); err == nil {
 			t.Errorf("%s: provisioned", name)
+		}
+	}
+}
+
+// A write through a Next.js data URL is refused like a read.
+func TestNextDataURLWrite(t *testing.T) {
+	h := enforcing(t, &Handler{}, time.Now())
+	for _, target := range []string{"/_next/data/b1d/api/delivery/suggest.json", "/_next/data/b1d/index/api/delivery/suggest.json"} {
+		if w := serve(t, h, request("POST", target, visitor)); w.Code != 400 {
+			t.Errorf("POST %s: %d", target, w.Code)
+		}
+	}
+}
+
+// The fingerprint is skipped only on a path that starts with a skip prefix, as request-gate's
+// startsWith: the prefix further in is no skip.
+func TestSkipFPAnchored(t *testing.T) {
+	h := enforcing(t, &Handler{SkipFP: []string{"/api/encar/pics"}}, time.Now())
+	for p, want := range map[string]int{"/api/encar/pics/1.jpg": 200, "/api/x/api/encar/pics": 403} {
+		r := request("POST", p, visitor)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, visitor)})
+		if w := serve(t, h, r); w.Code != want {
+			t.Errorf("POST %s without fp: %d, want %d", p, w.Code, want)
 		}
 	}
 }

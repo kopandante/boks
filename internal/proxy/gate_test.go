@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -82,8 +83,10 @@ func TestANewHostOfTheAppIsGated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"new-shop.example.org",`) {
-		t.Errorf("want the new host in the gate's matcher: %s", b)
+	gate := dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)[2].(map[string]any)
+	got, _ := json.Marshal(gate["match"].([]any)[0].(map[string]any)["host"])
+	if handlerOf(t, gate)["handler"] != "boks_gate" || !strings.Contains(string(got), `"new-shop.example.org"`) {
+		t.Errorf("want the new host in the gate's matcher: %s", got)
 	}
 }
 
@@ -106,6 +109,105 @@ func TestGateHostsAreTheAppsAlone(t *testing.T) {
 	got, _ := json.Marshal(gate["match"])
 	if string(got) != `[{"host":["*.shop.example.com"],"not":[{"host":["api.shop.example.com"]}]}]` {
 		t.Errorf("want the other app's host left out of the wildcard: %s", got)
+	}
+	// A path another app routes on a covered host: that path is the other app's, the host's other paths
+	// fall through to the wildcard's app and stay under the gate. A host of the other server is left out
+	// whole, as the wildcard's own route leaves it.
+	wild[1].Routes = []Route{{Host: "api.shop.example.com", Path: "/assets", Dial: "api:1", TLS: true}, {Host: "plain.shop.example.com", Dial: "api:1"}}
+	if b, err = Config(gated(), wild); err != nil {
+		t.Fatal(err)
+	}
+	gate = dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)[2].(map[string]any)
+	got, _ = json.Marshal(gate["match"])
+	if string(got) != `[{"host":["*.shop.example.com"],"not":[{"host":["api.shop.example.com"],"path":["/assets","/assets/*"]},{"host":["plain.shop.example.com"]}]}]` {
+		t.Errorf("want only the other app's path left out: %s", got)
+	}
+	// Hosts compare as Caddy matches them, in any case: a shared host spelled otherwise is still shared,
+	// and another app's exact host spelled otherwise is still left out of the wildcard.
+	upper := append(shopAndBlog, Fragment{App: "img", Routes: []Route{{Host: "SHOP.example.com", Path: "/img", Dial: "img:1", TLS: true}}})
+	if _, err := Config(gated(), upper); err == nil || !strings.Contains(err.Error(), "routed by img too") {
+		t.Errorf("want a shared host in capitals refused, got %v", err)
+	}
+	// The app's own exact host beside its wildcard stays under the gate.
+	wild = []Fragment{
+		{App: "shop", Routes: []Route{{Host: "*.shop.example.com", Dial: "shop:1", TLS: true}, {Host: "foo.shop.example.com", Dial: "shop:1", TLS: true}}},
+		{App: "api", Routes: []Route{{Host: "api.SHOP.example.com", Dial: "api:1", TLS: true}}},
+	}
+	if b, err = Config(gated(), wild); err != nil {
+		t.Fatal(err)
+	}
+	gate = dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)[2].(map[string]any)
+	got, _ = json.Marshal(gate["match"])
+	if string(got) != `[{"host":["*.shop.example.com","foo.shop.example.com"],"not":[{"host":["api.SHOP.example.com"]}]}]` {
+		t.Errorf("want the app's own host gated and the other's left out: %s", got)
+	}
+	// The app's own exact host of the other server is left out too: its wildcard route leaves it out,
+	// and the request on this server meets the redirect or nothing, not the app.
+	wild = []Fragment{{App: "shop", Routes: []Route{{Host: "*.shop.example.com", Dial: "shop:1"}, {Host: "a.shop.example.com", Dial: "shop:1", TLS: true}}}}
+	if b, err = Config(gated(), wild); err != nil {
+		t.Fatal(err)
+	}
+	gate = dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)[2].(map[string]any)
+	got, _ = json.Marshal(gate["match"])
+	if string(got) != `[{"host":["*.shop.example.com"],"not":[{"host":["a.shop.example.com"]}]}]` {
+		t.Errorf("want the app's own TLS host left out of the plain wildcard: %s", got)
+	}
+	// A route of the gated app by path: the gate would judge the visitor's path, not the app's.
+	byPath := []Fragment{{App: "shop", Routes: []Route{{Host: "cars.example.com", Path: "/shop", StripPath: true, Dial: "shop:1", TLS: true}}}}
+	if _, err := Config(gated(), byPath); err == nil || !strings.Contains(err.Error(), "by path") {
+		t.Errorf("want a gated app's path route refused, got %v", err)
+	}
+}
+
+// probe answers CheckGate's run of the proxy's image: it records the command and the config on stdin,
+// and refuses when told to.
+type probe struct {
+	*disk
+	args   []string
+	stdin  string
+	refuse error
+}
+
+func (p *probe) Run(ctx context.Context, args ...string) (string, error) {
+	if strings.Contains(strings.Join(args, " "), "docker inspect -f '{{.Config.Image}}' boks-proxy") {
+		return "ghcr.io/kopandante/boks-caddy:old\n", nil
+	}
+	return p.disk.Run(ctx, args...)
+}
+
+func (p *probe) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	if len(args) > 1 && args[0] == "docker" && args[1] == "run" {
+		p.args, p.stdin = args, string(content)
+		return "", p.refuse
+	}
+	return p.disk.Pipe(ctx, content, args...)
+}
+
+// The gate is checked by the proxy's own image, offline, with the handlers as the config will hold
+// them; a Caddy that refuses them stops the apply, naming the image to upgrade (T6).
+func TestCheckGateAsksTheProxysImage(t *testing.T) {
+	for _, c := range []struct {
+		ps     string
+		refuse error
+		want   string
+	}{{"running\tcaddy", nil, ""}, {"running\tcaddy", errors.New("unknown module boks_gate"), "runs ghcr.io/kopandante/boks-caddy:old"},
+		{"exited\tcaddy", errors.New("unknown module boks_gate"), "is a stopped container of ghcr.io/kopandante/boks-caddy:old"}} {
+		d := newDisk()
+		if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+			t.Fatal(err)
+		}
+		d.ps = c.ps
+		r := &probe{disk: d, refuse: c.refuse}
+		err := CheckGate(context.Background(), r, gated())
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "boks proxy upgrade")) {
+			t.Errorf("%s, refused %v: got %v", c.ps, c.refuse, err)
+		}
+		if got := strings.Join(r.args, " "); got != "docker run --rm -i --network none --entrypoint caddy ghcr.io/kopandante/boks-caddy:old validate --config /dev/stdin" {
+			t.Errorf("probe: %s", got)
+		}
+		if !strings.Contains(r.stdin, `"handler":"boks_gate"`) || !strings.Contains(r.stdin, siteSecret) {
+			t.Errorf("the probe's config lacks the gate as the server would run it: %s", r.stdin)
+		}
 	}
 }
 
@@ -227,6 +329,34 @@ func TestSetPolicyPutsTheGatesSecretsBack(t *testing.T) {
 	}
 }
 
+// A secret the apply brings replaces the one the server keeps: a rotation reaches Caddy and the file.
+func TestSetPolicyRotatesAGateSecret(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPolicy(context.Background(), d, io.Discard, gated()); err != nil {
+		t.Fatal(err)
+	}
+	rotated := strings.Repeat("r", 32)
+	next := gated()
+	next.Revision, next.Floor = 17, 17
+	next.GateSecrets = map[string][]string{"SHOP_SECRET": {rotated, siteSecret}}
+	if err := SetPolicy(context.Background(), d, io.Discard, next); err != nil {
+		t.Fatal(err)
+	}
+	var kept map[string][]string
+	if err := json.Unmarshal([]byte(d.files[ServerDir+"/gate.secret"]), &kept); err != nil {
+		t.Fatal(err)
+	}
+	if got := kept["SHOP_SECRET"]; len(got) != 2 || got[0] != rotated || len(kept["SHOP_DIGESTS"]) != 1 {
+		t.Errorf("want the rotated secret first and the digests kept: %v", kept)
+	}
+	if !strings.Contains(d.caddy, rotated) {
+		t.Errorf("Caddy runs the gate without the rotated secret")
+	}
+}
+
 // Two policies with the same gate are one policy, whatever secrets each carries: the secrets are not
 // the policy.
 func TestSamePolicySeesTheGate(t *testing.T) {
@@ -275,6 +405,53 @@ func TestReshapeTakesTheGatesSecretsFromTheServer(t *testing.T) {
 	next.Gate = gated().Gate
 	if err := Reshape(context.Background(), s, io.Discard, next); err != nil {
 		t.Errorf("want the secrets taken from the server: %v", err)
+	}
+}
+
+// The switch asks the gate's host rule again under the admission lock: a deploy's check before it may
+// be stale, and a fragment written past the rule would leave every later config refused.
+func TestSetRoutesAsksTheGateAgain(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPolicy(context.Background(), d, io.Discard, gated()); err != nil {
+		t.Fatal(err)
+	}
+	img := []Route{{Host: "shop.example.com", Path: "/img", Dial: "img:1", TLS: true}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "img", img); err == nil || !strings.Contains(err.Error(), "routed by img too") {
+		t.Fatalf("want the gated host refused at the switch, got %v", err)
+	}
+	if _, ok := d.files[Dir+"/routes/img.json"]; ok {
+		t.Errorf("the fragment was written past the rule")
+	}
+}
+
+// The marker goes up before the policy with the gate and down only after Caddy runs the policy
+// without it: a run cut in between leaves an 8, which turns a boks of format 7 away, never a 7 beside
+// the gate, which would let one drop it.
+func TestTheMarkerGoesDownLast(t *testing.T) {
+	plain := gated()
+	plain.Revision, plain.Floor, plain.Gate, plain.GateSecrets = 17, 17, nil, nil
+	up := gated()
+	up.Revision, up.Floor = 18, 18
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		p     Policy
+		after bool
+	}{{gated(), false}, {plain, true}, {up, false}} {
+		before := len(d.calls)
+		if err := SetPolicy(context.Background(), d, io.Discard, c.p); err != nil {
+			t.Fatal(err)
+		}
+		calls := d.calls[before:]
+		marker, reload := slices.Index(calls, "upload "+Dir+"/routes/_server.json"), slices.IndexFunc(calls, func(s string) bool { return strings.HasPrefix(s, reloadNext) })
+		if marker < 0 || reload < 0 || (marker > reload) != c.after {
+			t.Errorf("revision %d: marker at %d, reload at %d: %v", c.p.Revision, marker, reload, calls)
+		}
 	}
 }
 
@@ -333,5 +510,21 @@ func TestCheckHostsSeesTheGate(t *testing.T) {
 	}
 	if err := CheckHosts(p, shopAndBlog, "img", []Route{{Host: "img.example.com", Dial: "img:1", TLS: true}}); err != nil {
 		t.Errorf("a host of its own: %v", err)
+	}
+	// A group that is off has no route, so its app's host is no gate's to keep.
+	if err := CheckHosts(p, shopAndBlog, "img", []Route{{Host: "blog.example.com", Path: "/img", Dial: "img:1", TLS: true}}); err != nil {
+		t.Errorf("a path beside an app whose group is off: %v", err)
+	}
+}
+
+// A group whose app has no routes on the server gates nothing — a typo, or a group meant for another
+// server: refused before anything changes.
+func TestCheckGateRefusesAGroupWithoutRoutes(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "blog", shopAndBlog[0].Routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckGate(context.Background(), d, gated()); err == nil || !strings.Contains(err.Error(), "shop has no routes") {
+		t.Errorf("want the group without routes refused, got %v", err)
 	}
 }

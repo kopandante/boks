@@ -360,8 +360,10 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if _, err := Config(p, fs); err != nil {
 		return err
 	}
-	// The marker first: alone, it only stops an older boks. Then the secrets, before the policy that
-	// needs them; until the policy is applied, a failure puts the previous marker and secrets back — or
+	// A marker going up first: alone, it only stops an older boks. One going down — the gate removed —
+	// last, once Caddy runs the policy without the gate: written first, a run cut before the policy
+	// would leave the gate in place behind a 7, for a boks of format 7 to drop with its next deploy.
+	// Then the secrets, before the policy that needs them; until the policy is applied, a failure puts the previous marker and secrets back — or
 	// removes those written — with the previous policy: a secret left changed under the old policy
 	// would be taken by the next deploy's reload, and clients on the old password refused; a marker
 	// left at the new format would turn away every boks of format 7 for nothing (a gate added), or let
@@ -390,9 +392,14 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 			putBack(back, egressSecretPath(), prevSecret, secretPresent),
 			putBack(back, gateSecretPath(), prevGate, gatePresent))
 	}
-	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", policyFormat(p)), policyMarker()); err != nil {
-		// Its answer may be lost after the file was replaced.
-		return fmt.Errorf("marking the server's routes for this boks: %w", errors.Join(err, restoreSecret(context.WithoutCancel(ctx))))
+	marker := fmt.Appendf(nil, "%d\n", policyFormat(p))
+	was, err := strconv.Atoi(strings.TrimSpace(prevMarker))
+	down := markerPresent && err == nil && was > policyFormat(p)
+	if !down {
+		if err := remote.UploadAtomic(ctx, r, marker, policyMarker()); err != nil {
+			// Its answer may be lost after the file was replaced.
+			return fmt.Errorf("marking the server's routes for this boks: %w", errors.Join(err, restoreSecret(context.WithoutCancel(ctx))))
+		}
 	}
 	if e := p.Egress; e != nil && e.User != "" && prevSecret != e.User+":"+e.Password+"\n" {
 		if err := remote.UploadAtomic(ctx, r, []byte(e.User+":"+e.Password+"\n"), egressSecretPath()); err != nil {
@@ -445,7 +452,16 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
 		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))
 	}
-	return recordHistory(ctx, r, p)
+	if err := recordHistory(ctx, r, p); err != nil {
+		return err
+	}
+	if down {
+		if err := remote.UploadAtomic(ctx, r, marker, policyMarker()); err != nil {
+			// The policy runs; the marker left above it only turns an older boks away until the next apply.
+			return fmt.Errorf("the policy is applied, but marking the server's routes for an older boks again failed (apply again): %w", err)
+		}
+	}
+	return nil
 }
 
 // recordHistory keeps the policy of p's revision, without the server's floor: it is what a rollback puts back.

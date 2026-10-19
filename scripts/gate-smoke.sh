@@ -13,11 +13,12 @@
 # host reachable only from another zone: CURL_OPTS="--socks5-hostname 127.0.0.1:18181".
 set -euo pipefail
 
-stand="" dir="" jar=$(mktemp) html=$(mktemp)
+stand="" dir="" cid="" jar=$(mktemp) html=$(mktemp)
 cleanup() {
 	rm -f "$jar" "$html"
 	if [ -n "$dir" ]; then
-		docker rm -f boks-gate-stand >/dev/null 2>&1 || true
+		# Only the container this run started: a second stand fails on the name, and must not take the first.
+		[ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true
 		rm -f "$dir/caddy.json"
 		rmdir "$dir"
 	fi
@@ -34,8 +35,8 @@ if [ "${1:-}" = "--stand" ]; then
 			{handle: [($g[0] + {handler: "boks_gate"})]},
 			{handle: [{handler: "reverse_proxy", upstreams: [{dial: $up}]}]}
 		]}}}}}' > "$dir/caddy.json"
-	docker run -d --name boks-gate-stand -p "$port:8080" --add-host host.docker.internal:host-gateway \
-		-v "$dir:/etc/stand:ro" "$image" caddy run --config /etc/stand/caddy.json >/dev/null
+	cid=$(docker run -d --name boks-gate-stand -p "$port:8080" --add-host host.docker.internal:host-gateway \
+		-v "$dir:/etc/stand:ro" "$image" caddy run --config /etc/stand/caddy.json)
 	for _ in $(seq 50); do curl -fs -o /dev/null "http://localhost:$port/" && break || sleep 0.2; done
 	stand="http://localhost:$port"
 fi

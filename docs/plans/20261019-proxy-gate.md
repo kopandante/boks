@@ -1,6 +1,6 @@
 # План: проверка API-токена в boks-proxy вместо сайтов
 
-Base: a337925 | Branch: feat/proxy-gate-module (модуль, образ) → feat/proxy-gate-wire (политика, формат 8, пин образа) | PR: #104 (модуль), подключение — следующий
+Base: a337925 | Branch: feat/proxy-gate-module (модуль, образ) → feat/proxy-gate-wire (политика, формат 8, пин образа) | PR: —
 
 Одобрен владельцем 19.10.2026 («Да, делаем проверку токена в прокси»), plan-review раунд 3 — GO. Ниже — задачи
 boks (§5) и критерии готовности (§7 и «Новые AC») дословно, полный текст плана — в разделе «Описание».
@@ -17,7 +17,7 @@ boks (§5) и критерии готовности (§7 и «Новые AC») �
 - [x] 0 клон и ветка
 - [x] 1 план одобрен (plan-review раунд 3: GO)
 - [x] 2 реализация (задачи ниже)
-- [x] 3 PR (#104 модуль; второй — подключение)
+- [ ] 3 PR
 - [ ] 4 review-loop green
 - [ ] 5 certify + merge
 - [ ] 6 образ: сборка CI, `DefaultProxyImage` по digest
@@ -46,7 +46,7 @@ boks (§5) и критерии готовности (§7 и «Новые AC») �
 - [x] 2. `proxy/Dockerfile`: `--with .../proxy/gate=/src/gate`, проверка `list-modules`; `proxy/TAG` → `…-ban8-gate1`;
   `DefaultProxyImage` (`config.go:32`) — новый digest.
   - [x] 2a `proxy/Dockerfile` + `proxy/TAG` (`2.11.7-fp0aab84d-ban8-gate1`), локальная сборка: `list-modules` даёт `http.handlers.boks_gate`; `scripts/gate-smoke.sh` (AC9) — прогон на стенде с заглушкой сайта: одна cookie, картинки 200 (с cookie сайта и без)
-  - [x] 2b `DefaultProxyImage` по digest образа из CI (второй PR): `…-ban8-gate1@sha256:9bc5f128…` (сборка ветки модуля, b7aa2e5; amd64+arm64; `list-modules` и `caddy validate` конфига группы проверены, ban8 его отвергает)
+  - [x] 2b `DefaultProxyImage` по digest образа из CI: `…-ban8-gate1@sha256:06893801…` (сборка main b7cb2a8 после #104; amd64+arm64; `list-modules`: boks_ban, boks_gate, forward_proxy; смоук стенда на нём)
 - [x] 3. `internal/config/server.go`: разбор `gate:` — группа ссылается на `app:` (R10), не на список хостов; проверки boks
   только структурные (`app` есть на узле, приложение не в двух группах, `secret_env`/`digests_env` заданы, секрет ≥ 32);
   остальное содержимое `gate` — непрозрачный JSON, его проверяет схема Caddy при reload (`DisallowUnknownFields`,

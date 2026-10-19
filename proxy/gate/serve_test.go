@@ -206,6 +206,67 @@ func TestThroughCaddy(t *testing.T) {
 	}
 }
 
+// Through Caddy in enforce, behind a trusted peer: the token the proxy issues carries the address
+// Caddy decided, written as the app reads the first X-Forwarded-For — an IPv6 address canonical, an
+// IPv4 one mapped into IPv6 unmapped — and the token passes the API from that address (T3, AC15).
+func TestThroughCaddyBindsTheToken(t *testing.T) {
+	var seen string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("X-Forwarded-For")
+	}))
+	defer upstream.Close()
+	defer func() { _ = caddy.Stop() }()
+	h := &Handler{Secrets: []string{secret}, now: time.Now}
+	for _, c := range []struct{ visitor, want string }{
+		{"198.51.100.7", "198.51.100.7"},
+		{"2001:DB8:0:0::7", "2001:db8::7"},
+		{"::ffff:198.51.100.8", "198.51.100.8"},
+	} {
+		port := freePort(t)
+		cfg := fmt.Sprintf(`{"admin":{"disabled":true},"apps":{"http":{"servers":{"s":{"listen":["127.0.0.1:%d"],
+ "trusted_proxies":{"source":"static","ranges":["127.0.0.1/32"]},"client_ip_headers":["X-Forwarded-For"],"trusted_proxies_strict":1,
+ "routes":[
+  {"handle":[{"handler":"boks_gate","name":"site","mode":"enforce","secrets":[%q]}]},
+  {"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":%q}]}]}]}}}}}`, port, secret, strings.TrimPrefix(upstream.URL, "http://"))
+		if err := caddy.Load([]byte(cfg), true); err != nil {
+			t.Fatal(err)
+		}
+		base := fmt.Sprintf("http://127.0.0.1:%d", port)
+		xff := "1.2.3.4, " + c.visitor // the visitor's own on the left, the trusted peer's view on the right
+		issue, _ := http.NewRequest("POST", base+tokenPath, strings.NewReader(`{"fingerprint":"`+fp+`"}`))
+		issue.Header.Set("Content-Type", "application/json")
+		issue.Header.Set("Origin", base)
+		issue.Header.Set("X-Forwarded-For", xff)
+		resp, err := http.DefaultClient.Do(issue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		cookies := resp.Cookies()
+		if resp.StatusCode != 200 || len(cookies) != 1 {
+			t.Fatalf("%s: issue %d %v", c.visitor, resp.StatusCode, cookies)
+		}
+		pl, reason := h.verify(cookies[0].Value, time.Now())
+		if reason != "" || pl.ip != c.want {
+			t.Errorf("%s: token %+v %q, want ip %s", c.visitor, pl, reason, c.want)
+		}
+		api, _ := http.NewRequest("GET", base+"/api/encar/catalog", nil)
+		api.AddCookie(cookies[0])
+		api.Header.Set(fpHeader, fp)
+		api.Header.Set("X-Forwarded-For", xff)
+		seen = ""
+		resp, err = http.DefaultClient.Do(api)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		first := strings.TrimSpace(strings.Split(seen, ",")[0])
+		if resp.StatusCode != 200 || first != pl.ip {
+			t.Errorf("%s: API %d, first X-Forwarded-For at the app %q (%q), want the token's %s", c.visitor, resp.StatusCode, first, seen, pl.ip)
+		}
+	}
+}
+
 func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")

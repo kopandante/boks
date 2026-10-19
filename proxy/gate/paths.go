@@ -68,6 +68,18 @@ func compileExempt(list []Exempt) ([]exemptRule, error) {
 	return out, nil
 }
 
+// nextDataPrefix is where Next.js serves the data of pages-router pages, /_next/data/<build id>/….json.
+// Next.js unwraps such a URL into a route by rules of its own — the root's /index, a leading /index/,
+// a data URL inside a data URL — and dispatches an API route by it too, which the gate, judging the
+// path it sees, would take for a file of Next.js. Every site under the gate is an App Router app: no
+// page of theirs is ever fetched this way, so the gate refuses the prefix whole rather than follow
+// Next.js's unwrapping rule by rule. A site with pages-router pages under a group would see its
+// navigations refused — loudly, at once — not an API left open.
+const nextDataPrefix = "/_next/data/"
+
+// nextData says whether a cleaned path is under Next.js's data URLs.
+func nextData(p string) bool { return strings.HasPrefix(p+"/", nextDataPrefix) }
+
 // underPrefix is request-gate's prefix: the paths that start with it, and its root without the slash
 // it ends in — /api/encar/ covers /api/encar too, not /api/encarx.
 func underPrefix(p, prefix string) bool {
@@ -101,11 +113,15 @@ func (h *Handler) exempted(p, method string) bool {
 // the other way round — so such a path is refused on any route, a page's included. Without one, a path
 // that is under /api/ to either reading is refused too: the gate would judge a route the app never
 // serves (/api/auth%2Ftoken is the token's issue to Go, nothing to Next.js), or miss one it does
-// (/api\encar is /api/encar to Next.js). Browsers send none of these.
+// (/api\encar is /api/encar to Next.js). An escaped letter, digit or -._~ is a third: Next.js matches
+// static segments escaped, so /api/%61dmin/x is the exempt /api/admin/x to Go and a dynamic sibling
+// route to Next.js. Browsers send none of these.
+var escapedUnreserved = regexp.MustCompile(`%(2d|2e|3[0-9]|[46][1-9a-f]|[57][0-9a]|5f|7e)`)
+
 func unclean(u *url.URL) bool {
 	esc := strings.ToLower(u.EscapedPath())
 	backslash := strings.Contains(u.Path, `\`)
-	if !backslash && !strings.Contains(u.Path, "//") && !strings.Contains(esc, "%2f") && !strings.Contains(esc, "%5c") {
+	if !backslash && !strings.Contains(u.Path, "//") && !strings.Contains(esc, "%2f") && !strings.Contains(esc, "%5c") && !escapedUnreserved.MatchString(esc) {
 		return false
 	}
 	slashed := strings.ReplaceAll(u.Path, `\`, "/")

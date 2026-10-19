@@ -149,8 +149,13 @@ func gateHandlers(p Policy) ([]gateHandler, error) {
 // after the ban and the bot filter and before every app's route: a group's handler on the hosts its
 // app routes on that server, whichever they are now. Not terminal: the handler passes what it does not
 // answer on to the app. A host of the group's app that another app routes too is refused: the handler
-// would judge the other app's requests by this site's rules. A wildcard of the group's app leaves out
-// the exact hosts of other apps it covers, as the app's own route does.
+// would judge the other app's requests by this site's rules. So is a route of the group's app by path:
+// the gate judges the path the visitor sent, the app sees the path under its prefix, or stripped of
+// it, where /shop/api/x is a page to the gate and the API to the app. A wildcard of the group's app
+// leaves out exactly the requests another app's routes take before it — on this server, a route's host
+// and path; of the other server's exact hosts, the whole host, as the app's own route does — so a path
+// another app routes on a covered host is left to that app, and the host's other paths, which fall
+// through to the wildcard, are gated.
 func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute, error) {
 	apps := map[string][]string{} // canonical host -> the apps that route it
 	for _, f := range fragments {
@@ -169,6 +174,10 @@ func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute,
 				return nil, fmt.Errorf("gate group %s: host %s of %s is routed by %s too, whose requests the gate would judge by %s's rules",
 					g.group, r.Host, g.app, strings.Join(others, ", "), g.app)
 			}
+			if r.Path != "" {
+				return nil, fmt.Errorf("gate group %s: %s routes %s%s by path; the gate judges the path the visitor sent, not the one %s sees, so a gated app routes whole hosts",
+					g.group, g.app, r.Host, r.Path, g.app)
+			}
 			if r.TLS == tls {
 				hosts = addHost(hosts, r.Host)
 			}
@@ -178,22 +187,36 @@ func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute,
 		}
 		slices.SortFunc(hosts, func(a, b string) int { return strings.Compare(hostname.Canonical(a), hostname.Canonical(b)) })
 		m := match{Host: hosts}
-		var covered []string
+		var except []match
+		var elsewhere []string
 		for _, h := range hosts {
 			suffix, ok := strings.CutPrefix(hostname.Canonical(h), "*")
 			if !ok {
 				continue
 			}
-			for other, owners := range apps {
-				if label, ok := strings.CutSuffix(other, suffix); ok && label != "" && !strings.Contains(label, ".") &&
-					!strings.HasPrefix(other, "*") && !slices.Contains(owners, g.app) {
-					covered = addHost(covered, other)
+			for _, f := range fragments {
+				for _, r := range f.Routes {
+					other := hostname.Canonical(r.Host)
+					// Caddy's wildcard stands for one label.
+					if label, ok := strings.CutSuffix(other, suffix); !ok || label == "" || strings.Contains(label, ".") || strings.HasPrefix(other, "*") {
+						continue
+					}
+					switch {
+					case r.TLS != tls:
+						// An exact host of the other server, the app's own included: its wildcard route leaves it out.
+						elsewhere = addHost(elsewhere, r.Host)
+					case f.App != g.app:
+						except = append(except, routeMatch(r))
+					}
 				}
 			}
 		}
-		if len(covered) > 0 {
-			slices.Sort(covered)
-			m.Not = []match{{Host: covered}}
+		if len(elsewhere) > 0 {
+			slices.Sort(elsewhere)
+			except = append(except, match{Host: elsewhere})
+		}
+		if len(except) > 0 {
+			m.Not = except
 		}
 		out = append(out, caddyRoute{Match: []match{m}, Handle: []handler{{raw: g.raw}}})
 	}
