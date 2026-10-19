@@ -40,12 +40,12 @@ boks (§5) и критерии готовности (§7 и «Новые AC») �
   пропуск + журнал; `site_gate: off` (после чистки сайтов) → 503 по группе.
   - [x] 1a формат токена (`token.go`), векторы TS→Go (`scripts/gen-token-vectors.ts`, AC1), проверка токена → fp → ip
   - [x] 1b освобождения (е), `gated`, Bearer (R3), сырые пути (R7, AC12), ответы по таблице (г) (AC2)
-  - [ ] 1c выдача `POST /api/auth/token` (контракт R2)
-  - [ ] 1d подмена `Set-Cookie: x-api-token` и своя cookie (R1, S3, S4, T1), Flush/Unwrap
-  - [ ] 1e log/enforce, XFF (S13/T3), журнал доступа (R11), `recover` (решение владельца 2)
+  - [x] 1c выдача `POST /api/auth/token` (контракт R2)
+  - [x] 1d подмена `Set-Cookie: x-api-token` и своя cookie (R1, S3, S4, T1), Flush/Unwrap
+  - [x] 1e log/enforce, XFF (S13/T3), журнал доступа (R11), `recover` (решение владельца 2)
 - [ ] 2. `proxy/Dockerfile`: `--with .../proxy/gate=/src/gate`, проверка `list-modules`; `proxy/TAG` → `…-ban8-gate1`;
   `DefaultProxyImage` (`config.go:32`) — новый digest.
-  - [ ] 2a `proxy/Dockerfile` + `proxy/TAG` (`2.11.7-fp0aab84d-ban8-gate1`), локальная сборка: `list-modules` даёт `http.handlers.boks_gate`; `scripts/gate-smoke.sh` (AC9) — прогон на стенде с заглушкой сайта: одна cookie, картинки 200 (с cookie сайта и без)
+  - [x] 2a `proxy/Dockerfile` + `proxy/TAG` (`2.11.7-fp0aab84d-ban8-gate1`), локальная сборка: `list-modules` даёт `http.handlers.boks_gate`; `scripts/gate-smoke.sh` (AC9) — прогон на стенде с заглушкой сайта: одна cookie, картинки 200 (с cookie сайта и без)
   - [ ] 2b `DefaultProxyImage` по digest образа из CI (второй PR)
 - [ ] 3. `internal/config/server.go`: разбор `gate:` — группа ссылается на `app:` (R10), не на список хостов; проверки boks
   только структурные (`app` есть на узле, приложение не в двух группах, `secret_env`/`digests_env` заданы, секрет ≥ 32);
@@ -118,7 +118,7 @@ boks (§5) и критерии готовности (§7 и «Новые AC») �
   `enforce`+`site_gate: off` — проходит без env. Тест boks + живой прогон на одной группе.
 - [ ] AC14 (S4): pakim-frontend при двойном гейте — навигация после выдачи токена с fp не теряет fp (cookie страницы от прокси
   несёт fp сайта), следующий POST с `X-Fingerprint` — 200.
-- [ ] AC15 (S13, уточнено T3): запрос с `X-Forwarded-For: 1.2.3.4` слева через CF/hb-edge/напрямую — **первый** элемент XFF
+- [x] AC15 (S13, уточнено T3): запрос с `X-Forwarded-For: 1.2.3.4` слева через CF/hb-edge/напрямую — **первый** элемент XFF
   у сайта = `client_ip` (от доверенного пира reverse_proxy Caddy дописывает его адрес справа: `client_ip, <пир>`,
   `reverseproxy.go:981-990` 2.11.7; `getClientIp` берёт первый).
 
