@@ -106,11 +106,13 @@ const tokens: Token[] = [
 	{ name: "ip only (page token of the proxy)", class: "valid", token: issued({ ip: IP }) },
 	{ name: "fp+ip ipv6", class: "valid", token: issued({ fp: FP, ip: IPV6 }) },
 	{ name: "fp+ip signed with previous", class: "previous", token: issued({ fp: FP, ip: IP, secret: PREVIOUS }) },
+	{ name: "previous, age ttl+1", class: "ttl", token: issued({ fp: FP, ip: IP, secret: PREVIOUS, age: TTL + 1 }) },
 	{ name: "fp+ip signed with a stranger", class: "signature", token: issued({ fp: FP, ip: IP, secret: STRANGER }) },
 	{ name: "age exactly ttl", class: "ttl", token: issued({ fp: FP, ip: IP, age: TTL }) },
 	{ name: "age ttl+1", class: "ttl", token: issued({ fp: FP, ip: IP, age: TTL + 1 }) },
 	{ name: "iat in the future", class: "ttl", token: issued({ fp: FP, ip: IP, age: -1 }) },
 	{ name: "other address", class: "ip", token: issued({ fp: FP, ip: OTHER }) },
+	{ name: "ip only, other address", class: "ip", token: issued({ ip: OTHER }) },
 	// The address is compared as a string: another spelling of the client's own is another address.
 	{ name: "own address v4-mapped", class: "ip", token: issued({ fp: FP, ip: `::ffff:${IP}` }) },
 	{ name: "own address ipv6 upper case", class: "ip", token: issued({ fp: FP, ip: IPV6.toUpperCase() }) },
