@@ -182,7 +182,6 @@ func TestLogLeavesResponse(t *testing.T) {
 }
 
 // A streamed response — Next.js's RSC — is flushed as it comes, the cookie fixed before the headers
-// A streamed response — Next.js's RSC — is flushed as it comes, the cookie fixed before the headers
 // leave, whichever comes first: the status, the body or a flush; an early hint goes ahead without it.
 // Checked on the wire, through a real server: the headers the client receives, and the stream reaching
 // it while the app still holds the response open.
