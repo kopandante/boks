@@ -110,6 +110,22 @@ func (g *Gate) UnmarshalYAML(n *yaml.Node) error {
 		if k, ok := upperKey(m); ok {
 			return fmt.Errorf("gate.groups[%d]: %q: keys are written in lowercase ASCII letters, digits and _", i, k)
 		}
+		// What boks reads is a string to the handler too: `app: 2048` unquoted is a number in the JSON
+		// the handler decodes, and a string in the YAML boks checks.
+		for _, k := range []string{"name", "app", "mode", "site_gate", "secret_env"} {
+			if v, set := m[k]; set {
+				if _, ok := v.(string); !ok {
+					return fmt.Errorf("gate.groups[%d]: %s: a string; quote it", i, k)
+				}
+			}
+		}
+		if b, ok := m["bearer"].(map[string]any); ok {
+			if v, set := b["digests_env"]; set {
+				if _, ok := v.(string); !ok {
+					return fmt.Errorf("gate.groups[%d]: bearer.digests_env: a string; quote it", i)
+				}
+			}
+		}
 		for k, why := range gateWritten {
 			if _, set := m[k]; set {
 				return fmt.Errorf("gate.groups[%d]: %s: %s", i, k, why)
@@ -175,15 +191,24 @@ func (g *Gate) validate() error {
 			return fmt.Errorf("groups[%s]: bearer.digests_env %q must name an environment variable (%s)", gr.Name, gr.Bearer.DigestsEnv, envNameRe)
 		}
 	}
-	// One variable, one role: the secrets are kept by name, so a name that is a group's secret and
-	// someone's digests would have one replace the other.
-	secrets := map[string]bool{}
-	for _, gr := range g.Groups {
-		secrets[gr.SecretEnv], secrets[gr.SecretEnv+"_PREVIOUS"] = true, true
+	// One variable, one role: the secrets are kept by name, so a name that is a group's current secret
+	// and another's previous one, or someone's digests, would have one taken for the other.
+	roles := map[string]string{}
+	claim := func(group, name, role string) error {
+		if r, ok := roles[name]; ok && r != role {
+			return fmt.Errorf("groups[%s]: %s is %s and %s at once; give each its own variable", group, name, r, role)
+		}
+		roles[name] = role
+		return nil
 	}
 	for _, gr := range g.Groups {
-		if gr.Bearer != nil && secrets[gr.Bearer.DigestsEnv] {
-			return fmt.Errorf("groups[%s]: bearer.digests_env %s is a group's secret_env too; give the digests a variable of their own", gr.Name, gr.Bearer.DigestsEnv)
+		if err := errors.Join(claim(gr.Name, gr.SecretEnv, "a secret_env"), claim(gr.Name, gr.SecretEnv+"_PREVIOUS", "a previous secret")); err != nil {
+			return err
+		}
+		if gr.Bearer != nil {
+			if err := claim(gr.Name, gr.Bearer.DigestsEnv, "a bearer.digests_env"); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
