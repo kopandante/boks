@@ -276,6 +276,8 @@ func TestUncleanPaths(t *testing.T) {
 		// An escaped letter under /api/: Go matches the exempt /api/admin/, Next.js a dynamic sibling.
 		{"/api/%61dmin/x", 400},
 		{"/api/adm%69n/x", 400},
+		{"/api/au%74h/x", 400},
+		{"/api/env%2dcheck", 400},
 		{"/%61bout", 200},
 	}
 	for _, c := range cases {
