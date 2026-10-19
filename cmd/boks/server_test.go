@@ -341,3 +341,50 @@ func TestServerRollbackKeepsTheGate(t *testing.T) {
 		}
 	}
 }
+
+// An apply takes --force too, past the refusal to leave a site whose own check is gone without the
+// proxy's; and it brings the gate's secrets from the environment, where a server that keeps none would
+// refuse the gate.
+func TestServerApplyKeepsTheGate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 6\ngate:\n  groups:\n    - {name: shop, app: shop, mode: log, secret_env: SHOP_GATE_SECRET}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	frags := "sh -c for f in '.boks/_proxy/routes'/*.json; do [ -f \"$f\" ] && cat \"$f\"; done; true"
+	shop := `7
+{"app": "shop", "routes": [{"host": "shop.example.com", "dial": "shop:1", "tls": true}]}`
+	cur := `{"revision":5,"floor":5,"gate":{"groups":[{"name":"shop","app":"shop","mode":"enforce","site_gate":"off","secret_env":"SHOP_GATE_SECRET"}]}}`
+	t.Setenv("SHOP_GATE_SECRET", strings.Repeat("s", 32))
+	for _, args := range [][]string{{"server", "apply", path}, {"server", "apply", path, "--force"}} {
+		a := &recorder{server: server{policyRead: "present\n" + cur, frags: shop}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		var errw strings.Builder
+		run(args, io.Discard, &errw)
+		forced := len(args) == 4
+		if refused := strings.Contains(errw.String(), "site_gate off"); refused == forced {
+			t.Errorf("%v: %q", args, errw.String())
+		}
+		// Refused, nothing is touched; forced, the apply goes on to the server's admission, past the
+		// check under the lock as well.
+		if changed := a.ran("ln -sn"); changed != forced {
+			t.Errorf("%v: changed=%v: %q %v", args, changed, errw.String(), a.calls)
+		}
+	}
+	plain := `{"revision":5,"floor":5}`
+	for _, set := range []bool{false, true} {
+		if !set {
+			t.Setenv("SHOP_GATE_SECRET", "")
+			os.Unsetenv("SHOP_GATE_SECRET")
+		} else {
+			t.Setenv("SHOP_GATE_SECRET", strings.Repeat("s", 32))
+		}
+		a := &recorder{server: server{policyRead: "present\n" + plain, frags: shop}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		var errw strings.Builder
+		run([]string{"server", "apply", path}, io.Discard, &errw)
+		if missing := strings.Contains(errw.String(), "keeps no gate secret SHOP_GATE_SECRET"); missing == set {
+			t.Errorf("secret set=%v: %q", set, errw.String())
+		}
+	}
+}

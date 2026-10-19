@@ -275,7 +275,10 @@ func ParseServer(data []byte) (*Server, error) {
 		Ban  yaml.Node `yaml:"ban"`
 		Gate yaml.Node `yaml:"gate"`
 	}
-	if s.Ban == nil && yaml.Unmarshal(data, &keys) == nil && keys.Ban.Kind != 0 {
+	if err := yaml.Unmarshal(data, &keys); err != nil {
+		return nil, err
+	}
+	if s.Ban == nil && keys.Ban.Kind != 0 {
 		return nil, errors.New("ban: empty; write `ban: {}` for the defaults (300 requests in 1m ban for 24h), or remove the key for no ban")
 	}
 	// The same for the gate: applied, an empty one would lift it from every group.

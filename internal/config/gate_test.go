@@ -58,6 +58,7 @@ func TestParseServerGateRejects(t *testing.T) {
 	ok := "{name: a, app: a, mode: log, secret_env: A_SECRET"
 	cases := map[string]string{
 		"gate: empty":                     "servers: [a]\nrevision: 1\ngate:\n",
+		"empty; remove the key":           "servers: [a]\nrevision: 1\nban: {}\ngate:\n#  groups:\n",
 		"groups: at least one":            "servers: [a]\nrevision: 1\ngate: {groups: []}\n",
 		"gate: only groups":               "servers: [a]\nrevision: 1\ngate: {groups: [" + ok + "}], mode: log}\n",
 		"name":                            group("{app: a, mode: log, secret_env: A_SECRET}"),

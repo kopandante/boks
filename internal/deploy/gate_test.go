@@ -129,3 +129,25 @@ func TestCheckApplyRefusesAGateTheProxyCannotRun(t *testing.T) {
 		t.Errorf("want nothing written: %v %v", f.uploads, f.appends)
 	}
 }
+
+// The early checks of apply and rollback, on every server before any changes, hold the transition and
+// the image's check too; --force lifts the transition alone (T2).
+func TestEarlyChecksHoldTheGate(t *testing.T) {
+	f := serverFake(t, gatePolicy(7, "enforce", "off"))
+	if err := CheckApply(context.Background(), f, gatePolicy(8, "log", "on"), false); err == nil || !strings.Contains(err.Error(), "site_gate off") {
+		t.Errorf("apply: want the transition refused before any changes, got %v", err)
+	}
+	if err := CheckApply(context.Background(), f, gatePolicy(8, "log", "on"), true); err == nil || strings.Contains(err.Error(), "site_gate off") ||
+		!strings.Contains(err.Error(), "shop has no routes") {
+		t.Errorf("apply --force: want past the transition, to the image's check, got %v", err)
+	}
+	f = serverFake(t, gatePolicy(7, "", ""))
+	hist, _ := json.Marshal(gatePolicy(6, "log", "on"))
+	f.out["sh -c if [ -f '.boks/_server/history/6.json' ]"] = "present\n" + string(hist)
+	if err := CheckServerRollback(context.Background(), f, 6, false); err == nil || !strings.Contains(err.Error(), "shop has no routes") {
+		t.Errorf("rollback to a gate: want the image's check before any changes, got %v", err)
+	}
+	if len(f.uploads) > 0 || len(f.appends) > 0 {
+		t.Errorf("want nothing written: %v %v", f.uploads, f.appends)
+	}
+}
