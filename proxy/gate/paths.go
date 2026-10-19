@@ -74,12 +74,17 @@ func compileExempt(list []Exempt) ([]exemptRule, error) {
 var nextData = regexp.MustCompile(`^/_next/data/[^/]+(/.*)\.json$`)
 
 // routePath is the path a request is judged on: cleaned, as Caddy's matchers and the apps resolve it,
-// and a Next.js data URL as the route it names (/index.json is the root).
+// and a Next.js data URL as the route it names. Next.js denormalizes the page path as it reads one:
+// /index is the root, and a leading /index/ goes, once — /_next/data/<id>/index/api/x.json runs /api/x.
 func routePath(raw string) string {
 	p := path.Clean(raw)
 	if m := nextData.FindStringSubmatch(p); m != nil {
-		if p = path.Clean(m[1]); p == "/index" {
+		p = path.Clean(m[1])
+		switch {
+		case p == "/index":
 			p = "/"
+		case strings.HasPrefix(p, "/index/"):
+			p = strings.TrimPrefix(p, "/index")
 		}
 	}
 	return p
