@@ -3,6 +3,7 @@ package gate
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -273,12 +274,15 @@ func TestUncleanPaths(t *testing.T) {
 		// An escaped slash under /api/ is refused without a dot segment too.
 		{"/api/auth%2Ftoken", 400},
 		{"/api%2fencar/catalog", 400},
-		// An escaped letter under /api/: Go matches the exempt /api/admin/, Next.js a dynamic sibling.
-		{"/api/%61dmin/x", 400},
-		{"/api/adm%69n/x", 400},
-		{"/api/au%74h/x", 400},
-		{"/api/env%2dcheck", 400},
 		{"/%61bout", 200},
+	}
+	// An escaped letter, digit or -._~ under /api/ (the ends of each range): Go reads /api/admin/x, exempt, and
+	// Next.js matches a dynamic sibling.
+	for _, c := range "AOPZaopz09-._~" {
+		cases = append(cases, struct {
+			target string
+			status int
+		}{fmt.Sprintf("/api/adm%%%02xn/x", c), 400})
 	}
 	for _, c := range cases {
 		// Parsed as the server parses a request's target: no reference resolution, no host in "//".
