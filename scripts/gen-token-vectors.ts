@@ -150,6 +150,10 @@ const requests: Req[] = [
 	{ name: "GET without fp", method: "GET", path: "/api/encar/catalog" },
 	{ name: "POST with its fp", method: "POST", path: "/api/encar/catalog", fingerprint: FP },
 	{ name: "POST without fp", method: "POST", path: "/api/encar/catalog" },
+	// The fp relaxation is GET's alone: HEAD and PUT compare it as POST does.
+	{ name: "HEAD with its fp", method: "HEAD", path: "/api/encar/catalog", fingerprint: FP },
+	{ name: "HEAD without fp", method: "HEAD", path: "/api/encar/catalog" },
+	{ name: "PUT without fp", method: "PUT", path: "/api/encar/catalog" },
 	{ name: "GET pics, fp skipped", method: "GET", path: "/api/encar/pics/1.jpg" },
 	{ name: "GET pics with another fp, skipped", method: "GET", path: "/api/encar/pics/1.jpg", fingerprint: FP2 },
 	{ name: "POST pics without fp, skipped", method: "POST", path: "/api/encar/pics/1.jpg" },
@@ -194,11 +198,16 @@ for (const t of tokens) {
 		vectors.push({ name: `${t.name} / ${req.name}`, class: t.class, token: t.token, method: req.method, path: req.path, fingerprint: req.fingerprint ?? "", client_ip: ip, site: s, proxy });
 	}
 }
-// The token's way in: the X-Api-Token header, and an empty cookie that leaves it to the header.
+// The token's way in: the X-Api-Token header, and an empty cookie that leaves it to the header — with
+// tokens that fail too, so a header token is checked, not just let through.
+const viaTokens = tokens.filter((t) => ["fp+ip", "fp+ip signed with a stranger", "age ttl+1", "other address", "no fp, no ip (page token of a site)"].includes(t.name));
 for (const via of ["header", "cookie-empty"] as const) {
 	const req: Req = { name: `GET with its fp, token by ${via}`, method: "GET", path: "/api/encar/catalog", fingerprint: FP, via };
-	const s = await site(fresh, req, IP);
-	vectors.push({ name: `fp+ip / ${req.name}`, class: "valid", token: fresh, via, method: "GET", path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy: s });
+	for (const t of viaTokens) {
+		const s = await site(t.token, req, IP);
+		const proxy = t.class === "no_ip" ? { status: 401, body: '{"error":"Access denied"}' } : s;
+		vectors.push({ name: `${t.name} / ${req.name}`, class: t.class, token: t.token, via, method: "GET", path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy });
+	}
 }
 // No token at all.
 {
