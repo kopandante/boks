@@ -1,0 +1,251 @@
+package proxy
+
+// The server's gate: the sites' API token checked by the proxy (proxy/gate, http.handlers.boks_gate)
+// on the hosts of the apps its groups name. The policy keeps the gate as written in server.yml, as
+// JSON boks does not interpret beyond the fields it acts on itself (GateGroup); the handler's schema is
+// Caddy's, which refuses a field it does not know at the reload and keeps the config it runs. The
+// secrets — each group's HMAC secret, the partners' Bearer digests — are never recorded in the policy
+// or its history: they sit in a file of their own (gateSecretPath), as the egress password does, and
+// are put into the handlers when the config is assembled.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"path"
+	"slices"
+	"strings"
+
+	"github.com/kopandante/boks/internal/hostname"
+	"github.com/kopandante/boks/internal/remote"
+)
+
+// GateGroup is what boks reads of a group of the gate.
+type GateGroup struct {
+	Name      string `json:"name"`
+	App       string `json:"app"`
+	Mode      string `json:"mode"`
+	SiteGate  string `json:"site_gate"`
+	SecretEnv string `json:"secret_env"`
+	Bearer    *struct {
+		DigestsEnv string `json:"digests_env"`
+	} `json:"bearer"`
+}
+
+// SiteGateOff says whether the site no longer checks the token itself: the proxy's gate is the only one.
+func (g GateGroup) SiteGateOff() bool { return g.SiteGate == "off" }
+
+// gateGroup is a group as written, with what boks reads of it.
+type gateGroup struct {
+	GateGroup
+	raw map[string]json.RawMessage
+}
+
+func gateSecretPath() string { return path.Join(ServerDir, "gate.secret") }
+
+// GateGroups are the groups of a policy's gate; none without one.
+func GateGroups(p Policy) ([]GateGroup, error) {
+	gs, err := groupsOf(p.Gate)
+	out := make([]GateGroup, len(gs))
+	for i, g := range gs {
+		out[i] = g.GateGroup
+	}
+	return out, err
+}
+
+func groupsOf(gate json.RawMessage) ([]gateGroup, error) {
+	if len(gate) == 0 {
+		return nil, nil
+	}
+	var top struct {
+		Groups []json.RawMessage `json:"groups"`
+	}
+	if err := json.Unmarshal(gate, &top); err != nil {
+		return nil, fmt.Errorf("reading the gate: %w", err)
+	}
+	var out []gateGroup
+	for _, b := range top.Groups {
+		var g gateGroup
+		if err := json.Unmarshal(b, &g.GateGroup); err != nil {
+			return nil, fmt.Errorf("reading the gate: %w", err)
+		}
+		if err := json.Unmarshal(b, &g.raw); err != nil {
+			return nil, fmt.Errorf("reading the gate: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+// secretNames are the variables p's gate takes its secrets from.
+func secretNames(p Policy) ([]string, error) {
+	gs, err := groupsOf(p.Gate)
+	var names []string
+	for _, g := range gs {
+		names = append(names, g.SecretEnv)
+		if g.Bearer != nil {
+			names = append(names, g.Bearer.DigestsEnv)
+		}
+	}
+	return names, err
+}
+
+// gateHandler is one group's handler with the secrets in place, and the app whose hosts it covers.
+type gateHandler struct {
+	app, group string
+	raw        json.RawMessage
+}
+
+// gateHandlers are the handlers of p's groups that are not off: the group as written, its secret_env
+// and its Bearer's digests_env replaced by the values the server keeps.
+func gateHandlers(p Policy) ([]gateHandler, error) {
+	gs, err := groupsOf(p.Gate)
+	if err != nil {
+		return nil, err
+	}
+	var out []gateHandler
+	for _, g := range gs {
+		if g.Mode == "off" {
+			continue
+		}
+		h := map[string]any{}
+		for k, v := range g.raw {
+			h[k] = v
+		}
+		delete(h, "secret_env")
+		secrets := p.GateSecrets[g.SecretEnv]
+		if len(secrets) == 0 {
+			return nil, fmt.Errorf("gate group %s: the server keeps no secret %s; apply the policy again with it set", g.Name, g.SecretEnv)
+		}
+		h["secrets"] = secrets
+		if g.Bearer != nil {
+			var b map[string]json.RawMessage
+			if err := json.Unmarshal(g.raw["bearer"], &b); err != nil {
+				return nil, fmt.Errorf("gate group %s: bearer: %w", g.Name, err)
+			}
+			digests := p.GateSecrets[g.Bearer.DigestsEnv]
+			if len(digests) == 0 {
+				return nil, fmt.Errorf("gate group %s: the server keeps no digests %s; apply the policy again with it set", g.Name, g.Bearer.DigestsEnv)
+			}
+			bearer := map[string]any{}
+			for k, v := range b {
+				bearer[k] = v
+			}
+			delete(bearer, "digests_env")
+			bearer["digests"] = digests
+			h["bearer"] = bearer
+		}
+		h["handler"] = "boks_gate"
+		raw, err := json.Marshal(h)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, gateHandler{app: g.App, group: g.Name, raw: raw})
+	}
+	return out, nil
+}
+
+// gateRoutes are the gate's routes of one server — the TLS hosts' on 443 or the others' on 80 — to go
+// after the ban and the bot filter and before every app's route: a group's handler on the hosts its
+// app routes on that server, whichever they are now. Not terminal: the handler passes what it does not
+// answer on to the app. A host of the group's app that another app routes too is refused: the handler
+// would judge the other app's requests by this site's rules. A wildcard of the group's app leaves out
+// the exact hosts of other apps it covers, as the app's own route does.
+func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute, error) {
+	apps := map[string][]string{} // canonical host -> the apps that route it
+	for _, f := range fragments {
+		for _, r := range f.Routes {
+			h := hostname.Canonical(r.Host)
+			if !slices.Contains(apps[h], f.App) {
+				apps[h] = append(apps[h], f.App)
+			}
+		}
+	}
+	var out []caddyRoute
+	for _, g := range hs {
+		var hosts []string
+		for _, r := range Of(fragments, g.app) {
+			if others := slices.DeleteFunc(slices.Clone(apps[hostname.Canonical(r.Host)]), func(a string) bool { return a == g.app }); len(others) > 0 {
+				return nil, fmt.Errorf("gate group %s: host %s of %s is routed by %s too, whose requests the gate would judge by %s's rules",
+					g.group, r.Host, g.app, strings.Join(others, ", "), g.app)
+			}
+			if r.TLS == tls {
+				hosts = addHost(hosts, r.Host)
+			}
+		}
+		if len(hosts) == 0 {
+			continue
+		}
+		slices.SortFunc(hosts, func(a, b string) int { return strings.Compare(hostname.Canonical(a), hostname.Canonical(b)) })
+		m := match{Host: hosts}
+		var covered []string
+		for _, h := range hosts {
+			suffix, ok := strings.CutPrefix(hostname.Canonical(h), "*")
+			if !ok {
+				continue
+			}
+			for other, owners := range apps {
+				if label, ok := strings.CutSuffix(other, suffix); ok && label != "" && !strings.Contains(label, ".") &&
+					!strings.HasPrefix(other, "*") && !slices.Contains(owners, g.app) {
+					covered = addHost(covered, other)
+				}
+			}
+		}
+		if len(covered) > 0 {
+			slices.Sort(covered)
+			m.Not = []match{{Host: covered}}
+		}
+		out = append(out, caddyRoute{Match: []match{m}, Handle: []handler{{raw: g.raw}}})
+	}
+	return out, nil
+}
+
+// loadGateSecrets gives p the gate's secrets: those it brings — from the environment of an apply —
+// and, for the rest, those the server keeps from an earlier apply: a rollback, or an apply without a
+// variable set. A secret neither has is an error: the config assembled without it would refuse every
+// token of the group's site.
+func loadGateSecrets(ctx context.Context, r remote.Runner, p *Policy) error {
+	names, err := secretNames(*p)
+	if err != nil || len(names) == 0 {
+		return err
+	}
+	kept, err := keptGateSecrets(ctx, r)
+	if err != nil {
+		return err
+	}
+	// A copy: the caller's policy must not come back holding secrets it did not bring.
+	merged := map[string][]string{}
+	for k, v := range kept {
+		merged[k] = v
+	}
+	for k, v := range p.GateSecrets {
+		merged[k] = v
+	}
+	for _, n := range names {
+		if len(merged[n]) == 0 {
+			return fmt.Errorf("the server keeps no gate secret %s; apply the policy again with it set in the environment", n)
+		}
+	}
+	p.GateSecrets = merged
+	return nil
+}
+
+// keptGateSecrets are the gate's secrets the server keeps, by variable name; none when it keeps none.
+func keptGateSecrets(ctx context.Context, r remote.Runner) (map[string][]string, error) {
+	body, present, err := readFile(ctx, r, gateSecretPath())
+	if err != nil || !present {
+		return nil, err
+	}
+	var kept map[string][]string
+	if err := json.Unmarshal([]byte(body), &kept); err != nil {
+		return nil, fmt.Errorf("reading %s: %w", gateSecretPath(), err)
+	}
+	return kept, nil
+}
+
+// gateSecretFile is the file of secrets: every one the server was given, kept beyond the revision that
+// named it, so a rollback to an older revision finds its secrets.
+func gateSecretFile(secrets map[string][]string) []byte {
+	b, _ := json.Marshal(secrets)
+	return append(b, '\n')
+}

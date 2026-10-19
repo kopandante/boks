@@ -979,7 +979,12 @@ func TestFragmentsCarryTheirFormat(t *testing.T) {
 	if err != nil || len(fs) != 2 || fs[0].App != "demo" || !reflect.DeepEqual(fs[0].Routes, routed) || fs[1].App != "old" {
 		t.Fatalf("want both fragments, with and without a format: %+v %v", fs, err)
 	}
-	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", FragmentFormat+1)
+	// The gate's format, which only the marker holds, is one this boks reads; the next is not.
+	d.files[Dir+"/routes/_server.json"] = fmt.Sprintf("%d\n", GateFormat)
+	if _, err := Fragments(context.Background(), d); err != nil {
+		t.Errorf("want format %d read: %v", GateFormat, err)
+	}
+	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", GateFormat+1)
 	if _, err := Fragments(context.Background(), d); err == nil || !strings.Contains(err.Error(), "newer than this boks") {
 		t.Errorf("want a newer format refused, got %v", err)
 	}
