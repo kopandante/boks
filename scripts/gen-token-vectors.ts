@@ -137,6 +137,15 @@ const tokens: Token[] = [
 	{ name: "trailing dot", class: "garbage", token: `${fresh.split(".")[0]}.` },
 	{ name: "signature padded with =", class: "stricter", token: `${fresh}=` },
 	{
+		// The last of 43 characters carries two bits the decoder drops: a sibling decodes to the same bytes.
+		name: "signature, other unused trailing bits",
+		class: "stricter",
+		token: (() => {
+			const abc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+			return fresh.slice(0, -1) + abc[abc.indexOf(fresh.at(-1) ?? "A") ^ 1];
+		})(),
+	},
+	{
 		name: "signature in the standard alphabet",
 		class: "stricter",
 		token: (() => {
