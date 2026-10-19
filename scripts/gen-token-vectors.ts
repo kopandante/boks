@@ -143,7 +143,7 @@ const tokens: Token[] = [
 	{ name: "payload in the standard alphabet, signed", class: "stricter", token: signed(stdAlphabetPayload()) },
 ];
 
-type Req = { name: string; method: string; path: string; fingerprint?: string; via?: "header" | "cookie-empty" };
+type Req = { name: string; method: string; path: string; fingerprint?: string; via?: "header" | "cookie-empty" | "cookie+header"; headerToken?: string };
 const requests: Req[] = [
 	{ name: "GET with its fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP },
 	{ name: "GET with another fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP2 },
@@ -171,6 +171,8 @@ async function site(token: string | undefined, req: Req, ip: string) {
 	} else if (req.via === "cookie-empty") {
 		cookie = "";
 		if (token) headers.set("x-api-token", token);
+	} else if (req.via === "cookie+header" && req.headerToken) {
+		headers.set("x-api-token", req.headerToken);
 	}
 	const request = {
 		method: req.method,
@@ -208,6 +210,14 @@ for (const via of ["header", "cookie-empty"] as const) {
 		const proxy = t.class === "no_ip" ? { status: 401, body: '{"error":"Access denied"}' } : s;
 		vectors.push({ name: `${t.name} / ${req.name}`, class: t.class, token: t.token, via, method: "GET", path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy });
 	}
+}
+// A cookie and the header both: the cookie decides, whatever the header holds.
+const stranger = viaTokens.find((t) => t.name === "fp+ip signed with a stranger");
+for (const [t, header] of [...viaTokens.filter((t) => t.token !== fresh).map((t) => [t, fresh] as const), [tokens[0], stranger?.token ?? ""] as const]) {
+	const req: Req = { name: `GET with its fp, cookie and header (${header === fresh ? "valid" : "bad"})`, method: "GET", path: "/api/encar/catalog", fingerprint: FP, via: "cookie+header", headerToken: header };
+	const s = await site(t.token, req, IP);
+	const proxy = t.class === "no_ip" ? { status: 401, body: '{"error":"Access denied"}' } : s;
+	vectors.push({ name: `${t.name} / ${req.name}`, class: t.class, token: t.token, via: req.via, header_token: header, method: "GET", path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy });
 }
 // No token at all.
 {
