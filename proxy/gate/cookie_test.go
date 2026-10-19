@@ -82,6 +82,15 @@ func TestSiteCookieReplaced(t *testing.T) {
 			t.Errorf("%s: the site's other cookies stay: %v", c.name, l)
 		}
 	}
+	// The site issues a page token without fp when the old one expired: the fp the old one carried,
+	// signed, stays with the visitor.
+	expired := (&Handler{Secrets: h.Secrets, now: func() time.Time { return now.Add(-time.Hour) }}).sign(fp, visitor)
+	r := request("GET", "/catalog", visitor)
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: expired})
+	got := tokenCookies(through(t, h, r, site(200, cookieName+"="+h.sign("", "")+"; Path=/")))
+	if pl, reason := h.verify(valueOf(got[0]), now); len(got) != 1 || reason != "" || pl.fp != fp || pl.ip != visitor {
+		t.Errorf("renewed over an expired token: %v %+v %q", got, pl, reason)
+	}
 	// Two lines of the token from the site leave as one.
 	w := through(t, h, request("GET", "/catalog", visitor), site(200, cookieName+"=a.b; Path=/", cookieName+"=c.d; Path=/x"))
 	if got := tokenCookies(w); len(got) != 1 {
@@ -180,10 +189,13 @@ func TestLogLeavesResponse(t *testing.T) {
 func TestStreamedResponse(t *testing.T) {
 	h := enforcing(t, &Handler{}, time.Now())
 	type streamApp func(w http.ResponseWriter, release <-chan struct{})
+	// The app holds the response open until the client has read the chunk: a stream that only arrives
+	// once the app lets go fails here rather than arriving late.
 	hold := func(release <-chan struct{}) {
 		select {
 		case <-release:
-		case <-time.After(5 * time.Second):
+		case <-time.After(3 * time.Second):
+			t.Error("the client did not get the chunk while the app held the response open")
 		}
 	}
 	for _, c := range []struct {

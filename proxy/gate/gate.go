@@ -237,11 +237,11 @@ func setField(r *http.Request, f zap.Field) {
 // own is decided by the request, before it goes on: a page without a valid token of this address, the
 // fingerprint kept from the token it brings when the group's secret signed it.
 func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string) http.ResponseWriter {
-	own, ownFP := false, ""
+	own, reqFP := false, ""
 	if pageRequest(r, path.Clean(r.URL.Path)) {
 		pl, reason := h.verify(requestToken(r), h.now())
 		own = reason != "" || pl.ip != ip
-		ownFP = signedFP(pl, reason)
+		reqFP = signedFP(pl, reason)
 	}
 	return &cookieWriter{ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
 		fix: func(hdr http.Header) {
@@ -250,7 +250,7 @@ func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string
 				if h.cookieFault != nil {
 					h.cookieFault()
 				}
-				h.cookies(hdr, r, ip, own, ownFP)
+				h.cookies(hdr, r, ip, own, reqFP)
 			})
 		}}
 }

@@ -247,9 +247,9 @@ func TestUncleanPaths(t *testing.T) {
 		{"/api/admin/..%5cencar/catalog", 400},
 		{`/api/admin/..\encar/catalog`, 400},
 		{"/api/encar//../admin/x", 400},
-		// An empty segment alone resolves alike: Go cleans it to the gated path.
-		{"//api/encar/catalog", 401},
-		{"/api//encar/catalog", 401},
+		// An empty segment under /api/ is refused as well: Next.js keeps it, Go drops it.
+		{"//api/encar/catalog", 400},
+		{"/api//encar/catalog", 400},
 		// An escaped slash with `..` moves the route anywhere, from a page's path too.
 		{"/p%2fq/../api/encar/catalog", 400},
 		{"/api/x/%2f/../../encar/catalog", 400},
@@ -260,6 +260,9 @@ func TestUncleanPaths(t *testing.T) {
 		{"/catalog/a%2fb", 200},
 		{`/catalog/a\b`, 200},
 		{"/catalog/../catalog/a", 200},
+		// An escaped slash under /api/ is refused without a dot segment too.
+		{"/api/auth%2Ftoken", 400},
+		{"/api%2fencar/catalog", 400},
 	}
 	for _, c := range cases {
 		// Parsed as the server parses a request's target: no reference resolution, no host in "//".

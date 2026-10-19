@@ -98,8 +98,10 @@ func (h *Handler) exempted(p, method string) bool {
 // as part of a segment and reads a backslash as a slash; and Go's path.Clean drops an empty segment
 // before `..`, which WHATWG pops instead. With a dot segment in the path any of them moves where `..`
 // lands — /p%2fq/../api/encar is /p/api/encar to Go and /api/encar to Next.js, /api/encar//../admin
-// the other way round — so such a path is refused on any route, a page's included. Without one only
-// the backslash changes the route, and only on its way to /api/. Browsers send none of these.
+// the other way round — so such a path is refused on any route, a page's included. Without one, a path
+// that is under /api/ to either reading is refused too: the gate would judge a route the app never
+// serves (/api/auth%2Ftoken is the token's issue to Go, nothing to Next.js), or miss one it does
+// (/api\encar is /api/encar to Next.js). Browsers send none of these.
 func unclean(u *url.URL) bool {
 	esc := strings.ToLower(u.EscapedPath())
 	backslash := strings.Contains(u.Path, `\`)
@@ -112,7 +114,7 @@ func unclean(u *url.URL) bool {
 			return true
 		}
 	}
-	return backslash && strings.HasPrefix(path.Clean(slashed), "/api/")
+	return strings.HasPrefix(path.Clean(slashed), "/api/") || strings.HasPrefix(path.Clean(u.Path), "/api/")
 }
 
 // sameOrigin is request-gate's check on the token's issue: the Origin, or the Referer without one,

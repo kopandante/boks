@@ -41,8 +41,10 @@ func pageRequest(r *http.Request, p string) bool {
 }
 
 // cookies fixes the token's Set-Cookie lines of a response: the site's first one gets the proxy's value,
-// further ones go; with none and own set, the proxy's own cookie is added, with ownFP.
-func (h *Handler) cookies(hdr http.Header, r *http.Request, ip string, own bool, ownFP string) {
+// further ones go; with none and own set, the proxy's own cookie is added. reqFP is the fingerprint of
+// the token the request brought, signed: it goes into the proxy's own cookie, and into the site's when
+// the site's carries none — the sites issue a page token without one whenever the old token expired.
+func (h *Handler) cookies(hdr http.Header, r *http.Request, ip string, own bool, reqFP string) {
 	lines := hdr.Values("Set-Cookie")
 	var out []string
 	found := false
@@ -58,13 +60,16 @@ func (h *Handler) cookies(hdr http.Header, r *http.Request, ip string, own bool,
 		found = true
 		value, attrs, _ := strings.Cut(rest, ";")
 		fp := signedFP(h.verify(strings.TrimSpace(value), h.now()))
+		if fp == "" {
+			fp = reqFP
+		}
 		if attrs != "" {
 			attrs = ";" + attrs
 		}
 		out = append(out, cookieName+"="+h.sign(fp, ip)+attrs)
 	}
 	if !found && own {
-		out = append(out, h.cookie(h.sign(ownFP, ip), r).String())
+		out = append(out, h.cookie(h.sign(reqFP, ip), r).String())
 	}
 	if len(out) == 0 {
 		return
