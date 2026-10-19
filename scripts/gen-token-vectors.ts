@@ -231,6 +231,8 @@ const deliveries: Delivery[] = [{ via: "header" }, { via: "cookie-empty" }, { vi
 for (const d of deliveries) {
 	for (const t of viaTokens) await push(t, requests[0], IP, d);
 }
+// The other methods a valid token may come with: without fp, every one but GET is refused.
+for (const method of ["OPTIONS", "DELETE", "PATCH"]) await push(tokens[0], { name: `${method} without fp`, method, path: "/api/encar/catalog" }, IP);
 await push({ name: "no token", class: "garbage", token: "" }, requests[0], IP);
 
 // One vector per line: the file stays reviewable as a diff without tripling its length.
