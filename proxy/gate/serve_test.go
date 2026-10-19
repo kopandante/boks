@@ -75,16 +75,28 @@ func TestVerdictInAccessLog(t *testing.T) {
 func TestFailure(t *testing.T) {
 	for _, c := range []struct {
 		siteGate string
-		status   int
-	}{{"", 200}, {"on", 200}, {"off", 503}} {
+		reached  bool // the request goes on to the site, which answers it
+	}{{"", true}, {"on", true}, {"off", false}} {
 		h := enforcing(t, &Handler{SiteGate: c.siteGate}, time.Now())
 		h.fault = func() { panic("boom") }
 		r, extra := withLog(request("GET", "/api/encar/catalog", visitor))
-		w := serve(t, h, r)
-		if w.Code != c.status {
-			t.Errorf("site_gate %q: %d, want %d", c.siteGate, w.Code, c.status)
+		reached := false
+		w := through(t, h, r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+			reached = true
+			w.WriteHeader(http.StatusTeapot)
+			_, err := io.WriteString(w, "the site's own check")
+			return err
+		}))
+		if reached != c.reached {
+			t.Errorf("site_gate %q: reached the site %v, want %v", c.siteGate, reached, c.reached)
 		}
-		if c.status == 503 && w.Body.String() != `{"error":"Service unavailable"}` {
+		if c.reached && (w.Code != http.StatusTeapot || w.Body.String() != "the site's own check") {
+			t.Errorf("site_gate %q: %d %q, want the site's answer", c.siteGate, w.Code, w.Body.String())
+		}
+		if !c.reached && w.Code != 503 {
+			t.Errorf("site_gate %q: %d, want 503", c.siteGate, w.Code)
+		}
+		if !c.reached && w.Body.String() != `{"error":"Service unavailable"}` {
 			t.Errorf("503 body %q", w.Body.String())
 		}
 		if got := fields(extra); got["gate_verdict"] != "error" {
