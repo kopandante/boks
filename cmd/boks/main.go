@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -46,13 +47,15 @@ const usage = `usage: boks [-f boks.yml] <command>
                    in group docker, the firewall rule server apply keeps — and start the proxy;
                    refuses, before any change, a server it cannot share (another proxy on
                    80/443, Swarm, an unknown firewall)
-  server apply <server.yml>
-                   apply the server's policy (the bot filter, the egress proxy) to the servers it
-                   lists; the file's revision must be the one after the highest each server applied.
-                   It also has each server's firewall let containers reach its proxy on its own
-                   addresses, and keeps that through nftables.service reloads and reboots
-  server rollback <server.yml> <revision>
-                   put back the policy of an earlier revision on those servers
+  server apply <server.yml> [--force]
+                   apply the server's policy (the bot filter, the egress proxy, the ban, the gate)
+                   to the servers it lists; the file's revision must be the one after the highest
+                   each server applied. It also has each server's firewall let containers reach its
+                   proxy on its own addresses, and keeps that through nftables.service reloads and
+                   reboots. --force lets a gate group whose site no longer checks the token itself
+                   leave enforce — an emergency's override
+  server rollback <server.yml> <revision> [--force]
+                   put back the policy of an earlier revision on those servers; --force as above
   server status <server.yml>
                    the revision each server applies, its egress proxy, a run that never finished,
                    and whether its firewall has the rule server apply keeps
@@ -426,8 +429,15 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 }
 
 func serverCmd(ctx context.Context, args []string, out io.Writer) error {
+	// --force lifts the refusal to leave a site whose own token check is gone without the proxy's
+	// (deploy.CheckGateTransition), for apply and rollback alone.
+	force := false
+	if i := slices.Index(args, "--force"); i >= 0 && len(args) > 0 && (args[0] == "apply" || args[0] == "rollback") {
+		force = true
+		args = slices.Delete(slices.Clone(args), i, i+1)
+	}
 	if len(args) < 2 {
-		return fmt.Errorf("server needs one of: install <server.yml>, apply <server.yml>, rollback <server.yml> <revision>, status <server.yml>")
+		return fmt.Errorf("server needs one of: install <server.yml>, apply <server.yml> [--force], rollback <server.yml> <revision> [--force], status <server.yml>")
 	}
 	sc, err := config.LoadServer(args[1])
 	if err != nil {
@@ -452,7 +462,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return nil
 	}
-	o := deploy.Options{Now: now}
+	o := deploy.Options{Now: now, Force: force}
 	switch {
 	case args[0] == "install" && len(args) == 2:
 		if err := askAll(func(ctx context.Context, r remote.Runner) error {
@@ -482,7 +492,15 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			}
 			next.Egress.Password = pw
 		}
-		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next) }); err != nil {
+		// The gate's secrets as well; one not set is left to what each server keeps.
+		if sc.Gate != nil {
+			secrets, err := sc.Gate.Secrets()
+			if err != nil {
+				return fmt.Errorf("%s: %w", args[1], err)
+			}
+			next.GateSecrets = secrets
+		}
+		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next, force) }); err != nil {
 			return err
 		}
 		if err := on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) }); err != nil {
@@ -496,7 +514,9 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		if err != nil || rev < 1 {
 			return fmt.Errorf("rollback needs a revision, a whole number from 1; `boks server status` shows the current one")
 		}
-		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckServerRollback(ctx, r, rev) }); err != nil {
+		if err := askAll(func(ctx context.Context, r remote.Runner) error {
+			return deploy.CheckServerRollback(ctx, r, rev, force)
+		}); err != nil {
 			return err
 		}
 		return on(func(ctx context.Context, r remote.Runner) error { return deploy.RollbackServer(ctx, r, out, rev, o) })
@@ -523,6 +543,9 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			}
 			if b := p.Ban; b != nil {
 				fmt.Fprintf(out, "  %s\n", b)
+			}
+			if line := proxy.GateString(p); line != "" {
+				fmt.Fprintf(out, "  %s\n", line)
 			}
 			for _, d := range drift {
 				fmt.Fprintf(out, "  ! %s\n", d)
@@ -588,6 +611,9 @@ func policyOf(sc *config.Server) proxy.Policy {
 		for _, pr := range b.ExemptPrefixes() {
 			p.Ban.ExemptRanges = append(p.Ban.ExemptRanges, pr.String())
 		}
+	}
+	if g := sc.Gate; g != nil {
+		p.Gate = g.JSON
 	}
 	return p
 }

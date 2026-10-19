@@ -305,3 +305,39 @@ ban:
 		t.Errorf("want none without the key: %v", err)
 	}
 }
+
+// The gate goes to the policy as written, without a secret: those come from the environment.
+func TestPolicyOfCarriesTheGate(t *testing.T) {
+	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\ngate:\n  groups:\n    - {name: shop, app: shop, mode: log, secret_env: SHOP_SECRET, skip_fp: [/api/encar/pics]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := policyOf(sc)
+	if string(p.Gate) != `{"groups":[{"app":"shop","mode":"log","name":"shop","secret_env":"SHOP_SECRET","skip_fp":["/api/encar/pics"]}]}` || p.GateSecrets != nil {
+		t.Errorf("gate: %s %v", p.Gate, p.GateSecrets)
+	}
+}
+
+// A rollback that would leave a site whose own check is gone without the proxy's is refused on every
+// server before any changes, naming --force; with --force it goes past that refusal.
+func TestServerRollbackKeepsTheGate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cur := `{"revision":5,"floor":5,"gate":{"groups":[{"name":"shop","app":"shop","mode":"enforce","site_gate":"off","secret_env":"S"}]}}`
+	for _, args := range [][]string{{"server", "rollback", path, "4"}, {"server", "rollback", "--force", path, "4"}} {
+		a := &recorder{server: server{policyRead: "present\n" + cur, "sh -c if [ -f '.boks/_server/history/4.json' ]": "present\n{\"revision\":4}"}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		var errw strings.Builder
+		run(args, io.Discard, &errw)
+		forced := args[2] == "--force"
+		if refused := strings.Contains(errw.String(), "no gate group for it"); refused == forced {
+			t.Errorf("%v: %q", args, errw.String())
+		}
+		if !forced && (a.ran("ln -sn") || len(a.stdin) > 0) {
+			t.Errorf("%v: changed the server: %v", args, a.calls)
+		}
+	}
+}

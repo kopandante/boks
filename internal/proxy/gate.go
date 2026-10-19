@@ -249,3 +249,81 @@ func gateSecretFile(secrets map[string][]string) []byte {
 	b, _ := json.Marshal(secrets)
 	return append(b, '\n')
 }
+
+// GateString is a policy's gate in one line for apply and status; "" without one.
+func GateString(p Policy) string {
+	gs, err := GateGroups(p)
+	if err != nil {
+		return "gate: " + err.Error()
+	}
+	if len(gs) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, g := range gs {
+		s := fmt.Sprintf("%s %s", g.App, g.Mode)
+		if g.SiteGateOff() {
+			s += " (the site no longer checks)"
+		}
+		parts = append(parts, s)
+	}
+	return "gate: " + strings.Join(parts, "; ")
+}
+
+// CheckGate refuses, before anything changes, a gate the server cannot run: a group's app with no
+// routes here — a typo, or a group for another server — a secret neither the apply brings nor the
+// server keeps, a host the group's app shares with another app, and a proxy whose Caddy refuses the
+// handlers: an image without boks_gate (ban8 and older), or older than a field the policy writes, as
+// the gate's fields go to the handler unread. The image — the running proxy's, or a stopped one's,
+// which the boot after the apply starts as it is — validates the handlers in a container of its own,
+// the secrets on its input, never on a command line.
+func CheckGate(ctx context.Context, r remote.Runner, p Policy) error {
+	if len(p.Gate) == 0 {
+		return nil
+	}
+	fs, err := Fragments(ctx, r)
+	if err != nil {
+		return err
+	}
+	gs, err := groupsOf(p.Gate)
+	if err != nil {
+		return err
+	}
+	for _, g := range gs {
+		if g.Mode != "off" && len(Of(fs, g.App)) == 0 {
+			return fmt.Errorf("gate group %s: %s has no routes on this server; nothing was changed", g.Name, g.App)
+		}
+	}
+	if err := loadGateSecrets(ctx, r, &p); err != nil {
+		return err
+	}
+	if _, err := Config(p, fs); err != nil {
+		return err
+	}
+	hs, err := gateHandlers(p)
+	if err != nil || len(hs) == 0 {
+		return err
+	}
+	state, kind, err := State(ctx, r)
+	if err != nil || state == "" || kind != Kind {
+		return err
+	}
+	image, err := Image(ctx, r)
+	if err != nil {
+		return err
+	}
+	routes := make([]caddyRoute, len(hs))
+	for i, h := range hs {
+		routes[i] = caddyRoute{Handle: []handler{{raw: h.raw}}}
+	}
+	probe, _ := json.Marshal(map[string]any{"admin": map[string]any{"disabled": true}, "apps": map[string]any{"http": map[string]any{
+		"servers": map[string]any{"probe": map[string]any{"listen": []string{":80"}, "routes": routes}}}}})
+	if _, err := r.Pipe(ctx, probe, "docker", "run", "--rm", "-i", "--network", "none", "--entrypoint", "caddy", image, "validate", "--config", "/dev/stdin"); err != nil {
+		verb := "runs"
+		if state != "running" {
+			verb = "is a stopped container of"
+		}
+		return fmt.Errorf("the proxy %s %s, whose Caddy refuses the gate (%w); `boks proxy upgrade` with boks's own image first, then apply again", verb, image, err)
+	}
+	return nil
+}

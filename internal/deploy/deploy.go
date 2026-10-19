@@ -38,6 +38,9 @@ type Options struct {
 	// AdmitWait is how long to wait for another deploy on the server to finish admitting its
 	// container; zero means five minutes.
 	AdmitWait time.Duration
+	// Force lifts, for `boks server apply` and `rollback`, the refusal to leave a site whose own token
+	// check is gone without the proxy's (CheckGateTransition) — an emergency's override, nothing else.
+	Force bool
 }
 
 func (o Options) stamp() time.Time {
