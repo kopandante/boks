@@ -141,6 +141,17 @@ func TestGateHostsAreTheAppsAlone(t *testing.T) {
 	if string(got) != `[{"host":["*.shop.example.com","foo.shop.example.com"],"not":[{"host":["api.SHOP.example.com"]}]}]` {
 		t.Errorf("want the app's own host gated and the other's left out: %s", got)
 	}
+	// The app's own exact host of the other server is left out too: its wildcard route leaves it out,
+	// and the request on this server meets the redirect or nothing, not the app.
+	wild = []Fragment{{App: "shop", Routes: []Route{{Host: "*.shop.example.com", Dial: "shop:1"}, {Host: "a.shop.example.com", Dial: "shop:1", TLS: true}}}}
+	if b, err = Config(gated(), wild); err != nil {
+		t.Fatal(err)
+	}
+	gate = dig(decoded(t, b), "apps", "http", "servers", "http", "routes").([]any)[2].(map[string]any)
+	got, _ = json.Marshal(gate["match"])
+	if string(got) != `[{"host":["*.shop.example.com"],"not":[{"host":["a.shop.example.com"]}]}]` {
+		t.Errorf("want the app's own TLS host left out of the plain wildcard: %s", got)
+	}
 	// A route of the gated app by path: the gate would judge the visitor's path, not the app's.
 	byPath := []Fragment{{App: "shop", Routes: []Route{{Host: "cars.example.com", Path: "/shop", StripPath: true, Dial: "shop:1", TLS: true}}}}
 	if _, err := Config(gated(), byPath); err == nil || !strings.Contains(err.Error(), "by path") {

@@ -195,19 +195,18 @@ func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute,
 				continue
 			}
 			for _, f := range fragments {
-				if f.App == g.app {
-					continue
-				}
 				for _, r := range f.Routes {
 					other := hostname.Canonical(r.Host)
 					// Caddy's wildcard stands for one label.
 					if label, ok := strings.CutSuffix(other, suffix); !ok || label == "" || strings.Contains(label, ".") || strings.HasPrefix(other, "*") {
 						continue
 					}
-					if r.TLS == tls {
-						except = append(except, routeMatch(r))
-					} else {
+					switch {
+					case r.TLS != tls:
+						// An exact host of the other server, the app's own included: its wildcard route leaves it out.
 						elsewhere = addHost(elsewhere, r.Host)
+					case f.App != g.app:
+						except = append(except, routeMatch(r))
 					}
 				}
 			}
