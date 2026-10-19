@@ -198,10 +198,18 @@ func appliedPolicy(ctx context.Context, r remote.Runner) (Policy, error) {
 	if err != nil {
 		return p, err
 	}
-	if err := loadSecret(ctx, r, &p); err != nil {
-		return p, err
+	return p, loadSecrets(ctx, r, &p)
+}
+
+// loadSecrets gives p every secret the policy never records: the egress login's password and the
+// gate's secrets — those p brings, and for the rest those the server keeps. Every path that assembles
+// the config from a policy goes through it: one that skipped a secret would assemble a proxy that
+// refuses its clients, or fail where the server has all it needs.
+func loadSecrets(ctx context.Context, r remote.Runner, p *Policy) error {
+	if err := loadSecret(ctx, r, p); err != nil {
+		return err
 	}
-	return p, loadGateSecrets(ctx, r, &p)
+	return loadGateSecrets(ctx, r, p)
 }
 
 // loadSecret gives p's egress login the password the server keeps for it. A server whose secret is
@@ -346,11 +354,7 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	}
 	// The login's password: the one p brings, or — a rollback, a policy applied again without it — the
 	// one the server keeps, if it is that user's.
-	if err := loadSecret(ctx, r, &p); err != nil {
-		return err
-	}
-	// The gate's secrets: those p brings, and for the rest those the server keeps.
-	if err := loadGateSecrets(ctx, r, &p); err != nil {
+	if err := loadSecrets(ctx, r, &p); err != nil {
 		return err
 	}
 	if _, err := Config(p, fs); err != nil {
@@ -360,6 +364,10 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	// needs it; until the policy is applied, a failure puts the previous secret back — or removes the
 	// one written — with the previous policy: a secret left changed under the old policy would be
 	// taken by the next deploy's reload, and clients on the old password refused.
+	prevMarker, markerPresent, err := readFile(ctx, r, policyMarker())
+	if err != nil {
+		return err
+	}
 	if err := remote.UploadAtomic(ctx, r, fmt.Appendf(nil, "%d\n", policyFormat(p)), policyMarker()); err != nil {
 		return fmt.Errorf("marking the server's routes for this boks: %w", err)
 	}
@@ -434,6 +442,14 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 		}
 		if restore {
 			err = errors.Join(err, restoreSecret(back))
+			// The marker follows the policy too: a format 8 left beside a policy without the gate would
+			// turn away every boks of format 7 for nothing, a 7 beside the gate would let one drop it.
+			if markerPresent {
+				err = errors.Join(err, remote.UploadAtomic(back, r, []byte(prevMarker), policyMarker()))
+			} else {
+				_, rmErr := r.Run(back, "rm", "-f", policyMarker())
+				err = errors.Join(err, rmErr)
+			}
 		}
 		_, backErr := converge(back, r, log, fs, true, "the previous policy")
 		return fmt.Errorf("the policy was not applied; the previous one is back: %w", errors.Join(err, backErr))

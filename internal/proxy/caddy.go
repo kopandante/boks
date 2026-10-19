@@ -702,9 +702,13 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 
 // CheckHosts refuses routes whose host another app's fragment already holds, before anything changes:
 // found only when the config is assembled, it would stop a run whose new copy already serves.
-func CheckHosts(fragments []Fragment, app string, routes []Route) error {
-	_, err := Config(Policy{}, withRoutes(fragments, app, routes))
-	return err
+// The server's policy p adds the gate's refusal of a host a gated app would share with another app.
+func CheckHosts(p Policy, fragments []Fragment, app string, routes []Route) error {
+	next := withRoutes(fragments, app, routes)
+	if _, err := Config(Policy{}, next); err != nil {
+		return err
+	}
+	return checkGateHosts(p, next)
 }
 
 // Of is app's routes among fragments; none when it has no fragment.

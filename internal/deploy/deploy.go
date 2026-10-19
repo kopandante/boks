@@ -187,7 +187,11 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	was := proxy.Of(fs, cfg.App)
 	// A host another app routes would make the config the switch reloads with invalid: refused now,
 	// while nothing of the app has changed.
-	if err := proxy.CheckHosts(fs, cfg.App, routesTo(cfg, name)); err != nil {
+	pol, err := proxy.ReadPolicy(ctx, r)
+	if err != nil {
+		return err
+	}
+	if err := proxy.CheckHosts(pol, fs, cfg.App, routesTo(cfg, name)); err != nil {
 		return err
 	}
 	old, err := containers(ctx, r, cfg.App)

@@ -707,10 +707,10 @@ func TestCheckHostsRefusesAnotherAppsHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckHosts(fs, "demo", web); err == nil {
+	if err := CheckHosts(Policy{}, fs, "demo", web); err == nil {
 		t.Errorf("want a refusal, got %v", err)
 	}
-	if err := CheckHosts(fs, "other", web); err != nil {
+	if err := CheckHosts(Policy{}, fs, "other", web); err != nil {
 		t.Errorf("an app's own host is its own: %v", err)
 	}
 }

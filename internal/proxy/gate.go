@@ -200,6 +200,23 @@ func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute,
 	return out, nil
 }
 
+// checkGateHosts refuses routes that would put a host of a gated app beside another app's, without the
+// secrets the handlers need: what a deploy asks before anything of its app changes.
+func checkGateHosts(p Policy, fragments []Fragment) error {
+	gs, err := groupsOf(p.Gate)
+	if err != nil {
+		return err
+	}
+	var hs []gateHandler
+	for _, g := range gs {
+		if g.Mode != "off" {
+			hs = append(hs, gateHandler{app: g.App, group: g.Name})
+		}
+	}
+	_, err = gateRoutes(hs, fragments, true)
+	return err
+}
+
 // loadGateSecrets gives p the gate's secrets: those it brings — from the environment of an apply —
 // and, for the rest, those the server keeps from an earlier apply: a rollback, or an apply without a
 // variable set. A secret neither has is an error: the config assembled without it would refuse every
@@ -294,7 +311,7 @@ func CheckGate(ctx context.Context, r remote.Runner, p Policy) error {
 			return fmt.Errorf("gate group %s: %s has no routes on this server; nothing was changed", g.Name, g.App)
 		}
 	}
-	if err := loadGateSecrets(ctx, r, &p); err != nil {
+	if err := loadSecrets(ctx, r, &p); err != nil {
 		return err
 	}
 	if _, err := Config(p, fs); err != nil {

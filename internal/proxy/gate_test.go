@@ -240,3 +240,82 @@ func TestSamePolicySeesTheGate(t *testing.T) {
 		t.Error("want another mode to be another policy")
 	}
 }
+
+// The check of a rollback to a revision with a gate assembles the config with every secret the server
+// keeps — the egress login's password among them, which no revision of the history records (R5).
+func TestCheckGateTakesEverySecretFromTheServer(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+		t.Fatal(err)
+	}
+	p := gated()
+	p.Egress = encar
+	if err := SetPolicy(context.Background(), d, io.Discard, p); err != nil {
+		t.Fatal(err)
+	}
+	back, _, err := History(context.Background(), d, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Egress.Password != "" || back.GateSecrets != nil {
+		t.Fatalf("the history holds a secret: %+v", back)
+	}
+	if err := CheckGate(context.Background(), d, back); err != nil {
+		t.Errorf("want the rollback's gate checked with the secrets the server keeps: %v", err)
+	}
+}
+
+// A new container for the policy is validated with the gate's secrets the server keeps, as the policy
+// itself is: a rollback without env, or an apply leaving a variable to the server, would otherwise
+// fail under the lock whenever the egress port changes.
+func TestReshapeTakesTheGatesSecretsFromTheServer(t *testing.T) {
+	s := reshapeServer()
+	s.out["sh -c if [ -f '"+ServerDir+"/gate.secret' ]"] = "present\n" + string(gateSecretFile(gated().GateSecrets))
+	next := openEgress
+	next.Gate = gated().Gate
+	if err := Reshape(context.Background(), s, io.Discard, next); err != nil {
+		t.Errorf("want the secrets taken from the server: %v", err)
+	}
+}
+
+// A failed apply puts the marker back with the policy: the gate's 8 beside a policy without it would
+// turn away every boks of format 7 for nothing, a 7 beside the gate would let one drop it.
+func TestSetPolicyPutsTheMarkerBack(t *testing.T) {
+	plain := gated()
+	plain.Gate, plain.GateSecrets = nil, nil
+	for _, c := range []struct {
+		name       string
+		from, to   Policy
+		wantMarker string
+	}{{"gate to none", gated(), plain, "8\n"}, {"none to gate", plain, gated(), "7\n"}} {
+		d := newDisk()
+		if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+			t.Fatal(err)
+		}
+		if err := SetPolicy(context.Background(), d, io.Discard, c.from); err != nil {
+			t.Fatal(err)
+		}
+		c.to.Revision, c.to.Floor = 17, 17
+		d.fail[reloadNext] = errors.New("refused")
+		if err := SetPolicy(context.Background(), d, io.Discard, c.to); err == nil {
+			t.Fatalf("%s: want the apply to fail", c.name)
+		}
+		if got := d.files[Dir+"/routes/_server.json"]; got != c.wantMarker {
+			t.Errorf("%s: marker %q, want %q back", c.name, got, c.wantMarker)
+		}
+	}
+}
+
+// A deploy that would route a host of a gated app beside another app is refused before anything of
+// the app changes, not when the config is reloaded.
+func TestCheckHostsSeesTheGate(t *testing.T) {
+	p := gated()
+	p.GateSecrets = nil // a deploy checks without the secrets
+	if err := CheckHosts(p, shopAndBlog, "img", []Route{{Host: "shop.example.com", Path: "/img", Dial: "img:1", TLS: true}}); err == nil ||
+		!strings.Contains(err.Error(), "routed by img too") {
+		t.Errorf("want the shared host refused: %v", err)
+	}
+	if err := CheckHosts(p, shopAndBlog, "img", []Route{{Host: "img.example.com", Dial: "img:1", TLS: true}}); err != nil {
+		t.Errorf("a host of its own: %v", err)
+	}
+}
