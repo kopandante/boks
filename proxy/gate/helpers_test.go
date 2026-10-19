@@ -7,12 +7,17 @@ import (
 	"github.com/caddyserver/caddy/v2"
 )
 
-// provisioned is h as Caddy loads it: provisioned, then validated.
-func provisioned(t *testing.T, h *Handler) *Handler {
+func ctxForTest(t *testing.T) caddy.Context {
 	t.Helper()
 	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
 	t.Cleanup(cancel)
-	if err := h.Provision(ctx); err != nil {
+	return ctx
+}
+
+// provisioned is h as Caddy loads it: provisioned, then validated.
+func provisioned(t *testing.T, h *Handler) *Handler {
+	t.Helper()
+	if err := h.Provision(ctxForTest(t)); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Validate(); err != nil {

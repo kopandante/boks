@@ -48,7 +48,17 @@ type Handler struct {
 	// SkipFP are path prefixes where the fingerprint is not compared: <img src="/api/encar/pics/…">
 	// sends none (request-gate's skipFingerprintPrefixes).
 	SkipFP []string `json:"skip_fp,omitempty"`
+	// Exempt are the paths under /api/ the site lets through without a token, beside the defaults
+	// every site has (defaultExempt): request-gate's exemptPaths, exemptPrefixes and exemptPatterns.
+	Exempt []Exempt `json:"exempt,omitempty"`
+	// Gated are path prefixes kept under the gate though an exemption covers them — the site's
+	// gatedPrefixes: /api/admin/revalidate of autogroup and kiramax has no authorization of its own.
+	Gated []string `json:"gated,omitempty"`
+	// Bearer lets a partner's server read without the browser's token (glavdoroga).
+	Bearer *Bearer `json:"bearer,omitempty"`
 
+	exempt []exemptRule
+	bearer *bearer
 	logger *zap.Logger
 	now    func() time.Time
 }
@@ -63,6 +73,15 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger()
 	if h.now == nil {
 		h.now = time.Now
+	}
+	var err error
+	if h.exempt, err = compileExempt(append(slices.Clone(defaultExempt), h.Exempt...)); err != nil {
+		return fmt.Errorf("exempt: %w", err)
+	}
+	if h.Bearer != nil {
+		if h.bearer, err = h.Bearer.compile(); err != nil {
+			return fmt.Errorf("bearer: %w", err)
+		}
 	}
 	return nil
 }
@@ -93,9 +112,11 @@ type refusal struct {
 
 var (
 	accessDenied    = &refusal{http.StatusUnauthorized, "Access denied"}
+	foreignOrigin   = &refusal{http.StatusForbidden, "Access denied"}
 	forbidden       = &refusal{http.StatusForbidden, "Forbidden"}
 	fpMismatch      = &refusal{http.StatusForbidden, "Fingerprint mismatch"}
 	addressMismatch = &refusal{http.StatusForbidden, "Token address mismatch"}
+	badPath         = &refusal{http.StatusBadRequest, "Bad request"}
 )
 
 // decision is the gate's verdict on a request: what the access log records, and the refusal when there is one.
@@ -122,14 +143,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	return next.ServeHTTP(w, r)
 }
 
-// decide is the API gate of request-gate.ts (apiGate), on the cleaned path: the token from the cookie
-// or the header, its signature and age, the fingerprint, the address. A token without the address is
-// refused, where the site lets it through: the proxy never issues one, and the pages' tokens without
-// it are what the gate closes.
+// decide is the API gate of request-gate.ts (apiGate), on the cleaned path, as Caddy's path matcher and
+// the apps see it: the exemptions, the partner's Bearer, then the token from the cookie or the header,
+// its signature and age, the fingerprint, the address. A token without the address is refused, where
+// the site lets it through: the proxy never issues one, and the pages' tokens without it are what the
+// gate closes.
 func (h *Handler) decide(r *http.Request, ip string) decision {
+	if unclean(r.URL) {
+		return deny("unclean_path", badPath)
+	}
 	p := path.Clean(r.URL.Path)
 	if !strings.HasPrefix(p, "/api/") {
 		return decision{verdict: "page"}
+	}
+	// Before the gated prefixes, as request-gate answers the probe before its API gate.
+	if p == healthPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		return allow("health")
+	}
+	if h.exempted(p, r.Method) {
+		if p == tokenPath && !sameOrigin(r) {
+			return deny("foreign_origin", foreignOrigin)
+		}
+		return allow("exempt")
+	}
+	if h.bearer != nil && h.bearer.admits(r, p) {
+		return allow("bearer")
 	}
 	tok := ""
 	if c, err := r.Cookie(cookieName); err == nil {
