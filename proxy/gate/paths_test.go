@@ -336,3 +336,16 @@ func TestNextDataURLWrite(t *testing.T) {
 		}
 	}
 }
+
+// The fingerprint is skipped only on a path that starts with a skip prefix, as request-gate's
+// startsWith: the prefix further in is no skip.
+func TestSkipFPAnchored(t *testing.T) {
+	h := enforcing(t, &Handler{SkipFP: []string{"/api/encar/pics"}}, time.Now())
+	for p, want := range map[string]int{"/api/encar/pics/1.jpg": 200, "/api/x/api/encar/pics": 403} {
+		r := request("POST", p, visitor)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, visitor)})
+		if w := serve(t, h, r); w.Code != want {
+			t.Errorf("POST %s without fp: %d, want %d", p, w.Code, want)
+		}
+	}
+}
