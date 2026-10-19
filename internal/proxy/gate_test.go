@@ -82,8 +82,10 @@ func TestANewHostOfTheAppIsGated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"new-shop.example.org",`) {
-		t.Errorf("want the new host in the gate's matcher: %s", b)
+	gate := dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)[2].(map[string]any)
+	got, _ := json.Marshal(gate["match"].([]any)[0].(map[string]any)["host"])
+	if handlerOf(t, gate)["handler"] != "boks_gate" || !strings.Contains(string(got), `"new-shop.example.org"`) {
+		t.Errorf("want the new host in the gate's matcher: %s", got)
 	}
 }
 
@@ -106,6 +108,75 @@ func TestGateHostsAreTheAppsAlone(t *testing.T) {
 	got, _ := json.Marshal(gate["match"])
 	if string(got) != `[{"host":["*.shop.example.com"],"not":[{"host":["api.shop.example.com"]}]}]` {
 		t.Errorf("want the other app's host left out of the wildcard: %s", got)
+	}
+	// A path another app routes on a covered host: that path is the other app's, the host's other paths
+	// fall through to the wildcard's app and stay under the gate. A host of the other server is left out
+	// whole, as the wildcard's own route leaves it.
+	wild[1].Routes = []Route{{Host: "api.shop.example.com", Path: "/assets", Dial: "api:1", TLS: true}, {Host: "plain.shop.example.com", Dial: "api:1"}}
+	if b, err = Config(gated(), wild); err != nil {
+		t.Fatal(err)
+	}
+	gate = dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)[2].(map[string]any)
+	got, _ = json.Marshal(gate["match"])
+	if string(got) != `[{"host":["*.shop.example.com"],"not":[{"host":["api.shop.example.com"],"path":["/assets","/assets/*"]},{"host":["plain.shop.example.com"]}]}]` {
+		t.Errorf("want only the other app's path left out: %s", got)
+	}
+	// A route of the gated app by path: the gate would judge the visitor's path, not the app's.
+	byPath := []Fragment{{App: "shop", Routes: []Route{{Host: "cars.example.com", Path: "/shop", StripPath: true, Dial: "shop:1", TLS: true}}}}
+	if _, err := Config(gated(), byPath); err == nil || !strings.Contains(err.Error(), "by path") {
+		t.Errorf("want a gated app's path route refused, got %v", err)
+	}
+}
+
+// probe answers CheckGate's run of the proxy's image: it records the command and the config on stdin,
+// and refuses when told to.
+type probe struct {
+	*disk
+	args   []string
+	stdin  string
+	refuse error
+}
+
+func (p *probe) Run(ctx context.Context, args ...string) (string, error) {
+	if strings.Contains(strings.Join(args, " "), "docker inspect -f '{{.Config.Image}}' boks-proxy") {
+		return "ghcr.io/kopandante/boks-caddy:old\n", nil
+	}
+	return p.disk.Run(ctx, args...)
+}
+
+func (p *probe) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	if len(args) > 1 && args[0] == "docker" && args[1] == "run" {
+		p.args, p.stdin = args, string(content)
+		return "", p.refuse
+	}
+	return p.disk.Pipe(ctx, content, args...)
+}
+
+// The gate is checked by the proxy's own image, offline, with the handlers as the config will hold
+// them; a Caddy that refuses them stops the apply, naming the image to upgrade (T6).
+func TestCheckGateAsksTheProxysImage(t *testing.T) {
+	for _, c := range []struct {
+		ps     string
+		refuse error
+		want   string
+	}{{"running\tcaddy", nil, ""}, {"running\tcaddy", errors.New("unknown module boks_gate"), "runs ghcr.io/kopandante/boks-caddy:old"},
+		{"exited\tcaddy", errors.New("unknown module boks_gate"), "is a stopped container of ghcr.io/kopandante/boks-caddy:old"}} {
+		d := newDisk()
+		if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+			t.Fatal(err)
+		}
+		d.ps = c.ps
+		r := &probe{disk: d, refuse: c.refuse}
+		err := CheckGate(context.Background(), r, gated())
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "boks proxy upgrade")) {
+			t.Errorf("%s, refused %v: got %v", c.ps, c.refuse, err)
+		}
+		if got := strings.Join(r.args, " "); got != "docker run --rm -i --network none --entrypoint caddy ghcr.io/kopandante/boks-caddy:old validate --config /dev/stdin" {
+			t.Errorf("probe: %s", got)
+		}
+		if !strings.Contains(r.stdin, `"handler":"boks_gate"`) || !strings.Contains(r.stdin, siteSecret) {
+			t.Errorf("the probe's config lacks the gate as the server would run it: %s", r.stdin)
+		}
 	}
 }
 
