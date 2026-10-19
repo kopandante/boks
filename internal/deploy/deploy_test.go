@@ -339,6 +339,8 @@ func TestRunHappyPath(t *testing.T) {
 		admitGive("demo"),
 		// What the proxy serves for the app now: where a failed switch would send the routes back.
 		fragsRead,
+		// With the server's policy: a host the gate's app would share is refused here too.
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		admitTake("demo"),
 		// Asked again under the admission lock, then the network is made.
@@ -363,6 +365,8 @@ func TestRunHappyPath(t *testing.T) {
 		// One reload moves every route, under the lock again: the config is every app's.
 		admitTake("demo"),
 		fragsRead,
+		// The gate's host rule asked again under the lock, then the policy the config is assembled with.
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		proxyProbe,
@@ -469,6 +473,8 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
 		// Whether the app has routes to drop is its fragment's to say, not the proxy's.
 		frags + `; do [ -f "$f" ] && cat "$f"; done; true`,
+		// With the server's policy: a host the gate's app would share is refused here too.
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		// A copy an older boks started, without the ports label, may have had routes: the proxy must not
 		// be the kamal-proxy whose routes to it this boks cannot drop.
@@ -892,6 +898,32 @@ func TestAHostAnotherAppRoutesIsRefusedBeforeAnyChange(t *testing.T) {
 	err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed)
 	if err == nil || !strings.Contains(err.Error(), "is routed by both") {
 		t.Fatalf("want the host refused, got %v", err)
+	}
+	if f.has("docker run") || f.has("docker network create") || f.appended() {
+		t.Errorf("nothing of the app may change: %v", f.calls)
+	}
+}
+
+// The server's policy reaches the same check: a path of this app on a gated app's host would share the
+// host the gate covers, refused before anything of the app changes.
+func TestAGatedAppsHostIsRefusedBeforeAnyChange(t *testing.T) {
+	f := routedFake(t)
+	shop, err := json.Marshal(proxy.Fragment{App: "shop", Routes: []proxy.Route{{Host: "shop.example.com", Dial: "shop-v1-1:3000", TLS: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.out[frags] = string(shop)
+	b, err := json.Marshal(proxy.Policy{Revision: 1, Floor: 1,
+		Gate: json.RawMessage(`{"groups":[{"name":"shop","app":"shop","mode":"log","secret_env":"SHOP_SECRET"}]}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.out[policyRead] = "present\n" + string(b)
+	f.out["sh -c if [ -f '.boks/_server/gate.secret' ]"] = "present\n" + `{"SHOP_SECRET":["` + strings.Repeat("s", 32) + `"]}`
+	cfg := parse(t, strings.Replace(onePort, "host: demo.example.com,", "host: shop.example.com, path: /img,", 1))
+	err = Run(context.Background(), f, io.Discard, cfg, "v2", fixed)
+	if err == nil || !strings.Contains(err.Error(), "routed by demo too") {
+		t.Fatalf("want the gated host refused, got %v", err)
 	}
 	if f.has("docker run") || f.has("docker network create") || f.appended() {
 		t.Errorf("nothing of the app may change: %v", f.calls)

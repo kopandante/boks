@@ -23,7 +23,7 @@ boks (§5) и критерии готовности (§7 и «Новые AC») �
 - [ ] 6 образ: сборка CI, `DefaultProxyImage` по digest
 
 ## Tasks (boks, §5 плана)
-- [ ] 1. `proxy/gate/`: модуль Caddy `http.handlers.boks_gate` (отдельный от `boks_ban`): группы хостов, проверка токена
+- [x] 1. `proxy/gate/`: модуль Caddy `http.handlers.boks_gate` (отдельный от `boks_ban`): группы хостов, проверка токена
   (формат `api-token.ts` 1:1, current+previous, TTL 3 мин), fp, ip = `client_ip` (как `ban.go:278-293`), освобождения,
   режимы off/log/enforce, выдача `POST /api/auth/token`, обёртка ResponseWriter, заменяющая значение `Set-Cookie: x-api-token` токеном с `ip` (R1)
   из ответов приложения на хостах группы в enforce: значение сайта проверяется секретом группы, его `fp` (если подпись
@@ -51,10 +51,10 @@ boks (§5) и критерии готовности (§7 и «Новые AC») �
   только структурные (`app` есть на узле, приложение не в двух группах, `secret_env`/`digests_env` заданы, секрет ≥ 32);
   остальное содержимое `gate` — непрозрачный JSON, его проверяет схема Caddy при reload (`DisallowUnknownFields`,
   старый конфиг остаётся) (R4).
-- [ ] 4. `internal/proxy/policy.go`: `Gate` в `Policy` как `json.RawMessage`; секреты (HMAC групп и дайджесты Bearer) в
+- [x] 4. `internal/proxy/policy.go`: `Gate` в `Policy` как `json.RawMessage`; секреты (HMAC групп и дайджесты Bearer) в
   `_server/gate.secret` по образцу `egressSecretPath`/`loadSecret`. При `apply`/`rollback` без env секреты гейта
   берутся с узла, как пароль egress (`policy.go:194-213,330-333`) (R5).
-- [ ] 5. `internal/proxy/caddy.go`: `gateRoute` после ban и bots, до приложений (`:288-298`); хосты группы — из фрагмента
+- [x] 5. `internal/proxy/caddy.go`: `gateRoute` после ban и bots, до приложений (`:288-298`); хосты группы — из фрагмента
   приложения при сборке (R10). Формат записи (R4, уточнено S12): фрагменты приложений по-прежнему пишут 7 (гейта в них
   нет); 8 пишет только маркер `_server.json` при `SetPolicy` (`policy.go:343`), когда в политике есть `gate`, и 7 —
   когда нет (rollback на ревизию без gate сразу снимает запрет для старых boks, без передеплоя каждого сайта); чтение —
