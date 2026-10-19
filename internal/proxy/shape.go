@@ -104,7 +104,7 @@ func Reshape(ctx context.Context, r remote.Runner, log io.Writer, next Policy) e
 	if err != nil {
 		return err
 	}
-	if err := loadSecret(ctx, r, &next); err != nil {
+	if err := loadSecrets(ctx, r, &next); err != nil {
 		return err
 	}
 	if err := validate(ctx, r, next, fs); err != nil {

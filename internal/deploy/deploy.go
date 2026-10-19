@@ -38,6 +38,9 @@ type Options struct {
 	// AdmitWait is how long to wait for another deploy on the server to finish admitting its
 	// container; zero means five minutes.
 	AdmitWait time.Duration
+	// Force lifts, for `boks server apply` and `rollback`, the refusal to leave a site whose own token
+	// check is gone without the proxy's (CheckGateTransition) — an emergency's override, nothing else.
+	Force bool
 }
 
 func (o Options) stamp() time.Time {
@@ -184,7 +187,11 @@ func put(ctx context.Context, r remote.Runner, log io.Writer, cfg *config.Config
 	was := proxy.Of(fs, cfg.App)
 	// A host another app routes would make the config the switch reloads with invalid: refused now,
 	// while nothing of the app has changed.
-	if err := proxy.CheckHosts(fs, cfg.App, routesTo(cfg, name)); err != nil {
+	pol, err := proxy.ReadPolicy(ctx, r)
+	if err != nil {
+		return err
+	}
+	if err := proxy.CheckHosts(pol, fs, cfg.App, routesTo(cfg, name)); err != nil {
 		return err
 	}
 	old, err := containers(ctx, r, cfg.App)

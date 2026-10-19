@@ -111,7 +111,17 @@ type Fragment struct {
 //
 // Format 7 is the ban's rules and heuristics: a boks of format 6 would assemble the handler with its
 // one limit, from fields the policy no longer holds, and the next deploy from it would drop the rules.
+//
+// Format 8 is the gate: a boks of format 7 would assemble the config without it, and the next deploy
+// from it would stop checking the sites' tokens. Unlike the formats before it, 8 is written only where
+// it is needed: in the marker, by `boks server apply` of a policy with a gate (policyFormat). The
+// fragments go on being written as 7 — no route of an app holds the gate — so a server without a gate
+// stays open to the boks of format 7 every app's CI pins until its pin is raised, and a rollback to a
+// revision without the gate opens it again at once, without every app deploying anew.
 const FragmentFormat = 7
+
+// GateFormat is the format of a server whose policy has a gate, and the newest this boks reads.
+const GateFormat = 8
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -283,6 +293,21 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 	if len(skip) > 0 {
 		servers["https"].AutoHTTPS.SkipCertificates = skip
 	}
+	// The gate goes before the apps' routes, the redirect and the 404, after the blocks: a refused bot
+	// is no request to check a token of.
+	if len(p.Gate) > 0 {
+		hs, err := gateHandlers(p)
+		if err != nil {
+			return nil, err
+		}
+		for name, s := range servers {
+			gate, err := gateRoutes(hs, fragments, name == "https")
+			if err != nil {
+				return nil, err
+			}
+			s.Routes = append(gate, s.Routes...)
+		}
+	}
 	// The policy's blocks go before everything else on each server — app routes, the redirect, the 404.
 	if bots := botRoutes(p); len(bots) > 0 {
 		for _, s := range servers {
@@ -437,6 +462,8 @@ type (
 		Duration     string         `json:"duration,omitempty"`
 		ExemptPaths  []string       `json:"exempt_paths,omitempty"`
 		ExemptRanges []string       `json:"exempt_ranges,omitempty"`
+		// raw is a handler boks passes as written — the gate's (gate.go) — and replaces every field above.
+		raw json.RawMessage
 	}
 	proxyHeaders struct {
 		Request *headerOps `json:"request,omitempty"`
@@ -473,6 +500,15 @@ type (
 		Key         string `json:"key"`
 	}
 )
+
+// MarshalJSON writes a handler boks passes as written as it is, and any other by its fields.
+func (h handler) MarshalJSON() ([]byte, error) {
+	if h.raw != nil {
+		return h.raw, nil
+	}
+	type fields handler
+	return json.Marshal(fields(h))
+}
 
 // egressServer is the forward proxy: only the clients e allows reach it, and any other connection gets
 // 403, as tinyproxy's Allow refused it. The plugin's own ACL is about where a client may go, not who
@@ -648,9 +684,9 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 		// The format a fragment opens with; one written before it was introduced has none.
 		var format int
 		if json.Unmarshal(v, &format) == nil {
-			if format > FragmentFormat {
+			if format > GateFormat {
 				return nil, fmt.Errorf("reading the proxy's routes: a route file has format %d, newer than this boks (%d) knows; "+
-					"update boks before changing this server", format, FragmentFormat)
+					"update boks before changing this server", format, GateFormat)
 			}
 			continue
 		}
@@ -666,9 +702,13 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 
 // CheckHosts refuses routes whose host another app's fragment already holds, before anything changes:
 // found only when the config is assembled, it would stop a run whose new copy already serves.
-func CheckHosts(fragments []Fragment, app string, routes []Route) error {
-	_, err := Config(Policy{}, withRoutes(fragments, app, routes))
-	return err
+// The server's policy p adds the gate's refusal of a host a gated app would share with another app.
+func CheckHosts(p Policy, fragments []Fragment, app string, routes []Route) error {
+	next := withRoutes(fragments, app, routes)
+	if _, err := Config(Policy{}, next); err != nil {
+		return err
+	}
+	return checkGateHosts(p, next)
 }
 
 // Of is app's routes among fragments; none when it has no fragment.

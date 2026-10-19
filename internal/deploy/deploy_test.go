@@ -339,6 +339,8 @@ func TestRunHappyPath(t *testing.T) {
 		admitGive("demo"),
 		// What the proxy serves for the app now: where a failed switch would send the routes back.
 		fragsRead,
+		// With the server's policy: a host the gate's app would share is refused here too.
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		"docker ps -a --filter label=boks.app=demo --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		admitTake("demo"),
 		// Asked again under the admission lock, then the network is made.
@@ -469,6 +471,8 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		"docker image inspect --format {{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}} ghcr.io/x/bot:v2",
 		// Whether the app has routes to drop is its fragment's to say, not the proxy's.
 		frags + `; do [ -f "$f" ] && cat "$f"; done; true`,
+		// With the server's policy: a host the gate's app would share is refused here too.
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		"docker ps -a --filter label=boks.app=bot --format {{.Names}}\t{{.Label \"boks.ports\"}}\t{{.Label \"boks.replace\"}}",
 		// A copy an older boks started, without the ports label, may have had routes: the proxy must not
 		// be the kamal-proxy whose routes to it this boks cannot drop.
