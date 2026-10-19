@@ -151,3 +151,34 @@ func TestEarlyChecksHoldTheGate(t *testing.T) {
 		t.Errorf("want nothing written: %v %v", f.uploads, f.appends)
 	}
 }
+
+// The policy the check under the lock judges is the one read there: a run whose early check saw the
+// group's site still checking, while another run turned its site gate off before this one took the
+// lock, is refused all the same (T6).
+func TestGateTransitionReadsThePolicyUnderTheLock(t *testing.T) {
+	off, _ := json.Marshal(gatePolicy(7, "enforce", "off"))
+	for _, c := range []struct {
+		name string
+		run  func(f *fake) error
+	}{
+		{"apply", func(f *fake) error {
+			return ApplyServer(context.Background(), f, io.Discard, gatePolicy(8, "log", "on"), fixed)
+		}},
+		{"rollback", func(f *fake) error { return RollbackServer(context.Background(), f, io.Discard, 6, fixed) }},
+	} {
+		f := serverFake(t, gatePolicy(7, "enforce", "on"))
+		hist, _ := json.Marshal(gatePolicy(6, "", ""))
+		f.out["sh -c if [ -f '.boks/_server/history/6.json' ]"] = "present\n" + string(hist)
+		f.onRun = func(cmd string) {
+			if strings.HasPrefix(cmd, "ln -sn ") && strings.Contains(cmd, "/tmp/boks.admit.lock") {
+				f.out[policyRead] = "present\n" + string(off)
+			}
+		}
+		if err := c.run(f); err == nil || !strings.Contains(err.Error(), "site_gate off") && !strings.Contains(err.Error(), "no gate group") {
+			t.Errorf("%s: want the refusal from the policy read under the lock, got %v", c.name, err)
+		}
+		if _, wrote := f.uploads[policyFile]; wrote {
+			t.Errorf("%s wrote the policy: %s", c.name, f.uploads[policyFile])
+		}
+	}
+}

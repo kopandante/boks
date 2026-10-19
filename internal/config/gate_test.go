@@ -77,6 +77,7 @@ func TestParseServerGateRejects(t *testing.T) {
 		`"Mode": keys are written in lowercase`:    group(ok + ", Mode: enforce}"),
 		`"Prefix": keys are written in lowercase`:  group(ok + ", exempt: [{prefix: /a, Prefix: /b}]}"),
 		`"ſecrets": keys are written in lowercase`: group(ok + ", ſecrets: [x]}"),
+		"is a group's secret_env too":              group(ok + ", bearer: {paths: [x], digests_env: A_SECRET}}"),
 		"revision: required":                       "servers: [a]\ngate:\n  groups:\n    - " + ok + "}\n",
 		"the name is used twice":                   "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + ok + "}\n    - {name: a, app: b, mode: log, secret_env: B}\n",
 		"in two groups":                            "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + ok + "}\n    - {name: b, app: a, mode: log, secret_env: B}\n",

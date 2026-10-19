@@ -175,6 +175,17 @@ func (g *Gate) validate() error {
 			return fmt.Errorf("groups[%s]: bearer.digests_env %q must name an environment variable (%s)", gr.Name, gr.Bearer.DigestsEnv, envNameRe)
 		}
 	}
+	// One variable, one role: the secrets are kept by name, so a name that is a group's secret and
+	// someone's digests would have one replace the other.
+	secrets := map[string]bool{}
+	for _, gr := range g.Groups {
+		secrets[gr.SecretEnv], secrets[gr.SecretEnv+"_PREVIOUS"] = true, true
+	}
+	for _, gr := range g.Groups {
+		if gr.Bearer != nil && secrets[gr.Bearer.DigestsEnv] {
+			return fmt.Errorf("groups[%s]: bearer.digests_env %s is a group's secret_env too; give the digests a variable of their own", gr.Name, gr.Bearer.DigestsEnv)
+		}
+	}
 	return nil
 }
 
