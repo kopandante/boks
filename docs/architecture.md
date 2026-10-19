@@ -674,6 +674,58 @@ ban:
   журнал называет `all-10m`; через сутки журнала — `forged`/`cluster flagged` по шторму, если он идёт.
   Через неделю журнала — решение о `mode: ban` отдельным PR.
 
+**Гейт API-токена** (`gate`, решение владельца 2026-10-19, `docs/plans/20261019-proxy-gate.md`). Токен
+сайтов (`registry/lib/security/api-token.ts` шаблона cars-cli) проверял каждый сайт своим `request-gate`, и
+любое исправление гейта стоило PR в каждый сайт. Теперь его проверяет прокси: исправление — один PR в
+политику или в обработчик.
+
+```yaml
+# server.yml
+gate:
+  groups:
+    - name: koreaautotrade
+      app: koreaautotrade              # хосты — из маршрутов приложения на узле, при каждой сборке конфига
+      secret_env: KOREAAUTOTRADE_GATE_SECRET   # API_SECRET_CURRENT сайта; *_PREVIOUS — на время ротации
+      mode: log                        # off | log | enforce
+      site_gate: on                    # on — сайт ещё проверяет сам; off — только при enforce
+      skip_fp: [/api/encar/pics]
+      exempt: [{prefix: /api/encar/}, {exact: /api/rates, methods: [POST]}, {regex: '^/api/auctions/image-proxy'}]
+      gated: [/api/admin/]
+      bearer: {paths: ['^/api/encar(/|$)'], methods: [GET, HEAD], digests_env: GLAVDOROGA_BEARER_DIGESTS}
+```
+
+- **Что читает boks.** Из группы — только `name`, `app`, `mode`, `site_gate`, `secret_env`,
+  `bearer.digests_env`; структурно: приложение не в двух группах, `site_gate: off` только при `enforce`,
+  секретов и `hosts` в файле нет. Остальное уходит в обработчик как написано; схему проверяет Caddy при
+  reload (`DisallowUnknownFields`, старый конфиг остаётся). Новое поле обработчика — новый образ и ревизия
+  политики, без нового формата.
+- **Маршрут.** Обработчик `http.handlers.boks_gate` (`proxy/gate`), по маршруту на группу: после бана и
+  блоков ботов, до маршрутов приложений; матчер — хосты приложения на этом сервере (TLS — на :443,
+  остальные — на :80). Новый хост в `boks.yml` сайта попадает под гейт со следующим деплоем. Хост, который
+  приложение группы делит с другим приложением, — отказ: гейт судил бы чужие запросы по правилам сайта.
+  Группа `off` маршрута не имеет.
+- **Секреты.** В `_server/gate.secret` (0600) по имени переменной, как пароль egress: в `policy.json` и
+  истории их нет. `server apply` берёт их из окружения; не заданную переменную — с узла; нет ни там, ни
+  там — отказ до изменений. Файл хранит все секреты, которые узлу давали, поэтому `server rollback` env не
+  требует.
+- **Проверка.** Порядок `apiGate` request-gate 1.7.0, коды и тела те же, клиент сайтов 2.5 обновляет
+  токен как раньше. Новое: токен без `ip` — 401; путь, который Go и WHATWG разбирают в разные маршруты
+  (`%2F`, `%5C`, `\`, `//` под `/api/` или с dot-сегментом на любом пути), — 400. В `enforce` прокси сам
+  отвечает на `POST /api/auth/token` и заменяет значение `Set-Cookie: x-api-token` сайта токеном с
+  `client_ip`; если сайт cookie не поставил — ставит свою на GET страницы. В `log` ответ не трогается.
+  В обоих `X-Forwarded-For` у апстрима начинается с `client_ip`. Вердикт — в доп. полях журнала доступа
+  (`gate_group`, `gate_mode`, `gate_verdict`, `gate_reason`).
+- **Сбой обработчика.** `site_gate: on` — пропуск к проверке сайта; `off` — 503.
+- **Переход.** `server apply` и `server rollback` отказывают без `--force`, если группа сейчас
+  `site_gate: off`, а в целевой политике она не `enforce` + `site_gate: off` (или её нет). Проверка — до
+  изменений на всех узлах и ещё раз под admission lock.
+- **Образ.** `server apply`/`rollback` до изменений проверяют обработчики групп в образе прокси
+  (`caddy validate`, секреты — на stdin): ban8 модуля не знает, нужен `boks proxy upgrade`.
+- **Формат 8.** Его пишет только маркер `_server.json`, когда в политике есть гейт; фрагменты
+  приложений остаются форматом 7. Узел без гейта открыт boks формата 7 (пин 09b6657), и откат на ревизию
+  без гейта открывает его сразу. Тест `TestOldBoksAndTheGate` собирает boks@09b6657 из истории репозитория
+  и проверяет все три шага.
+
 ## Слой данных
 
 **Postgres на всё, один инстанс на сервер, database на приложение.** Не схемы: правило «без
@@ -916,7 +968,7 @@ Docker (docs.docker.com/engine/install), и уже потом `boks server insta
 На сервере один прокси — `boks-proxy`. Он же работает прямым HTTP-прокси для исходящих запросов
 сервисов, которым нужен адрес этого сервера: так пул encar ходил через tinyproxy на VDS. Плагин
 `forwardproxy` есть только в собственном образе boks: `ghcr.io/kopandante/boks-caddy`, Caddy 2.11.7,
-плагин `forwardproxy` и обработчик бана `boks_ban`, закреплён по digest; Dockerfile лежит в `proxy/`, образ собирает GitHub
+плагин `forwardproxy`, обработчик бана `boks_ban` и гейт `boks_gate`, закреплён по digest; Dockerfile лежит в `proxy/`, образ собирает GitHub
 Actions. Без `egress:` плагин ничего не делает.
 
 ```yaml
