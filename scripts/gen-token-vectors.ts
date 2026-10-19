@@ -149,9 +149,11 @@ const requests: Req[] = [
 	{ name: "GET with another fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP2 },
 	{ name: "GET without fp", method: "GET", path: "/api/encar/catalog" },
 	{ name: "POST with its fp", method: "POST", path: "/api/encar/catalog", fingerprint: FP },
+	{ name: "POST with another fp", method: "POST", path: "/api/encar/catalog", fingerprint: FP2 },
 	{ name: "POST without fp", method: "POST", path: "/api/encar/catalog" },
 	// The fp relaxation is GET's alone: HEAD and PUT compare it as POST does.
 	{ name: "HEAD with its fp", method: "HEAD", path: "/api/encar/catalog", fingerprint: FP },
+	{ name: "HEAD with another fp", method: "HEAD", path: "/api/encar/catalog", fingerprint: FP2 },
 	{ name: "HEAD without fp", method: "HEAD", path: "/api/encar/catalog" },
 	{ name: "PUT without fp", method: "PUT", path: "/api/encar/catalog" },
 	{ name: "GET pics, fp skipped", method: "GET", path: "/api/encar/pics/1.jpg" },
