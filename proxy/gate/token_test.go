@@ -25,6 +25,7 @@ type vectors struct {
 		Class       string  `json:"class"`
 		Token       string  `json:"token"`
 		Via         string  `json:"via"`
+		HeaderToken string  `json:"header_token"`
 		Method      string  `json:"method"`
 		Path        string  `json:"path"`
 		Fingerprint string  `json:"fingerprint"`
@@ -92,6 +93,9 @@ func TestVectors(t *testing.T) {
 			if c.Token != "" {
 				r.AddCookie(&http.Cookie{Name: "x-api-token", Value: c.Token})
 			}
+			if c.HeaderToken != "" {
+				r.Header.Set("X-Api-Token", c.HeaderToken)
+			}
 		}
 		w := httptest.NewRecorder()
 		if err := h.ServeHTTP(w, r, pass); err != nil {
@@ -143,5 +147,36 @@ func TestIssuedTokenFormat(t *testing.T) {
 	}
 	if _, reason := h.verify(tok, now.Add(tokenTTL+time.Millisecond)); reason != "expired" {
 		t.Errorf("past the ttl: %q", reason)
+	}
+}
+
+// Of two x-api-token cookies the last is the token, as Next.js parses the header; an empty last one
+// leaves it to X-Api-Token, as request-gate's `|| header` does.
+func TestDuplicateCookieLastCounts(t *testing.T) {
+	h := provisioned(t, &Handler{Name: "site", Mode: "enforce", Secrets: []string{strings.Repeat("k", 32)}})
+	valid := h.sign("", "203.0.113.7")
+	stale := h.sign("", "198.51.100.9")
+	for _, c := range []struct {
+		cookie, header string
+		want           int
+	}{
+		{"x-api-token=; x-api-token=" + valid, "", http.StatusOK},
+		{"x-api-token=" + stale + "; x-api-token=" + valid, "", http.StatusOK},
+		{"x-api-token=" + valid + "; x-api-token=" + stale, "", http.StatusForbidden},
+		{"x-api-token=" + valid + "; x-api-token=", "", http.StatusUnauthorized},
+		{"x-api-token=" + stale + "; x-api-token=", valid, http.StatusOK},
+	} {
+		r := request(http.MethodGet, "/api/encar/catalog", "203.0.113.7")
+		r.Header.Set("Cookie", c.cookie)
+		if c.header != "" {
+			r.Header.Set("X-Api-Token", c.header)
+		}
+		w := httptest.NewRecorder()
+		if err := h.ServeHTTP(w, r, pass); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != c.want {
+			t.Errorf("Cookie: %s, header %t: got %d, want %d", c.cookie, c.header != "", w.Code, c.want)
+		}
 	}
 }
