@@ -58,25 +58,28 @@ func TestParseServerGateRejects(t *testing.T) {
 	group := func(g string) string { return "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + g + "\n" }
 	ok := "{name: a, app: a, mode: log, secret_env: A_SECRET"
 	cases := map[string]string{
-		"gate: empty":                            "servers: [a]\nrevision: 1\ngate:\n",
-		"empty; remove the key":                  "servers: [a]\nrevision: 1\nban: {}\ngate:\n#  groups:\n",
-		"groups: at least one":                   "servers: [a]\nrevision: 1\ngate: {groups: []}\n",
-		"gate: only groups":                      "servers: [a]\nrevision: 1\ngate: {groups: [" + ok + "}], mode: log}\n",
-		"name":                                   group("{app: a, mode: log, secret_env: A_SECRET}"),
-		"app: required":                          group("{name: a, mode: log, secret_env: A_SECRET}"),
-		"mode":                                   group("{name: a, app: a, mode: ban, secret_env: A_SECRET}"),
-		"secret_env":                             group("{name: a, app: a, mode: log}"),
-		"site_gate":                              group(ok + ", site_gate: maybe}"),
-		"site_gate off goes with enforce":        group(ok + ", site_gate: off}"),
-		"secret never goes in server.yml":        group(ok + ", secrets: [x]}"),
-		"digests never go":                       group(ok + ", bearer: {paths: [x], digests: [x], digests_env: D}}"),
-		"digests_env":                            group(ok + ", bearer: {paths: [x]}}"),
-		"boks writes it":                         group(ok + ", hosts: [a.example.com]}"),
-		"Secrets: keys are written in lowercase": group(ok + ", Secrets: [x]}"),
-		"Digests: keys are written in lowercase": group(ok + ", bearer: {paths: [x], Digests: [x], digests_env: D}}"),
-		"Mode: keys are written in lowercase":    group(ok + ", Mode: enforce}"),
-		"the name is used twice":                 "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + ok + "}\n    - {name: a, app: b, mode: log, secret_env: B}\n",
-		"in two groups":                          "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + ok + "}\n    - {name: b, app: a, mode: log, secret_env: B}\n",
+		"gate: empty":                     "servers: [a]\nrevision: 1\ngate:\n",
+		"empty; remove the key":           "servers: [a]\nrevision: 1\nban: {}\ngate:\n#  groups:\n",
+		"groups: at least one":            "servers: [a]\nrevision: 1\ngate: {groups: []}\n",
+		"gate: only groups":               "servers: [a]\nrevision: 1\ngate: {groups: [" + ok + "}], mode: log}\n",
+		"name":                            group("{app: a, mode: log, secret_env: A_SECRET}"),
+		"app: required":                   group("{name: a, mode: log, secret_env: A_SECRET}"),
+		"mode":                            group("{name: a, app: a, mode: ban, secret_env: A_SECRET}"),
+		"secret_env":                      group("{name: a, app: a, mode: log}"),
+		"site_gate":                       group(ok + ", site_gate: maybe}"),
+		"site_gate off goes with enforce": group(ok + ", site_gate: off}"),
+		"secret never goes in server.yml": group(ok + ", secrets: [x]}"),
+		"digests never go":                group(ok + ", bearer: {paths: [x], digests: [x], digests_env: D}}"),
+		"digests_env":                     group(ok + ", bearer: {paths: [x]}}"),
+		"boks writes it":                  group(ok + ", hosts: [a.example.com]}"),
+		`"Secrets": keys are written in lowercase`: group(ok + ", Secrets: [x]}"),
+		`"Digests": keys are written in lowercase`: group(ok + ", bearer: {paths: [x], Digests: [x], digests_env: D}}"),
+		`"Mode": keys are written in lowercase`:    group(ok + ", Mode: enforce}"),
+		`"Prefix": keys are written in lowercase`:  group(ok + ", exempt: [{prefix: /a, Prefix: /b}]}"),
+		`"ſecrets": keys are written in lowercase`: group(ok + ", ſecrets: [x]}"),
+		"revision: required":                       "servers: [a]\ngate:\n  groups:\n    - " + ok + "}\n",
+		"the name is used twice":                   "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + ok + "}\n    - {name: a, app: b, mode: log, secret_env: B}\n",
+		"in two groups":                            "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + ok + "}\n    - {name: b, app: a, mode: log, secret_env: B}\n",
 	}
 	for want, file := range cases {
 		_, err := ParseServer([]byte(file))
@@ -141,6 +144,13 @@ func TestGateSecretsRefuseHalfAPairAndKeepDigestsOut(t *testing.T) {
 	if _, err := s.Gate.Secrets(); err == nil || !strings.Contains(err.Error(), "_PREVIOUS is set without") {
 		t.Errorf("want half a pair refused, got %v", err)
 	}
+	// An empty previous one is none: the current one alone.
+	t.Setenv(g.SecretEnv, strings.Repeat("c", 32))
+	t.Setenv(g.SecretEnv+"_PREVIOUS", "")
+	if got, err := s.Gate.Secrets(); err != nil || len(got[g.SecretEnv]) != 1 {
+		t.Errorf("want the current secret alone: %v %v", got[g.SecretEnv], err)
+	}
+	os.Unsetenv(g.SecretEnv)
 	os.Unsetenv(g.SecretEnv + "_PREVIOUS")
 	for _, g := range s.Gate.Groups {
 		if g.Bearer == nil {
@@ -150,6 +160,11 @@ func TestGateSecretsRefuseHalfAPairAndKeepDigestsOut(t *testing.T) {
 		t.Setenv(g.Bearer.DigestsEnv, token)
 		if _, err := s.Gate.Secrets(); err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "entry 1") {
 			t.Errorf("want the entry named, not printed: %v", err)
+		}
+		// The digest the handler compares is lowercase hex: one in capitals would never match.
+		t.Setenv(g.Bearer.DigestsEnv, strings.Repeat("A", 64))
+		if _, err := s.Gate.Secrets(); err == nil || !strings.Contains(err.Error(), "entry 1") {
+			t.Errorf("want a digest in capitals refused, got %v", err)
 		}
 	}
 }

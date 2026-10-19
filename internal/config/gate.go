@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -54,12 +55,16 @@ var gateWritten = map[string]string{
 	"handler": "boks writes it",
 }
 
-// upperKey finds a key with a capital letter in v, at any depth.
+// gateKey is a key as the handler's fields are written. ASCII only: Go's JSON decoder folds case by
+// Unicode, so `ſecrets` (U+017F) is `secrets` to it, and a lowercase-only check would let it by.
+var gateKey = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// upperKey finds a key that is not a gateKey in v, at any depth.
 func upperKey(v any) (string, bool) {
 	switch v := v.(type) {
 	case map[string]any:
 		for k, sub := range v {
-			if strings.ToLower(k) != k {
+			if !gateKey.MatchString(k) {
 				return k, true
 			}
 			if k, ok := upperKey(sub); ok {
@@ -103,7 +108,7 @@ func (g *Gate) UnmarshalYAML(n *yaml.Node) error {
 		// one, so `Mode` beside `mode` would be read one way by boks and another by Caddy, and `Secrets`
 		// would slip a secret past the check below into policy.json and its history.
 		if k, ok := upperKey(m); ok {
-			return fmt.Errorf("gate.groups[%d]: %s: keys are written in lowercase", i, k)
+			return fmt.Errorf("gate.groups[%d]: %q: keys are written in lowercase ASCII letters, digits and _", i, k)
 		}
 		for k, why := range gateWritten {
 			if _, set := m[k]; set {

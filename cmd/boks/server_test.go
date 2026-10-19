@@ -372,6 +372,14 @@ func TestServerApplyKeepsTheGate(t *testing.T) {
 		}
 	}
 	plain := `{"revision":5,"floor":5}`
+	// A secret set wrong stops the apply before any server is asked.
+	t.Setenv("SHOP_GATE_SECRET", "short")
+	a := &recorder{server: server{policyRead: "present\n" + plain, frags: shop}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "shorter than 32") || len(a.calls) > 0 {
+		t.Errorf("want the apply refused before any server is asked: %d %q %v", code, errw.String(), a.calls)
+	}
 	for _, set := range []bool{false, true} {
 		if !set {
 			t.Setenv("SHOP_GATE_SECRET", "")
