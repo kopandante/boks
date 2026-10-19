@@ -256,13 +256,14 @@ func TestUncleanPaths(t *testing.T) {
 		{"/p%5cq/../api/encar/catalog", 400},
 		{`/api\encar\catalog`, 400},
 		{"/api/admin/x", 200},
-		// A Next.js data URL is the route it names: /_next/data/<id>/api/x.json runs /api/x.
-		{"/_next/data/b1d/api/encar/catalog.json", 401},
-		{"/_next/data/b1d/api/admin/x.json", 200},
-		{"/_next/data/b1d/api/encar/..%2f..%2fx.json", 400},
-		{"/_next/data/b1d/catalog.json", 200},
-		{"/_next/data/b1d/index/api/encar/catalog.json", 401},
-		{"/_next/data/b1d/index.json", 200},
+		// Next.js's data URLs, which it unwraps into any route, an API route included: refused whole.
+		{"/_next/data/b1d/api/encar/catalog.json", 400},
+		{"/_next/data/b1d/index/api/encar/catalog.json", 400},
+		{"/_next/data/b1d/_next/data/b1d/api/encar/catalog.json.json", 400},
+		{"/_next/data/b1d/catalog.json", 400},
+		{"/_next/data", 400},
+		{"/_next/static/chunks/a.js", 200},
+		{"/_next/database", 200},
 		// A page with the same characters is the app's business, not the gate's.
 		{"/catalog/a%2fb", 200},
 		{`/catalog/a\b`, 200},
@@ -314,11 +315,11 @@ func TestValidateRefuses(t *testing.T) {
 	}
 }
 
-// A write through a Next.js data URL runs the API route too: checked as one.
+// A write through a Next.js data URL is refused like a read.
 func TestNextDataURLWrite(t *testing.T) {
 	h := enforcing(t, &Handler{}, time.Now())
 	for _, target := range []string{"/_next/data/b1d/api/delivery/suggest.json", "/_next/data/b1d/index/api/delivery/suggest.json"} {
-		if w := serve(t, h, request("POST", target, visitor)); w.Code != 401 {
+		if w := serve(t, h, request("POST", target, visitor)); w.Code != 400 {
 			t.Errorf("POST %s: %d", target, w.Code)
 		}
 	}

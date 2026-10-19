@@ -68,27 +68,17 @@ func compileExempt(list []Exempt) ([]exemptRule, error) {
 	return out, nil
 }
 
-// nextData is a Next.js data URL: /_next/data/<build id>/<route>.json, which Next.js serves as <route>
-// before anything is dispatched — /_next/data/<id>/api/x.json runs the API route /api/x. The sites'
-// middleware sees it under the route's own path.
-var nextData = regexp.MustCompile(`^/_next/data/[^/]+(/.*)\.json$`)
+// nextDataPrefix is where Next.js serves the data of pages-router pages, /_next/data/<build id>/….json.
+// Next.js unwraps such a URL into a route by rules of its own — the root's /index, a leading /index/,
+// a data URL inside a data URL — and dispatches an API route by it too, which the gate, judging the
+// path it sees, would take for a file of Next.js. Every site under the gate is an App Router app: no
+// page of theirs is ever fetched this way, so the gate refuses the prefix whole rather than follow
+// Next.js's unwrapping rule by rule. A site with pages-router pages under a group would see its
+// navigations refused — loudly, at once — not an API left open.
+const nextDataPrefix = "/_next/data/"
 
-// routePath is the path a request is judged on: cleaned, as Caddy's matchers and the apps resolve it,
-// and a Next.js data URL as the route it names. Next.js denormalizes the page path as it reads one:
-// /index is the root, and a leading /index/ goes, once — /_next/data/<id>/index/api/x.json runs /api/x.
-func routePath(raw string) string {
-	p := path.Clean(raw)
-	if m := nextData.FindStringSubmatch(p); m != nil {
-		p = path.Clean(m[1])
-		switch {
-		case p == "/index":
-			p = "/"
-		case strings.HasPrefix(p, "/index/"):
-			p = strings.TrimPrefix(p, "/index")
-		}
-	}
-	return p
-}
+// nextData says whether a cleaned path is under Next.js's data URLs.
+func nextData(p string) bool { return strings.HasPrefix(p+"/", nextDataPrefix) }
 
 // underPrefix is request-gate's prefix: the paths that start with it, and its root without the slash
 // it ends in — /api/encar/ covers /api/encar too, not /api/encarx.
@@ -136,7 +126,7 @@ func unclean(u *url.URL) bool {
 			return true
 		}
 	}
-	return strings.HasPrefix(routePath(slashed), "/api/") || strings.HasPrefix(routePath(u.Path), "/api/")
+	return strings.HasPrefix(path.Clean(slashed), "/api/") || strings.HasPrefix(path.Clean(u.Path), "/api/")
 }
 
 // sameOrigin is request-gate's check on the token's issue: the Origin, or the Referer without one,

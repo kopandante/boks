@@ -284,7 +284,10 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 	if unclean(r.URL) {
 		return deny("unclean_path", badPath)
 	}
-	p := routePath(r.URL.Path)
+	p := path.Clean(r.URL.Path)
+	if nextData(p) {
+		return deny("next_data", badPath)
+	}
 	if !strings.HasPrefix(p, "/api/") {
 		return decision{verdict: "page"}
 	}
