@@ -54,6 +54,28 @@ var gateWritten = map[string]string{
 	"handler": "boks writes it",
 }
 
+// upperKey finds a key with a capital letter in v, at any depth.
+func upperKey(v any) (string, bool) {
+	switch v := v.(type) {
+	case map[string]any:
+		for k, sub := range v {
+			if strings.ToLower(k) != k {
+				return k, true
+			}
+			if k, ok := upperKey(sub); ok {
+				return k, true
+			}
+		}
+	case []any:
+		for _, sub := range v {
+			if k, ok := upperKey(sub); ok {
+				return k, true
+			}
+		}
+	}
+	return "", false
+}
+
 // MinGateSecret is the sites' own floor for API_SECRET_CURRENT.
 const MinGateSecret = 32
 
@@ -76,6 +98,12 @@ func (g *Gate) UnmarshalYAML(n *yaml.Node) error {
 		m, ok := gr.(map[string]any)
 		if !ok {
 			return fmt.Errorf("gate.groups[%d]: a mapping", i)
+		}
+		// Keys in lowercase only: the handler's JSON decoder matches a field in any case, boks's YAML in
+		// one, so `Mode` beside `mode` would be read one way by boks and another by Caddy, and `Secrets`
+		// would slip a secret past the check below into policy.json and its history.
+		if k, ok := upperKey(m); ok {
+			return fmt.Errorf("gate.groups[%d]: %s: keys are written in lowercase", i, k)
 		}
 		for k, why := range gateWritten {
 			if _, set := m[k]; set {
@@ -153,6 +181,10 @@ func (g *Gate) Secrets() (map[string][]string, error) {
 	out := map[string][]string{}
 	for _, gr := range g.Groups {
 		cur, ok := os.LookupEnv(gr.SecretEnv)
+		if _, prev := os.LookupEnv(gr.SecretEnv + "_PREVIOUS"); prev && !ok {
+			// The pair is replaced whole: alone, the previous one would leave the server's pair in place.
+			return nil, fmt.Errorf("gate.groups[%s]: %s_PREVIOUS is set without %s; set both, the current one first", gr.Name, gr.SecretEnv, gr.SecretEnv)
+		}
 		if ok {
 			vals := []string{cur}
 			if prev, ok := os.LookupEnv(gr.SecretEnv + "_PREVIOUS"); ok && prev != "" {
@@ -177,10 +209,11 @@ func (g *Gate) Secrets() (map[string][]string, error) {
 			continue
 		}
 		var digests []string
-		for _, d := range strings.Split(raw, ",") {
+		for i, d := range strings.Split(raw, ",") {
 			d = strings.TrimSpace(d)
 			if b, err := hex.DecodeString(d); err != nil || len(b) != 32 || strings.ToLower(d) != d {
-				return nil, fmt.Errorf("gate.groups[%s]: %s: %q is not the lowercase hex of a SHA-256", gr.Name, gr.Bearer.DigestsEnv, d)
+				// The value is not printed: it may be the token itself, put there by mistake.
+				return nil, fmt.Errorf("gate.groups[%s]: %s: entry %d is not the lowercase hex of a SHA-256", gr.Name, gr.Bearer.DigestsEnv, i+1)
 			}
 			digests = append(digests, d)
 		}
