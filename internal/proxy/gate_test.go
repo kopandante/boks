@@ -397,6 +397,25 @@ func TestReshapeTakesTheGatesSecretsFromTheServer(t *testing.T) {
 	}
 }
 
+// The switch asks the gate's host rule again under the admission lock: a deploy's check before it may
+// be stale, and a fragment written past the rule would leave every later config refused.
+func TestSetRoutesAsksTheGateAgain(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPolicy(context.Background(), d, io.Discard, gated()); err != nil {
+		t.Fatal(err)
+	}
+	img := []Route{{Host: "shop.example.com", Path: "/img", Dial: "img:1", TLS: true}}
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "img", img); err == nil || !strings.Contains(err.Error(), "routed by img too") {
+		t.Fatalf("want the gated host refused at the switch, got %v", err)
+	}
+	if _, ok := d.files[Dir+"/routes/img.json"]; ok {
+		t.Errorf("the fragment was written past the rule")
+	}
+}
+
 // The marker goes up before the policy with the gate and down only after Caddy runs the policy
 // without it: a run cut in between leaves an 8, which turns a boks of format 7 away, never a 7 beside
 // the gate, which would let one drop it.

@@ -774,6 +774,18 @@ func setRoutes(ctx context.Context, r remote.Runner, log io.Writer, app string, 
 	if _, err := Config(Policy{}, next); err != nil {
 		return false, err
 	}
+	if !force {
+		// The gate's host rule as well, here under the admission lock: the deploy's check before it may
+		// be stale by now — another app took a host meanwhile — and a fragment written past the rule
+		// would leave every later config refused. Putting routes back is not refused: they passed.
+		pol, err := ReadPolicy(ctx, r)
+		if err != nil {
+			return false, err
+		}
+		if err := checkGateHosts(pol, next); err != nil {
+			return false, err
+		}
+	}
 	record := func() error {
 		if !force && sameRoutes(Of(fs, app), routes) {
 			return nil

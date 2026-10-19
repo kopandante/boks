@@ -365,6 +365,8 @@ func TestRunHappyPath(t *testing.T) {
 		// One reload moves every route, under the lock again: the config is every app's.
 		admitTake("demo"),
 		fragsRead,
+		// The gate's host rule asked again under the lock, then the policy the config is assembled with.
+		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		proxyProbe,
