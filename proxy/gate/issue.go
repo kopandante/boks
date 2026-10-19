@@ -26,9 +26,8 @@ func (h *Handler) issue(w http.ResponseWriter, r *http.Request, ip string) error
 	if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		return refuse(w, forbidden)
 	}
-	// A body cut at the bound is no JSON, and refused with the rest.
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxIssueBody))
-	if err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxIssueBody+1))
+	if err != nil || len(body) > maxIssueBody {
 		return refuse(w, forbidden)
 	}
 	var req struct {

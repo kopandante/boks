@@ -1,8 +1,11 @@
 package gate
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +62,7 @@ func TestSiteCookieReplaced(t *testing.T) {
 		{"page token without fp and ip", h.sign("", ""), ""},
 		{"page token with fp of the old one (pakim)", h.sign(fp, "198.51.100.9"), fp},
 		{"a token the group's secret did not sign", stranger.sign(fp, ""), ""},
+		{"an expired one the group signed", (&Handler{Secrets: h.Secrets, now: func() time.Time { return now.Add(-time.Hour) }}).sign(fp, ""), fp},
 	}
 	for _, c := range cases {
 		attrs := "; Path=/; Expires=Mon, 19 Oct 2026 00:03:00 GMT; Max-Age=180; Secure; SameSite=strict"
@@ -107,7 +111,7 @@ func TestOwnCookie(t *testing.T) {
 		{name: "page with a valid token of this address", method: "GET", path: "/catalog", status: 200, token: h.sign("", visitor)},
 		{name: "page with a token of another address", method: "GET", path: "/catalog", status: 200, token: signedElsewhere, set: true, wantFP: fp},
 		{name: "page with a token another secret signed", method: "GET", path: "/catalog", status: 200, token: stranger, set: true},
-		{name: "page with an expired token", method: "GET", path: "/catalog", status: 200, token: (&Handler{Secrets: h.Secrets, now: func() time.Time { return now.Add(-time.Hour) }}).sign(fp, visitor), set: true},
+		{name: "page with an expired token", method: "GET", path: "/catalog", status: 200, token: (&Handler{Secrets: h.Secrets, now: func() time.Time { return now.Add(-time.Hour) }}).sign(fp, visitor), set: true, wantFP: fp},
 		{name: "api", method: "GET", path: "/api/health", status: 200},
 		{name: "next static", method: "GET", path: "/_next/static/chunks/a.js", status: 200},
 		{name: "next image", method: "GET", path: "/_next/image", status: 200},
@@ -169,43 +173,94 @@ func TestLogLeavesResponse(t *testing.T) {
 }
 
 // A streamed response — Next.js's RSC — is flushed as it comes, the cookie fixed before the headers
-// leave, whichever comes first: the status, the body or a flush.
+// A streamed response — Next.js's RSC — is flushed as it comes, the cookie fixed before the headers
+// leave, whichever comes first: the status, the body or a flush; an early hint goes ahead without it.
+// Checked on the wire, through a real server: the headers the client receives, and the stream reaching
+// it while the app still holds the response open.
 func TestStreamedResponse(t *testing.T) {
 	h := enforcing(t, &Handler{}, time.Now())
-	for name, app := range map[string]caddyhttp.HandlerFunc{
-		"status, body, flush": func(w http.ResponseWriter, r *http.Request) error {
+	type streamApp func(w http.ResponseWriter, release <-chan struct{})
+	hold := func(release <-chan struct{}) {
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	for _, c := range []struct {
+		name   string
+		app    streamApp
+		stream bool // the client reads a chunk before the app lets go
+		hint   bool
+	}{
+		{"status, body, flush", func(w http.ResponseWriter, release <-chan struct{}) {
 			w.Header().Add("Set-Cookie", cookieName+"=a.b; Path=/")
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte("chunk"))
-			return http.NewResponseController(w).Flush()
-		},
-		"flush first": func(w http.ResponseWriter, r *http.Request) error {
+			_ = http.NewResponseController(w).Flush()
+			hold(release)
+		}, true, false},
+		{"flush first", func(w http.ResponseWriter, release <-chan struct{}) {
 			w.Header().Add("Set-Cookie", cookieName+"=a.b; Path=/")
-			return http.NewResponseController(w).Flush()
-		},
-		"early hints, then the response": func(w http.ResponseWriter, r *http.Request) error {
+			_ = http.NewResponseController(w).Flush()
+			_, _ = w.Write([]byte("chunk"))
+			_ = http.NewResponseController(w).Flush()
+			hold(release)
+		}, true, false},
+		{"early hints, then the response", func(w http.ResponseWriter, release <-chan struct{}) {
 			w.Header().Set("Link", "</_next/static/a.css>; rel=preload")
 			w.WriteHeader(http.StatusEarlyHints)
 			w.Header().Add("Set-Cookie", cookieName+"=a.b; Path=/")
 			w.WriteHeader(200)
-			return nil
-		},
-		"body first": func(w http.ResponseWriter, r *http.Request) error {
+		}, false, true},
+		{"body first", func(w http.ResponseWriter, release <-chan struct{}) {
 			w.Header().Add("Set-Cookie", cookieName+"=a.b; Path=/")
-			_, err := w.Write([]byte("chunk"))
-			return err
-		},
+			_, _ = w.Write([]byte("chunk"))
+		}, false, false},
 	} {
-		w := through(t, h, request("GET", "/catalog", visitor), app)
-		got := tokenCookies(w)
-		if len(got) != 1 || valueOf(got[0]) == "a.b" {
-			t.Errorf("%s: %v", name, got)
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = h.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+				c.app(w, release)
+				return nil
+			}))
+		}))
+		hints := 0
+		req, _ := http.NewRequest("GET", srv.URL+"/catalog", nil)
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+			Got1xxResponse: func(code int, hdr textproto.MIMEHeader) error {
+				if code == http.StatusEarlyHints {
+					hints++
+					if len(hdr.Values("Set-Cookie")) != 0 {
+						t.Errorf("%s: a cookie on the early hint", c.name)
+					}
+				}
+				return nil
+			}}))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if strings.HasPrefix(name, "status") || strings.HasPrefix(name, "flush") {
-			if !w.Flushed {
-				t.Errorf("%s: not flushed", name)
+		var got []string
+		for _, l := range resp.Header.Values("Set-Cookie") {
+			if strings.HasPrefix(l, cookieName+"=") {
+				got = append(got, l)
 			}
 		}
+		if len(got) != 1 || valueOf(got[0]) == "a.b" {
+			t.Errorf("%s: cookies on the wire %v", c.name, got)
+		}
+		if c.stream {
+			buf := make([]byte, 5)
+			if _, err := io.ReadFull(resp.Body, buf); err != nil || string(buf) != "chunk" {
+				t.Errorf("%s: the chunk did not stream: %q %v", c.name, buf, err)
+			}
+		}
+		if c.hint && hints != 1 {
+			t.Errorf("%s: %d early hints reached the client", c.name, hints)
+		}
+		close(release)
+		resp.Body.Close()
+		srv.Close()
 	}
 	// The wrapper hands the writer below it to Caddy's ResponseController (Hijack, deadlines).
 	app := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {

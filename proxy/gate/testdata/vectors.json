@@ -9,7 +9,7 @@
 		{
 			"name": "fp+ip / GET with its fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -26,7 +26,7 @@
 		{
 			"name": "fp+ip / GET with another fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -43,7 +43,7 @@
 		{
 			"name": "fp+ip / GET without fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -60,7 +60,7 @@
 		{
 			"name": "fp+ip / POST with its fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -77,7 +77,7 @@
 		{
 			"name": "fp+ip / POST without fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -94,8 +94,42 @@
 		{
 			"name": "fp+ip / GET pics, fp skipped",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "fp+ip / GET pics with another fp, skipped",
+			"class": "valid",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "fp+ip / POST pics without fp, skipped",
+			"class": "valid",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -111,7 +145,7 @@
 		{
 			"name": "ip only (page token of the proxy) / GET with its fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiM2Q4MjdhODAwNTM4NjkyNyIsImlwIjoiMjAzLjAuMTEzLjcifQ.7EqPv1b0u1lT1wMhbMlhRI-EKOBzvPMVwl2ycXa8pyo",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNWQ0YjQxM2QxMGNkZjk3ZiIsImlwIjoiMjAzLjAuMTEzLjcifQ.6Sk8Mjh844ekCJVD6ydptqQfkLA7CpUerj0qqlFlhO8",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -128,7 +162,7 @@
 		{
 			"name": "ip only (page token of the proxy) / GET with another fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiM2Q4MjdhODAwNTM4NjkyNyIsImlwIjoiMjAzLjAuMTEzLjcifQ.7EqPv1b0u1lT1wMhbMlhRI-EKOBzvPMVwl2ycXa8pyo",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNWQ0YjQxM2QxMGNkZjk3ZiIsImlwIjoiMjAzLjAuMTEzLjcifQ.6Sk8Mjh844ekCJVD6ydptqQfkLA7CpUerj0qqlFlhO8",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -145,7 +179,7 @@
 		{
 			"name": "ip only (page token of the proxy) / GET without fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiM2Q4MjdhODAwNTM4NjkyNyIsImlwIjoiMjAzLjAuMTEzLjcifQ.7EqPv1b0u1lT1wMhbMlhRI-EKOBzvPMVwl2ycXa8pyo",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNWQ0YjQxM2QxMGNkZjk3ZiIsImlwIjoiMjAzLjAuMTEzLjcifQ.6Sk8Mjh844ekCJVD6ydptqQfkLA7CpUerj0qqlFlhO8",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -162,7 +196,7 @@
 		{
 			"name": "ip only (page token of the proxy) / POST with its fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiM2Q4MjdhODAwNTM4NjkyNyIsImlwIjoiMjAzLjAuMTEzLjcifQ.7EqPv1b0u1lT1wMhbMlhRI-EKOBzvPMVwl2ycXa8pyo",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNWQ0YjQxM2QxMGNkZjk3ZiIsImlwIjoiMjAzLjAuMTEzLjcifQ.6Sk8Mjh844ekCJVD6ydptqQfkLA7CpUerj0qqlFlhO8",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -179,7 +213,7 @@
 		{
 			"name": "ip only (page token of the proxy) / POST without fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiM2Q4MjdhODAwNTM4NjkyNyIsImlwIjoiMjAzLjAuMTEzLjcifQ.7EqPv1b0u1lT1wMhbMlhRI-EKOBzvPMVwl2ycXa8pyo",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNWQ0YjQxM2QxMGNkZjk3ZiIsImlwIjoiMjAzLjAuMTEzLjcifQ.6Sk8Mjh844ekCJVD6ydptqQfkLA7CpUerj0qqlFlhO8",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -196,8 +230,42 @@
 		{
 			"name": "ip only (page token of the proxy) / GET pics, fp skipped",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiM2Q4MjdhODAwNTM4NjkyNyIsImlwIjoiMjAzLjAuMTEzLjcifQ.7EqPv1b0u1lT1wMhbMlhRI-EKOBzvPMVwl2ycXa8pyo",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNWQ0YjQxM2QxMGNkZjk3ZiIsImlwIjoiMjAzLjAuMTEzLjcifQ.6Sk8Mjh844ekCJVD6ydptqQfkLA7CpUerj0qqlFlhO8",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "ip only (page token of the proxy) / GET pics with another fp, skipped",
+			"class": "valid",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNWQ0YjQxM2QxMGNkZjk3ZiIsImlwIjoiMjAzLjAuMTEzLjcifQ.6Sk8Mjh844ekCJVD6ydptqQfkLA7CpUerj0qqlFlhO8",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "ip only (page token of the proxy) / POST pics without fp, skipped",
+			"class": "valid",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNWQ0YjQxM2QxMGNkZjk3ZiIsImlwIjoiMjAzLjAuMTEzLjcifQ.6Sk8Mjh844ekCJVD6ydptqQfkLA7CpUerj0qqlFlhO8",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -213,7 +281,7 @@
 		{
 			"name": "fp+ip ipv6 / GET with its fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTdkZDU2YWNkMjZhYmQ4MSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.MWhlaDgSZq8J-bIIswMU2_KSlv0QSdXBUSKDpo8_86I",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDFhZTMzNzMyYTY2Yzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.7vlLl7ZvFlN33UIMq7OGGu8IbOoG2ENxyEXpXIgAnHU",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -230,7 +298,7 @@
 		{
 			"name": "fp+ip ipv6 / GET with another fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTdkZDU2YWNkMjZhYmQ4MSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.MWhlaDgSZq8J-bIIswMU2_KSlv0QSdXBUSKDpo8_86I",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDFhZTMzNzMyYTY2Yzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.7vlLl7ZvFlN33UIMq7OGGu8IbOoG2ENxyEXpXIgAnHU",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -247,7 +315,7 @@
 		{
 			"name": "fp+ip ipv6 / GET without fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTdkZDU2YWNkMjZhYmQ4MSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.MWhlaDgSZq8J-bIIswMU2_KSlv0QSdXBUSKDpo8_86I",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDFhZTMzNzMyYTY2Yzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.7vlLl7ZvFlN33UIMq7OGGu8IbOoG2ENxyEXpXIgAnHU",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -264,7 +332,7 @@
 		{
 			"name": "fp+ip ipv6 / POST with its fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTdkZDU2YWNkMjZhYmQ4MSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.MWhlaDgSZq8J-bIIswMU2_KSlv0QSdXBUSKDpo8_86I",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDFhZTMzNzMyYTY2Yzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.7vlLl7ZvFlN33UIMq7OGGu8IbOoG2ENxyEXpXIgAnHU",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -281,7 +349,7 @@
 		{
 			"name": "fp+ip ipv6 / POST without fp",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTdkZDU2YWNkMjZhYmQ4MSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.MWhlaDgSZq8J-bIIswMU2_KSlv0QSdXBUSKDpo8_86I",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDFhZTMzNzMyYTY2Yzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.7vlLl7ZvFlN33UIMq7OGGu8IbOoG2ENxyEXpXIgAnHU",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -298,8 +366,42 @@
 		{
 			"name": "fp+ip ipv6 / GET pics, fp skipped",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTdkZDU2YWNkMjZhYmQ4MSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.MWhlaDgSZq8J-bIIswMU2_KSlv0QSdXBUSKDpo8_86I",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDFhZTMzNzMyYTY2Yzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.7vlLl7ZvFlN33UIMq7OGGu8IbOoG2ENxyEXpXIgAnHU",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "2001:db8::7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "fp+ip ipv6 / GET pics with another fp, skipped",
+			"class": "valid",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDFhZTMzNzMyYTY2Yzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.7vlLl7ZvFlN33UIMq7OGGu8IbOoG2ENxyEXpXIgAnHU",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "2001:db8::7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "fp+ip ipv6 / POST pics without fp, skipped",
+			"class": "valid",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDFhZTMzNzMyYTY2Yzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAwMTpkYjg6OjcifQ.7vlLl7ZvFlN33UIMq7OGGu8IbOoG2ENxyEXpXIgAnHU",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "2001:db8::7",
@@ -315,7 +417,7 @@
 		{
 			"name": "fp+ip signed with previous / GET with its fp",
 			"class": "previous",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2NhYzRjOThkOTYyZTc0ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.151u9yxPgJyMHf-cYvrjd2MMCFnRsychv37-1Sy9vVY",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNDQxZjQyNWVmNjk1ZWM3YSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.JkJCaBCIwCYip4UIDgnoMUNtxJLx3-q5A1Fo8NMsvCQ",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -332,7 +434,7 @@
 		{
 			"name": "fp+ip signed with previous / GET with another fp",
 			"class": "previous",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2NhYzRjOThkOTYyZTc0ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.151u9yxPgJyMHf-cYvrjd2MMCFnRsychv37-1Sy9vVY",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNDQxZjQyNWVmNjk1ZWM3YSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.JkJCaBCIwCYip4UIDgnoMUNtxJLx3-q5A1Fo8NMsvCQ",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -349,7 +451,7 @@
 		{
 			"name": "fp+ip signed with previous / GET without fp",
 			"class": "previous",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2NhYzRjOThkOTYyZTc0ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.151u9yxPgJyMHf-cYvrjd2MMCFnRsychv37-1Sy9vVY",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNDQxZjQyNWVmNjk1ZWM3YSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.JkJCaBCIwCYip4UIDgnoMUNtxJLx3-q5A1Fo8NMsvCQ",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -366,7 +468,7 @@
 		{
 			"name": "fp+ip signed with previous / POST with its fp",
 			"class": "previous",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2NhYzRjOThkOTYyZTc0ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.151u9yxPgJyMHf-cYvrjd2MMCFnRsychv37-1Sy9vVY",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNDQxZjQyNWVmNjk1ZWM3YSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.JkJCaBCIwCYip4UIDgnoMUNtxJLx3-q5A1Fo8NMsvCQ",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -383,7 +485,7 @@
 		{
 			"name": "fp+ip signed with previous / POST without fp",
 			"class": "previous",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2NhYzRjOThkOTYyZTc0ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.151u9yxPgJyMHf-cYvrjd2MMCFnRsychv37-1Sy9vVY",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNDQxZjQyNWVmNjk1ZWM3YSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.JkJCaBCIwCYip4UIDgnoMUNtxJLx3-q5A1Fo8NMsvCQ",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -400,8 +502,42 @@
 		{
 			"name": "fp+ip signed with previous / GET pics, fp skipped",
 			"class": "previous",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2NhYzRjOThkOTYyZTc0ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.151u9yxPgJyMHf-cYvrjd2MMCFnRsychv37-1Sy9vVY",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNDQxZjQyNWVmNjk1ZWM3YSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.JkJCaBCIwCYip4UIDgnoMUNtxJLx3-q5A1Fo8NMsvCQ",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "fp+ip signed with previous / GET pics with another fp, skipped",
+			"class": "previous",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNDQxZjQyNWVmNjk1ZWM3YSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.JkJCaBCIwCYip4UIDgnoMUNtxJLx3-q5A1Fo8NMsvCQ",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "fp+ip signed with previous / POST pics without fp, skipped",
+			"class": "previous",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNDQxZjQyNWVmNjk1ZWM3YSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.JkJCaBCIwCYip4UIDgnoMUNtxJLx3-q5A1Fo8NMsvCQ",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -417,7 +553,7 @@
 		{
 			"name": "fp+ip signed with a stranger / GET with its fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2Y3N2I5ZjVlZDZiN2JhMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.7PS3ORD54J1vDA4SxUudJR285DUypwWwz7ZxRn-eteM",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOTQ4YTI3NjAxMzZhZWUyNSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eBPjEF3Ti5sIGn7DcnH4fQEjZk69WOuHIOszlm2C6G8",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -434,7 +570,7 @@
 		{
 			"name": "fp+ip signed with a stranger / GET with another fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2Y3N2I5ZjVlZDZiN2JhMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.7PS3ORD54J1vDA4SxUudJR285DUypwWwz7ZxRn-eteM",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOTQ4YTI3NjAxMzZhZWUyNSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eBPjEF3Ti5sIGn7DcnH4fQEjZk69WOuHIOszlm2C6G8",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -451,7 +587,7 @@
 		{
 			"name": "fp+ip signed with a stranger / GET without fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2Y3N2I5ZjVlZDZiN2JhMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.7PS3ORD54J1vDA4SxUudJR285DUypwWwz7ZxRn-eteM",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOTQ4YTI3NjAxMzZhZWUyNSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eBPjEF3Ti5sIGn7DcnH4fQEjZk69WOuHIOszlm2C6G8",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -468,7 +604,7 @@
 		{
 			"name": "fp+ip signed with a stranger / POST with its fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2Y3N2I5ZjVlZDZiN2JhMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.7PS3ORD54J1vDA4SxUudJR285DUypwWwz7ZxRn-eteM",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOTQ4YTI3NjAxMzZhZWUyNSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eBPjEF3Ti5sIGn7DcnH4fQEjZk69WOuHIOszlm2C6G8",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -485,7 +621,7 @@
 		{
 			"name": "fp+ip signed with a stranger / POST without fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2Y3N2I5ZjVlZDZiN2JhMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.7PS3ORD54J1vDA4SxUudJR285DUypwWwz7ZxRn-eteM",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOTQ4YTI3NjAxMzZhZWUyNSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eBPjEF3Ti5sIGn7DcnH4fQEjZk69WOuHIOszlm2C6G8",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -502,8 +638,42 @@
 		{
 			"name": "fp+ip signed with a stranger / GET pics, fp skipped",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiY2Y3N2I5ZjVlZDZiN2JhMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.7PS3ORD54J1vDA4SxUudJR285DUypwWwz7ZxRn-eteM",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOTQ4YTI3NjAxMzZhZWUyNSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eBPjEF3Ti5sIGn7DcnH4fQEjZk69WOuHIOszlm2C6G8",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "fp+ip signed with a stranger / GET pics with another fp, skipped",
+			"class": "signature",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOTQ4YTI3NjAxMzZhZWUyNSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eBPjEF3Ti5sIGn7DcnH4fQEjZk69WOuHIOszlm2C6G8",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "fp+ip signed with a stranger / POST pics without fp, skipped",
+			"class": "signature",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOTQ4YTI3NjAxMzZhZWUyNSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eBPjEF3Ti5sIGn7DcnH4fQEjZk69WOuHIOszlm2C6G8",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -519,7 +689,7 @@
 		{
 			"name": "age exactly ttl / GET with its fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiMDdlOGQ1NWFmZTVkMjg2ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eWSKEEZ9zvu_nQwg5D8Ns-fxFkWAxxT1flaKEr57aCM",
+			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiYzVmZjI0OGE4YWUxYzRiNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.nYZQUR25sVYjloM3GwXAgRejf_q252hiCKWAGOqq74c",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -536,7 +706,7 @@
 		{
 			"name": "age exactly ttl / GET with another fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiMDdlOGQ1NWFmZTVkMjg2ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eWSKEEZ9zvu_nQwg5D8Ns-fxFkWAxxT1flaKEr57aCM",
+			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiYzVmZjI0OGE4YWUxYzRiNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.nYZQUR25sVYjloM3GwXAgRejf_q252hiCKWAGOqq74c",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -553,7 +723,7 @@
 		{
 			"name": "age exactly ttl / GET without fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiMDdlOGQ1NWFmZTVkMjg2ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eWSKEEZ9zvu_nQwg5D8Ns-fxFkWAxxT1flaKEr57aCM",
+			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiYzVmZjI0OGE4YWUxYzRiNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.nYZQUR25sVYjloM3GwXAgRejf_q252hiCKWAGOqq74c",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -570,7 +740,7 @@
 		{
 			"name": "age exactly ttl / POST with its fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiMDdlOGQ1NWFmZTVkMjg2ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eWSKEEZ9zvu_nQwg5D8Ns-fxFkWAxxT1flaKEr57aCM",
+			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiYzVmZjI0OGE4YWUxYzRiNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.nYZQUR25sVYjloM3GwXAgRejf_q252hiCKWAGOqq74c",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -587,7 +757,7 @@
 		{
 			"name": "age exactly ttl / POST without fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiMDdlOGQ1NWFmZTVkMjg2ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eWSKEEZ9zvu_nQwg5D8Ns-fxFkWAxxT1flaKEr57aCM",
+			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiYzVmZjI0OGE4YWUxYzRiNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.nYZQUR25sVYjloM3GwXAgRejf_q252hiCKWAGOqq74c",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -604,8 +774,42 @@
 		{
 			"name": "age exactly ttl / GET pics, fp skipped",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiMDdlOGQ1NWFmZTVkMjg2ZSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.eWSKEEZ9zvu_nQwg5D8Ns-fxFkWAxxT1flaKEr57aCM",
+			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiYzVmZjI0OGE4YWUxYzRiNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.nYZQUR25sVYjloM3GwXAgRejf_q252hiCKWAGOqq74c",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "age exactly ttl / GET pics with another fp, skipped",
+			"class": "ttl",
+			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiYzVmZjI0OGE4YWUxYzRiNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.nYZQUR25sVYjloM3GwXAgRejf_q252hiCKWAGOqq74c",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 200,
+				"body": ""
+			}
+		},
+		{
+			"name": "age exactly ttl / POST pics without fp, skipped",
+			"class": "ttl",
+			"token": "eyJpYXQiOjE3OTIzOTk4MjAwMDAsIm5vbmNlIjoiYzVmZjI0OGE4YWUxYzRiNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.nYZQUR25sVYjloM3GwXAgRejf_q252hiCKWAGOqq74c",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -621,7 +825,7 @@
 		{
 			"name": "age ttl+1 / GET with its fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiOTI1MmI1MmRjMzZmNGFlYyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.AED85aAvW3T5LtNHf0uBZYJQDmsoEe9TuCGe5b0T06I",
+			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiNzI3OTUyNzUwNmQ4NTZjOSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.zFqkuHn0O2b-obycI-nL9Gzw5NYI1LWAvwJzsFSLOlg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -638,7 +842,7 @@
 		{
 			"name": "age ttl+1 / GET with another fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiOTI1MmI1MmRjMzZmNGFlYyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.AED85aAvW3T5LtNHf0uBZYJQDmsoEe9TuCGe5b0T06I",
+			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiNzI3OTUyNzUwNmQ4NTZjOSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.zFqkuHn0O2b-obycI-nL9Gzw5NYI1LWAvwJzsFSLOlg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -655,7 +859,7 @@
 		{
 			"name": "age ttl+1 / GET without fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiOTI1MmI1MmRjMzZmNGFlYyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.AED85aAvW3T5LtNHf0uBZYJQDmsoEe9TuCGe5b0T06I",
+			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiNzI3OTUyNzUwNmQ4NTZjOSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.zFqkuHn0O2b-obycI-nL9Gzw5NYI1LWAvwJzsFSLOlg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -672,7 +876,7 @@
 		{
 			"name": "age ttl+1 / POST with its fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiOTI1MmI1MmRjMzZmNGFlYyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.AED85aAvW3T5LtNHf0uBZYJQDmsoEe9TuCGe5b0T06I",
+			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiNzI3OTUyNzUwNmQ4NTZjOSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.zFqkuHn0O2b-obycI-nL9Gzw5NYI1LWAvwJzsFSLOlg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -689,7 +893,7 @@
 		{
 			"name": "age ttl+1 / POST without fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiOTI1MmI1MmRjMzZmNGFlYyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.AED85aAvW3T5LtNHf0uBZYJQDmsoEe9TuCGe5b0T06I",
+			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiNzI3OTUyNzUwNmQ4NTZjOSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.zFqkuHn0O2b-obycI-nL9Gzw5NYI1LWAvwJzsFSLOlg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -706,8 +910,42 @@
 		{
 			"name": "age ttl+1 / GET pics, fp skipped",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiOTI1MmI1MmRjMzZmNGFlYyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.AED85aAvW3T5LtNHf0uBZYJQDmsoEe9TuCGe5b0T06I",
+			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiNzI3OTUyNzUwNmQ4NTZjOSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.zFqkuHn0O2b-obycI-nL9Gzw5NYI1LWAvwJzsFSLOlg",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "age ttl+1 / GET pics with another fp, skipped",
+			"class": "ttl",
+			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiNzI3OTUyNzUwNmQ4NTZjOSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.zFqkuHn0O2b-obycI-nL9Gzw5NYI1LWAvwJzsFSLOlg",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "age ttl+1 / POST pics without fp, skipped",
+			"class": "ttl",
+			"token": "eyJpYXQiOjE3OTIzOTk4MTk5OTksIm5vbmNlIjoiNzI3OTUyNzUwNmQ4NTZjOSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.zFqkuHn0O2b-obycI-nL9Gzw5NYI1LWAvwJzsFSLOlg",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -723,7 +961,7 @@
 		{
 			"name": "iat in the future / GET with its fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMDhhY2RhYmU0M2Y4M2Y3MiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.qnr8xgZLNsyWC3erZ_Nbvh0oxXb_zx_zBZFmI6nWWzU",
+			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMTUwMGM4YjZkNmUzODY0ZiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O1BaA94IBF-8eHNMIXkw_98FZfB2jdWbYoTU5ln9wSE",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -740,7 +978,7 @@
 		{
 			"name": "iat in the future / GET with another fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMDhhY2RhYmU0M2Y4M2Y3MiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.qnr8xgZLNsyWC3erZ_Nbvh0oxXb_zx_zBZFmI6nWWzU",
+			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMTUwMGM4YjZkNmUzODY0ZiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O1BaA94IBF-8eHNMIXkw_98FZfB2jdWbYoTU5ln9wSE",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -757,7 +995,7 @@
 		{
 			"name": "iat in the future / GET without fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMDhhY2RhYmU0M2Y4M2Y3MiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.qnr8xgZLNsyWC3erZ_Nbvh0oxXb_zx_zBZFmI6nWWzU",
+			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMTUwMGM4YjZkNmUzODY0ZiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O1BaA94IBF-8eHNMIXkw_98FZfB2jdWbYoTU5ln9wSE",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -774,7 +1012,7 @@
 		{
 			"name": "iat in the future / POST with its fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMDhhY2RhYmU0M2Y4M2Y3MiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.qnr8xgZLNsyWC3erZ_Nbvh0oxXb_zx_zBZFmI6nWWzU",
+			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMTUwMGM4YjZkNmUzODY0ZiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O1BaA94IBF-8eHNMIXkw_98FZfB2jdWbYoTU5ln9wSE",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -791,7 +1029,7 @@
 		{
 			"name": "iat in the future / POST without fp",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMDhhY2RhYmU0M2Y4M2Y3MiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.qnr8xgZLNsyWC3erZ_Nbvh0oxXb_zx_zBZFmI6nWWzU",
+			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMTUwMGM4YjZkNmUzODY0ZiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O1BaA94IBF-8eHNMIXkw_98FZfB2jdWbYoTU5ln9wSE",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -808,8 +1046,42 @@
 		{
 			"name": "iat in the future / GET pics, fp skipped",
 			"class": "ttl",
-			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMDhhY2RhYmU0M2Y4M2Y3MiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.qnr8xgZLNsyWC3erZ_Nbvh0oxXb_zx_zBZFmI6nWWzU",
+			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMTUwMGM4YjZkNmUzODY0ZiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O1BaA94IBF-8eHNMIXkw_98FZfB2jdWbYoTU5ln9wSE",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "iat in the future / GET pics with another fp, skipped",
+			"class": "ttl",
+			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMTUwMGM4YjZkNmUzODY0ZiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O1BaA94IBF-8eHNMIXkw_98FZfB2jdWbYoTU5ln9wSE",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "iat in the future / POST pics without fp, skipped",
+			"class": "ttl",
+			"token": "eyJpYXQiOjE3OTI0MDAwMDAwMDEsIm5vbmNlIjoiMTUwMGM4YjZkNmUzODY0ZiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O1BaA94IBF-8eHNMIXkw_98FZfB2jdWbYoTU5ln9wSE",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -825,7 +1097,7 @@
 		{
 			"name": "other address / GET with its fp",
 			"class": "ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZjM2OGU2NDAyMmJhMzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.-aFARILtjoBfNIe1vShqmnLEsKtPFQge1smkzLG5O2Y",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMjA4ZmQ5M2M1MzRiNDE1NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.BIF3QWbq4uXpV3rrXx9pPIxPzxjwH7UbENCH6iEqbI4",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -842,7 +1114,7 @@
 		{
 			"name": "other address / GET with another fp",
 			"class": "ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZjM2OGU2NDAyMmJhMzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.-aFARILtjoBfNIe1vShqmnLEsKtPFQge1smkzLG5O2Y",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMjA4ZmQ5M2M1MzRiNDE1NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.BIF3QWbq4uXpV3rrXx9pPIxPzxjwH7UbENCH6iEqbI4",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -859,7 +1131,7 @@
 		{
 			"name": "other address / GET without fp",
 			"class": "ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZjM2OGU2NDAyMmJhMzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.-aFARILtjoBfNIe1vShqmnLEsKtPFQge1smkzLG5O2Y",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMjA4ZmQ5M2M1MzRiNDE1NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.BIF3QWbq4uXpV3rrXx9pPIxPzxjwH7UbENCH6iEqbI4",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -876,7 +1148,7 @@
 		{
 			"name": "other address / POST with its fp",
 			"class": "ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZjM2OGU2NDAyMmJhMzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.-aFARILtjoBfNIe1vShqmnLEsKtPFQge1smkzLG5O2Y",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMjA4ZmQ5M2M1MzRiNDE1NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.BIF3QWbq4uXpV3rrXx9pPIxPzxjwH7UbENCH6iEqbI4",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -893,7 +1165,7 @@
 		{
 			"name": "other address / POST without fp",
 			"class": "ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZjM2OGU2NDAyMmJhMzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.-aFARILtjoBfNIe1vShqmnLEsKtPFQge1smkzLG5O2Y",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMjA4ZmQ5M2M1MzRiNDE1NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.BIF3QWbq4uXpV3rrXx9pPIxPzxjwH7UbENCH6iEqbI4",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -910,8 +1182,42 @@
 		{
 			"name": "other address / GET pics, fp skipped",
 			"class": "ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZjM2OGU2NDAyMmJhMzc3NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.-aFARILtjoBfNIe1vShqmnLEsKtPFQge1smkzLG5O2Y",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMjA4ZmQ5M2M1MzRiNDE1NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.BIF3QWbq4uXpV3rrXx9pPIxPzxjwH7UbENCH6iEqbI4",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 403,
+				"body": "{\"error\":\"Token address mismatch\"}"
+			},
+			"proxy": {
+				"status": 403,
+				"body": "{\"error\":\"Token address mismatch\"}"
+			}
+		},
+		{
+			"name": "other address / GET pics with another fp, skipped",
+			"class": "ip",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMjA4ZmQ5M2M1MzRiNDE1NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.BIF3QWbq4uXpV3rrXx9pPIxPzxjwH7UbENCH6iEqbI4",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 403,
+				"body": "{\"error\":\"Token address mismatch\"}"
+			},
+			"proxy": {
+				"status": 403,
+				"body": "{\"error\":\"Token address mismatch\"}"
+			}
+		},
+		{
+			"name": "other address / POST pics without fp, skipped",
+			"class": "ip",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMjA4ZmQ5M2M1MzRiNDE1NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMTk4LjUxLjEwMC45In0.BIF3QWbq4uXpV3rrXx9pPIxPzxjwH7UbENCH6iEqbI4",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -927,7 +1233,7 @@
 		{
 			"name": "fp only, no ip / GET with its fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOWVkZTcxYzliMWM5NjFmMSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.sjNB31NPG6NT1cn8W8hCRnPwP_PwVWnr3RN5doOl0Dg",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiYjRiNThkNDRkMWVhOWY4MyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.cXrq33iy4Pq_0lLhssLpoVbbU4mEsuGfQSYfbk4ZcYM",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -944,7 +1250,7 @@
 		{
 			"name": "fp only, no ip / GET with another fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOWVkZTcxYzliMWM5NjFmMSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.sjNB31NPG6NT1cn8W8hCRnPwP_PwVWnr3RN5doOl0Dg",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiYjRiNThkNDRkMWVhOWY4MyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.cXrq33iy4Pq_0lLhssLpoVbbU4mEsuGfQSYfbk4ZcYM",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -961,7 +1267,7 @@
 		{
 			"name": "fp only, no ip / GET without fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOWVkZTcxYzliMWM5NjFmMSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.sjNB31NPG6NT1cn8W8hCRnPwP_PwVWnr3RN5doOl0Dg",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiYjRiNThkNDRkMWVhOWY4MyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.cXrq33iy4Pq_0lLhssLpoVbbU4mEsuGfQSYfbk4ZcYM",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -978,7 +1284,7 @@
 		{
 			"name": "fp only, no ip / POST with its fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOWVkZTcxYzliMWM5NjFmMSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.sjNB31NPG6NT1cn8W8hCRnPwP_PwVWnr3RN5doOl0Dg",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiYjRiNThkNDRkMWVhOWY4MyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.cXrq33iy4Pq_0lLhssLpoVbbU4mEsuGfQSYfbk4ZcYM",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -995,7 +1301,7 @@
 		{
 			"name": "fp only, no ip / POST without fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOWVkZTcxYzliMWM5NjFmMSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.sjNB31NPG6NT1cn8W8hCRnPwP_PwVWnr3RN5doOl0Dg",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiYjRiNThkNDRkMWVhOWY4MyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.cXrq33iy4Pq_0lLhssLpoVbbU4mEsuGfQSYfbk4ZcYM",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1012,8 +1318,42 @@
 		{
 			"name": "fp only, no ip / GET pics, fp skipped",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiOWVkZTcxYzliMWM5NjFmMSIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.sjNB31NPG6NT1cn8W8hCRnPwP_PwVWnr3RN5doOl0Dg",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiYjRiNThkNDRkMWVhOWY4MyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.cXrq33iy4Pq_0lLhssLpoVbbU4mEsuGfQSYfbk4ZcYM",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "fp only, no ip / GET pics with another fp, skipped",
+			"class": "no_ip",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiYjRiNThkNDRkMWVhOWY4MyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.cXrq33iy4Pq_0lLhssLpoVbbU4mEsuGfQSYfbk4ZcYM",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "fp only, no ip / POST pics without fp, skipped",
+			"class": "no_ip",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiYjRiNThkNDRkMWVhOWY4MyIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9.cXrq33iy4Pq_0lLhssLpoVbbU4mEsuGfQSYfbk4ZcYM",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -1029,7 +1369,7 @@
 		{
 			"name": "no fp, no ip (page token of a site) / GET with its fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDQ1N2IxNTc5MGRhZGZhMiJ9.-M6ub1ZfdsXetvWoLmWLWieKp4uYyoHljBbgyWAakto",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNTk5OGYwMjlkZDAyMTliMyJ9.gBJBG44sHQA3-YeUxWuyTHe2OlxjSF6StJDS0BL1pBs",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1046,7 +1386,7 @@
 		{
 			"name": "no fp, no ip (page token of a site) / GET with another fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDQ1N2IxNTc5MGRhZGZhMiJ9.-M6ub1ZfdsXetvWoLmWLWieKp4uYyoHljBbgyWAakto",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNTk5OGYwMjlkZDAyMTliMyJ9.gBJBG44sHQA3-YeUxWuyTHe2OlxjSF6StJDS0BL1pBs",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1063,7 +1403,7 @@
 		{
 			"name": "no fp, no ip (page token of a site) / GET without fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDQ1N2IxNTc5MGRhZGZhMiJ9.-M6ub1ZfdsXetvWoLmWLWieKp4uYyoHljBbgyWAakto",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNTk5OGYwMjlkZDAyMTliMyJ9.gBJBG44sHQA3-YeUxWuyTHe2OlxjSF6StJDS0BL1pBs",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1080,7 +1420,7 @@
 		{
 			"name": "no fp, no ip (page token of a site) / POST with its fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDQ1N2IxNTc5MGRhZGZhMiJ9.-M6ub1ZfdsXetvWoLmWLWieKp4uYyoHljBbgyWAakto",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNTk5OGYwMjlkZDAyMTliMyJ9.gBJBG44sHQA3-YeUxWuyTHe2OlxjSF6StJDS0BL1pBs",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1097,7 +1437,7 @@
 		{
 			"name": "no fp, no ip (page token of a site) / POST without fp",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDQ1N2IxNTc5MGRhZGZhMiJ9.-M6ub1ZfdsXetvWoLmWLWieKp4uYyoHljBbgyWAakto",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNTk5OGYwMjlkZDAyMTliMyJ9.gBJBG44sHQA3-YeUxWuyTHe2OlxjSF6StJDS0BL1pBs",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1114,8 +1454,42 @@
 		{
 			"name": "no fp, no ip (page token of a site) / GET pics, fp skipped",
 			"class": "no_ip",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDQ1N2IxNTc5MGRhZGZhMiJ9.-M6ub1ZfdsXetvWoLmWLWieKp4uYyoHljBbgyWAakto",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNTk5OGYwMjlkZDAyMTliMyJ9.gBJBG44sHQA3-YeUxWuyTHe2OlxjSF6StJDS0BL1pBs",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "no fp, no ip (page token of a site) / GET pics with another fp, skipped",
+			"class": "no_ip",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNTk5OGYwMjlkZDAyMTliMyJ9.gBJBG44sHQA3-YeUxWuyTHe2OlxjSF6StJDS0BL1pBs",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "no fp, no ip (page token of a site) / POST pics without fp, skipped",
+			"class": "no_ip",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNTk5OGYwMjlkZDAyMTliMyJ9.gBJBG44sHQA3-YeUxWuyTHe2OlxjSF6StJDS0BL1pBs",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -1231,6 +1605,40 @@
 			}
 		},
 		{
+			"name": "no nonce, signed / GET pics with another fp, skipped",
+			"class": "no_ip",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.b53eUavyo-pfJzOrMNNoEKaIzMD6WuM0b4WnIQjH8HY",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "no nonce, signed / POST pics without fp, skipped",
+			"class": "no_ip",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.b53eUavyo-pfJzOrMNNoEKaIzMD6WuM0b4WnIQjH8HY",
+			"method": "POST",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
 			"name": "iat a string, signed / GET with its fp",
 			"class": "garbage",
 			"token": "eyJpYXQiOiIxNzkyNDAwMDAwMDAwIiwibm9uY2UiOiIwMCIsImlwIjoiMjAzLjAuMTEzLjcifQ.czxLUnaMTku9U7BEUarxrpVPv1V7cKO6n_JlL05Z2Io",
@@ -1320,6 +1728,40 @@
 			"class": "garbage",
 			"token": "eyJpYXQiOiIxNzkyNDAwMDAwMDAwIiwibm9uY2UiOiIwMCIsImlwIjoiMjAzLjAuMTEzLjcifQ.czxLUnaMTku9U7BEUarxrpVPv1V7cKO6n_JlL05Z2Io",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "iat a string, signed / GET pics with another fp, skipped",
+			"class": "garbage",
+			"token": "eyJpYXQiOiIxNzkyNDAwMDAwMDAwIiwibm9uY2UiOiIwMCIsImlwIjoiMjAzLjAuMTEzLjcifQ.czxLUnaMTku9U7BEUarxrpVPv1V7cKO6n_JlL05Z2Io",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "iat a string, signed / POST pics without fp, skipped",
+			"class": "garbage",
+			"token": "eyJpYXQiOiIxNzkyNDAwMDAwMDAwIiwibm9uY2UiOiIwMCIsImlwIjoiMjAzLjAuMTEzLjcifQ.czxLUnaMTku9U7BEUarxrpVPv1V7cKO6n_JlL05Z2Io",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -1435,9 +1877,43 @@
 			}
 		},
 		{
+			"name": "payload not json, signed / GET pics with another fp, skipped",
+			"class": "garbage",
+			"token": "bm90IGpzb24.tAAmYXDCRb65h2KLsA4AKTTXh3JudtZ_TAmr3_FPyLU",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "payload not json, signed / POST pics without fp, skipped",
+			"class": "garbage",
+			"token": "bm90IGpzb24.tAAmYXDCRb65h2KLsA4AKTTXh3JudtZ_TAmr3_FPyLU",
+			"method": "POST",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
 			"name": "payload tampered / GET with its fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1454,7 +1930,7 @@
 		{
 			"name": "payload tampered / GET with another fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1471,7 +1947,7 @@
 		{
 			"name": "payload tampered / GET without fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1488,7 +1964,7 @@
 		{
 			"name": "payload tampered / POST with its fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1505,7 +1981,7 @@
 		{
 			"name": "payload tampered / POST without fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1522,8 +1998,42 @@
 		{
 			"name": "payload tampered / GET pics, fp skipped",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "payload tampered / GET pics with another fp, skipped",
+			"class": "signature",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "payload tampered / POST pics without fp, skipped",
+			"class": "signature",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAiLCJmcCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpcCI6IjE5OC41MS4xMDAuOSJ9.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -1539,7 +2049,7 @@
 		{
 			"name": "signature truncated / GET with its fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F9",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1556,7 +2066,7 @@
 		{
 			"name": "signature truncated / GET with another fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F9",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1573,7 +2083,7 @@
 		{
 			"name": "signature truncated / GET without fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F9",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1590,7 +2100,7 @@
 		{
 			"name": "signature truncated / POST with its fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F9",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1607,7 +2117,7 @@
 		{
 			"name": "signature truncated / POST without fp",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F9",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1624,8 +2134,42 @@
 		{
 			"name": "signature truncated / GET pics, fp skipped",
 			"class": "signature",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F9",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "signature truncated / GET pics with another fp, skipped",
+			"class": "signature",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F9",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "signature truncated / POST pics without fp, skipped",
+			"class": "signature",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F9",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -1641,7 +2185,7 @@
 		{
 			"name": "no dot / GET with its fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQRvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQowxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1658,7 +2202,7 @@
 		{
 			"name": "no dot / GET with another fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQRvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQowxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1675,7 +2219,7 @@
 		{
 			"name": "no dot / GET without fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQRvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQowxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1692,7 +2236,7 @@
 		{
 			"name": "no dot / POST with its fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQRvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQowxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1709,7 +2253,7 @@
 		{
 			"name": "no dot / POST without fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQRvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQowxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1726,8 +2270,42 @@
 		{
 			"name": "no dot / GET pics, fp skipped",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQRvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQowxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "no dot / GET pics with another fp, skipped",
+			"class": "garbage",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQowxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "no dot / POST pics without fp, skipped",
+			"class": "garbage",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQowxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -1843,9 +2421,43 @@
 			}
 		},
 		{
+			"name": "dot alone / GET pics with another fp, skipped",
+			"class": "garbage",
+			"token": ".",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "dot alone / POST pics without fp, skipped",
+			"class": "garbage",
+			"token": ".",
+			"method": "POST",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
 			"name": "leading dot / GET with its fp",
 			"class": "garbage",
-			"token": ".Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": ".owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1862,7 +2474,7 @@
 		{
 			"name": "leading dot / GET with another fp",
 			"class": "garbage",
-			"token": ".Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": ".owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1879,7 +2491,7 @@
 		{
 			"name": "leading dot / GET without fp",
 			"class": "garbage",
-			"token": ".Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": ".owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1896,7 +2508,7 @@
 		{
 			"name": "leading dot / POST with its fp",
 			"class": "garbage",
-			"token": ".Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": ".owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1913,7 +2525,7 @@
 		{
 			"name": "leading dot / POST without fp",
 			"class": "garbage",
-			"token": ".Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": ".owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1930,8 +2542,42 @@
 		{
 			"name": "leading dot / GET pics, fp skipped",
 			"class": "garbage",
-			"token": ".Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": ".owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "leading dot / GET pics with another fp, skipped",
+			"class": "garbage",
+			"token": ".owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "leading dot / POST pics without fp, skipped",
+			"class": "garbage",
+			"token": ".owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -1947,7 +2593,7 @@
 		{
 			"name": "trailing dot / GET with its fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1964,7 +2610,7 @@
 		{
 			"name": "trailing dot / GET with another fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1981,7 +2627,7 @@
 		{
 			"name": "trailing dot / GET without fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -1998,7 +2644,7 @@
 		{
 			"name": "trailing dot / POST with its fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2015,7 +2661,7 @@
 		{
 			"name": "trailing dot / POST without fp",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -2032,8 +2678,42 @@
 		{
 			"name": "trailing dot / GET pics, fp skipped",
 			"class": "garbage",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "trailing dot / GET pics with another fp, skipped",
+			"class": "garbage",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "trailing dot / POST pics without fp, skipped",
+			"class": "garbage",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -2049,7 +2729,7 @@
 		{
 			"name": "signature padded with = / GET with its fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0=",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg=",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2066,7 +2746,7 @@
 		{
 			"name": "signature padded with = / GET with another fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0=",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg=",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -2083,7 +2763,7 @@
 		{
 			"name": "signature padded with = / GET without fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0=",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg=",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -2100,7 +2780,7 @@
 		{
 			"name": "signature padded with = / POST with its fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0=",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg=",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2117,7 +2797,7 @@
 		{
 			"name": "signature padded with = / POST without fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0=",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg=",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -2134,8 +2814,42 @@
 		{
 			"name": "signature padded with = / GET pics, fp skipped",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0=",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg=",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "signature padded with = / GET pics with another fp, skipped",
+			"class": "stricter",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg=",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "signature padded with = / POST pics without fp, skipped",
+			"class": "stricter",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg=",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -2151,7 +2865,7 @@
 		{
 			"name": "signature in the standard alphabet / GET with its fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDhjMDk4YWQwY2Y4ZjBmNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.mlbZaVrvQFVJqLEs81IqS1+5fiWsqhAUUDydCsHjQ/4",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTlkZTZjMDU5OWUzYTk4NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O/J6W0PXyvDcGYRGgnBhAhJJGzrZCNi2av6k+gGtM8U",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2168,7 +2882,7 @@
 		{
 			"name": "signature in the standard alphabet / GET with another fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDhjMDk4YWQwY2Y4ZjBmNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.mlbZaVrvQFVJqLEs81IqS1+5fiWsqhAUUDydCsHjQ/4",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTlkZTZjMDU5OWUzYTk4NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O/J6W0PXyvDcGYRGgnBhAhJJGzrZCNi2av6k+gGtM8U",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -2185,7 +2899,7 @@
 		{
 			"name": "signature in the standard alphabet / GET without fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDhjMDk4YWQwY2Y4ZjBmNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.mlbZaVrvQFVJqLEs81IqS1+5fiWsqhAUUDydCsHjQ/4",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTlkZTZjMDU5OWUzYTk4NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O/J6W0PXyvDcGYRGgnBhAhJJGzrZCNi2av6k+gGtM8U",
 			"method": "GET",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -2202,7 +2916,7 @@
 		{
 			"name": "signature in the standard alphabet / POST with its fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDhjMDk4YWQwY2Y4ZjBmNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.mlbZaVrvQFVJqLEs81IqS1+5fiWsqhAUUDydCsHjQ/4",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTlkZTZjMDU5OWUzYTk4NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O/J6W0PXyvDcGYRGgnBhAhJJGzrZCNi2av6k+gGtM8U",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2219,7 +2933,7 @@
 		{
 			"name": "signature in the standard alphabet / POST without fp",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDhjMDk4YWQwY2Y4ZjBmNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.mlbZaVrvQFVJqLEs81IqS1+5fiWsqhAUUDydCsHjQ/4",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTlkZTZjMDU5OWUzYTk4NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O/J6W0PXyvDcGYRGgnBhAhJJGzrZCNi2av6k+gGtM8U",
 			"method": "POST",
 			"path": "/api/encar/catalog",
 			"fingerprint": "",
@@ -2236,8 +2950,42 @@
 		{
 			"name": "signature in the standard alphabet / GET pics, fp skipped",
 			"class": "stricter",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDhjMDk4YWQwY2Y4ZjBmNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.mlbZaVrvQFVJqLEs81IqS1+5fiWsqhAUUDydCsHjQ/4",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTlkZTZjMDU5OWUzYTk4NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O/J6W0PXyvDcGYRGgnBhAhJJGzrZCNi2av6k+gGtM8U",
 			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "signature in the standard alphabet / GET pics with another fp, skipped",
+			"class": "stricter",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTlkZTZjMDU5OWUzYTk4NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O/J6W0PXyvDcGYRGgnBhAhJJGzrZCNi2av6k+gGtM8U",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "signature in the standard alphabet / POST pics without fp, skipped",
+			"class": "stricter",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMTlkZTZjMDU5OWUzYTk4NiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.O/J6W0PXyvDcGYRGgnBhAhJJGzrZCNi2av6k+gGtM8U",
+			"method": "POST",
 			"path": "/api/encar/pics/1.jpg",
 			"fingerprint": "",
 			"client_ip": "203.0.113.7",
@@ -2353,6 +3101,40 @@
 			}
 		},
 		{
+			"name": "payload padded, signed / GET pics with another fp, skipped",
+			"class": "stricter",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ==.8_Vk-hq8rH_HcvBaL6x40DzRxc4vxcktlNqR3USrIug",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "payload padded, signed / POST pics without fp, skipped",
+			"class": "stricter",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ==.8_Vk-hq8rH_HcvBaL6x40DzRxc4vxcktlNqR3USrIug",
+			"method": "POST",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
 			"name": "payload in the standard alphabet, signed / GET with its fp",
 			"class": "stricter",
 			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAwMDAwMDAwMDAwMDAwMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjciLCJ4IjoiPz4/PiJ9.Csst-GvLowgxzQsvSCg1nxbHZdtTddJuCU1dkq-qscc",
@@ -2455,9 +3237,43 @@
 			}
 		},
 		{
+			"name": "payload in the standard alphabet, signed / GET pics with another fp, skipped",
+			"class": "stricter",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAwMDAwMDAwMDAwMDAwMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjciLCJ4IjoiPz4/PiJ9.Csst-GvLowgxzQsvSCg1nxbHZdtTddJuCU1dkq-qscc",
+			"method": "GET",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
+			"name": "payload in the standard alphabet, signed / POST pics without fp, skipped",
+			"class": "stricter",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiMDAwMDAwMDAwMDAwMDAwMCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjciLCJ4IjoiPz4/PiJ9.Csst-GvLowgxzQsvSCg1nxbHZdtTddJuCU1dkq-qscc",
+			"method": "POST",
+			"path": "/api/encar/pics/1.jpg",
+			"fingerprint": "",
+			"client_ip": "203.0.113.7",
+			"site": {
+				"status": 200,
+				"body": ""
+			},
+			"proxy": {
+				"status": 401,
+				"body": "{\"error\":\"Access denied\"}"
+			}
+		},
+		{
 			"name": "fp+ip / GET with its fp, token by header",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"via": "header",
 			"method": "GET",
 			"path": "/api/encar/catalog",
@@ -2475,7 +3291,7 @@
 		{
 			"name": "fp+ip / GET with its fp, token by cookie-empty",
 			"class": "valid",
-			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiZTliNGRjYTg2MGJiNWYwNiIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.Rvy7a2Y6LtuwefYNMgHFGSffE9rDPG2K05JII-8zoH0",
+			"token": "eyJpYXQiOjE3OTIzOTk5OTkwMDAsIm5vbmNlIjoiNzMzNjVlYzk5N2M3ZDJhNCIsImZwIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImlwIjoiMjAzLjAuMTEzLjcifQ.owxg_lEWzJZIx9Hs7BDvRnI45bMOofZPvxfH-F91VTg",
 			"via": "cookie-empty",
 			"method": "GET",
 			"path": "/api/encar/catalog",

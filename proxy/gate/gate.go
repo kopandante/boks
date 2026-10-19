@@ -239,10 +239,9 @@ func setField(r *http.Request, f zap.Field) {
 func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string) http.ResponseWriter {
 	own, ownFP := false, ""
 	if pageRequest(r, path.Clean(r.URL.Path)) {
-		own = true
-		if pl, reason := h.verify(requestToken(r), h.now()); reason == "" {
-			own, ownFP = pl.ip != ip, pl.fp
-		}
+		pl, reason := h.verify(requestToken(r), h.now())
+		own = reason != "" || pl.ip != ip
+		ownFP = signedFP(pl, reason)
 	}
 	return &cookieWriter{ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
 		fix: func(hdr http.Header) {
@@ -254,6 +253,14 @@ func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string
 				h.cookies(hdr, r, ip, own, ownFP)
 			})
 		}}
+}
+
+// signedFP is the fingerprint of a token the group's secret signed, expired or not: a renewal keeps it.
+func signedFP(pl payload, reason string) string {
+	if reason == "" || reason == "expired" {
+		return pl.fp
+	}
+	return ""
 }
 
 // requestToken is the token a request brings: the cookie, or the header when the cookie is missing or

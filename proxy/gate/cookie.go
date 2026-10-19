@@ -57,10 +57,7 @@ func (h *Handler) cookies(hdr http.Header, r *http.Request, ip string, own bool,
 		}
 		found = true
 		value, attrs, _ := strings.Cut(rest, ";")
-		fp := ""
-		if pl, reason := h.verify(strings.TrimSpace(value), h.now()); reason == "" {
-			fp = pl.fp
-		}
+		fp := signedFP(h.verify(strings.TrimSpace(value), h.now()))
 		if attrs != "" {
 			attrs = ";" + attrs
 		}

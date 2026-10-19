@@ -93,19 +93,26 @@ func (h *Handler) exempted(p, method string) bool {
 	return false
 }
 
-// unclean finds an /api/ path that Go and the app would resolve to different routes: Go decodes %2F
-// and %5C into the path and keeps a backslash, where the WHATWG URL of Next.js keeps the escapes and
-// reads a backslash as a slash; and Go's path.Clean drops an empty segment before `..`, which WHATWG
-// pops instead — /api/encar//../admin is /api/admin to Go and /api/encar/admin to Next.js. Browsers
-// send none of these.
+// unclean finds a path that Go and the app would resolve to different routes. Go decodes %2F and %5C
+// into the path and keeps a backslash as a character, where the WHATWG URL of Next.js keeps the escapes
+// as part of a segment and reads a backslash as a slash; and Go's path.Clean drops an empty segment
+// before `..`, which WHATWG pops instead. With a dot segment in the path any of them moves where `..`
+// lands — /p%2fq/../api/encar is /p/api/encar to Go and /api/encar to Next.js, /api/encar//../admin
+// the other way round — so such a path is refused on any route, a page's included. Without one only
+// the backslash changes the route, and only on its way to /api/. Browsers send none of these.
 func unclean(u *url.URL) bool {
-	slashed := strings.ReplaceAll(u.Path, `\`, "/")
-	if !strings.HasPrefix(path.Clean(slashed), "/api/") && !strings.HasPrefix(path.Clean(u.Path), "/api/") {
+	esc := strings.ToLower(u.EscapedPath())
+	backslash := strings.Contains(u.Path, `\`)
+	if !backslash && !strings.Contains(u.Path, "//") && !strings.Contains(esc, "%2f") && !strings.Contains(esc, "%5c") {
 		return false
 	}
-	esc := strings.ToLower(u.EscapedPath())
-	return strings.Contains(u.Path, `\`) || strings.Contains(u.Path, "//") ||
-		strings.Contains(esc, "%2f") || strings.Contains(esc, "%5c")
+	slashed := strings.ReplaceAll(u.Path, `\`, "/")
+	for _, seg := range strings.Split(slashed, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return backslash && strings.HasPrefix(path.Clean(slashed), "/api/")
 }
 
 // sameOrigin is request-gate's check on the token's issue: the Origin, or the Referer without one,

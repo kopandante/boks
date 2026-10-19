@@ -57,7 +57,8 @@ func decodePayload(enc string) ([]byte, error) {
 }
 
 // verify checks a token's signature against each of the group's secrets, then its age, and says why
-// it fails: bad_format, bad_signature, bad_payload or expired; "" for a token that passes. The
+// it fails: bad_format, bad_signature, bad_payload or expired; "" for a token that passes. An expired
+// token still comes with its payload: its fingerprint, signed, is the client's to keep on renewal. The
 // signature is compared as the string createApiToken writes — a token signed right but encoded
 // otherwise fails, where Node decodes both sides first.
 func (h *Handler) verify(tok string, now time.Time) (payload, string) {
@@ -88,23 +89,22 @@ func (h *Handler) verify(tok string, now time.Time) (payload, string) {
 	if v, ok := fields["iat"]; !ok || string(v) == "null" || json.Unmarshal(v, &iat) != nil {
 		return payload{}, "bad_payload"
 	}
-	if age := float64(now.UnixMilli()) - iat; age < 0 || age > float64(tokenTTL.Milliseconds()) {
-		return payload{}, "expired"
-	}
-	var nonce string
-	if v, ok := fields["nonce"]; !ok || json.Unmarshal(v, &nonce) != nil || string(v) == "null" {
-		return payload{}, ""
-	}
 	var p payload
-	for name, dst := range map[string]*string{"fp": &p.fp, "ip": &p.ip} {
-		v, ok := fields[name]
-		if !ok || string(v) == "null" {
-			continue
+	var nonce string
+	if v, ok := fields["nonce"]; ok && string(v) != "null" && json.Unmarshal(v, &nonce) == nil {
+		for name, dst := range map[string]*string{"fp": &p.fp, "ip": &p.ip} {
+			v, ok := fields[name]
+			if !ok || string(v) == "null" {
+				continue
+			}
+			// A value that is no string the sites never write; the proxy refuses what a site would compare.
+			if json.Unmarshal(v, dst) != nil {
+				return payload{}, "bad_payload"
+			}
 		}
-		// A value that is no string the sites never write; the proxy refuses what a site would compare.
-		if json.Unmarshal(v, dst) != nil {
-			return payload{}, "bad_payload"
-		}
+	}
+	if age := float64(now.UnixMilli()) - iat; age < 0 || age > float64(tokenTTL.Milliseconds()) {
+		return p, "expired"
 	}
 	return p, ""
 }

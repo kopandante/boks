@@ -45,9 +45,15 @@ base=${stand:-${1:?usage: gate-smoke.sh <base-url> [page] | --stand <site-port> 
 page=${1:-/}
 read -r -a opts <<<"${CURL_OPTS:-}"
 headers=$(curl -s ${opts[@]+"${opts[@]}"} -c "$jar" -o "$html" -D - "$base$page")
+status=$(head -1 <<<"$headers" | tr -d '\r')
 cookies=$(grep -ci '^set-cookie: x-api-token=' <<<"$headers" || true)
-echo "page $page: $(head -1 <<<"$headers" | tr -d '\r'), x-api-token cookies: $cookies"
+echo "page $page: $status, x-api-token cookies: $cookies"
 fail=0
+# A page that failed or moved has no catalog to load: its cookie proves nothing.
+if ! grep -qE '^HTTP/[0-9.]+ 2' <<<"$status"; then
+	echo "FAIL: the page answers $status; give a catalog page that answers 2xx"
+	fail=1
+fi
 if [ "$cookies" != 1 ]; then
 	echo "FAIL: a cold visit gets $cookies x-api-token cookies, want 1"
 	fail=1
@@ -55,7 +61,12 @@ fi
 
 # Not mapfile: macOS's /bin/bash is 3.2.
 pics=$(grep -oE 'src="/api/[^"]*pics[^"]*"' "$html" | sed -e 's/^src="//' -e 's/"$//' -e 's/&amp;/\&/g' | sort -u || true)
-echo "images under /api/ on the page: $(grep -c . <<<"$pics" || true)"
+count=$(grep -c . <<<"$pics" || true)
+echo "images under /api/ on the page: $count"
+if [ "$count" = 0 ]; then
+	echo "FAIL: no <img src=\"/api/…pics…\"> on the page; give a page with catalog images"
+	fail=1
+fi
 while read -r p; do
 	[ -n "$p" ] || continue
 	code=$(curl -s ${opts[@]+"${opts[@]}"} -b "$jar" -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Dest: image' "$base$p")

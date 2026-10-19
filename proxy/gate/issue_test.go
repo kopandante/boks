@@ -78,22 +78,34 @@ func TestIssue(t *testing.T) {
 func TestIssueRefuses(t *testing.T) {
 	h := enforcing(t, &Handler{}, time.Now())
 	cases := map[string]*http.Request{
-		"no content type":  issueRequest(`{"fingerprint":"`+fp+`"}`, ""),
-		"form":             issueRequest(`fingerprint=`+fp, "application/x-www-form-urlencoded"),
-		"not json":         issueRequest(`{`, "application/json"),
-		"null":             issueRequest(`null`, "application/json"),
-		"array":            issueRequest(`[1]`, "application/json"),
-		"no fingerprint":   issueRequest(`{}`, "application/json"),
-		"a number":         issueRequest(`{"fingerprint":1}`, "application/json"),
-		"short":            issueRequest(`{"fingerprint":"`+fp[1:]+`"}`, "application/json"),
-		"upper case":       issueRequest(`{"fingerprint":"`+strings.ToUpper(fp)+`"}`, "application/json"),
-		"trailing garbage": issueRequest(`{"fingerprint":"`+fp+`"} x`, "application/json"),
-		"larger than 4 KB": issueRequest(`{"fingerprint":"`+fp+`","pad":"`+strings.Repeat("x", 4096)+`"}`, "application/json"),
+		"no content type":             issueRequest(`{"fingerprint":"`+fp+`"}`, ""),
+		"form":                        issueRequest(`fingerprint=`+fp, "application/x-www-form-urlencoded"),
+		"not json":                    issueRequest(`{`, "application/json"),
+		"null":                        issueRequest(`null`, "application/json"),
+		"array":                       issueRequest(`[1]`, "application/json"),
+		"no fingerprint":              issueRequest(`{}`, "application/json"),
+		"a number":                    issueRequest(`{"fingerprint":1}`, "application/json"),
+		"short":                       issueRequest(`{"fingerprint":"`+fp[1:]+`"}`, "application/json"),
+		"upper case":                  issueRequest(`{"fingerprint":"`+strings.ToUpper(fp)+`"}`, "application/json"),
+		"trailing garbage":            issueRequest(`{"fingerprint":"`+fp+`"} x`, "application/json"),
+		"a valid prefix, cut at 4 KB": issueRequest(padded(`{"fingerprint":"`+fp+`"}`, maxIssueBody+1)+"x", "application/json"),
+		"larger than 4 KB":            issueRequest(`{"fingerprint":"`+fp+`","pad":"`+strings.Repeat("x", 4096)+`"}`, "application/json"),
 	}
 	for name, r := range cases {
 		w := serve(t, h, r)
 		if w.Code != 403 || w.Body.String() != `{"error":"Forbidden"}` || w.Header().Get("Set-Cookie") != "" {
 			t.Errorf("%s: %d %q %q", name, w.Code, w.Body.String(), w.Header().Get("Set-Cookie"))
 		}
+	}
+}
+
+// padded is body with spaces after it up to n bytes: valid JSON as long as body is.
+func padded(body string, n int) string { return body + strings.Repeat(" ", n-len(body)) }
+
+// A body of exactly the bound is read whole.
+func TestIssueBodyAtTheBound(t *testing.T) {
+	h := enforcing(t, &Handler{}, time.Now())
+	if w := serve(t, h, issueRequest(padded(`{"fingerprint":"`+fp+`"}`, maxIssueBody), "application/json")); w.Code != 200 {
+		t.Errorf("%d %s", w.Code, w.Body.String())
 	}
 }

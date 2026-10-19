@@ -151,6 +151,8 @@ const requests: Req[] = [
 	{ name: "POST with its fp", method: "POST", path: "/api/encar/catalog", fingerprint: FP },
 	{ name: "POST without fp", method: "POST", path: "/api/encar/catalog" },
 	{ name: "GET pics, fp skipped", method: "GET", path: "/api/encar/pics/1.jpg" },
+	{ name: "GET pics with another fp, skipped", method: "GET", path: "/api/encar/pics/1.jpg", fingerprint: FP2 },
+	{ name: "POST pics without fp, skipped", method: "POST", path: "/api/encar/pics/1.jpg" },
 ];
 
 const gate = createProxy({ api: { skipFingerprintPrefixes: ["/api/encar/pics"] } });

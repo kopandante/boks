@@ -247,12 +247,19 @@ func TestUncleanPaths(t *testing.T) {
 		{"/api/admin/..%5cencar/catalog", 400},
 		{`/api/admin/..\encar/catalog`, 400},
 		{"/api/encar//../admin/x", 400},
-		{"//api/encar/catalog", 400},
-		{"/api//encar/catalog", 400},
+		// An empty segment alone resolves alike: Go cleans it to the gated path.
+		{"//api/encar/catalog", 401},
+		{"/api//encar/catalog", 401},
+		// An escaped slash with `..` moves the route anywhere, from a page's path too.
+		{"/p%2fq/../api/encar/catalog", 400},
+		{"/api/x/%2f/../../encar/catalog", 400},
+		{"/p%5cq/../api/encar/catalog", 400},
+		{`/api\encar\catalog`, 400},
 		{"/api/admin/x", 200},
 		// A page with the same characters is the app's business, not the gate's.
 		{"/catalog/a%2fb", 200},
 		{`/catalog/a\b`, 200},
+		{"/catalog/../catalog/a", 200},
 	}
 	for _, c := range cases {
 		// Parsed as the server parses a request's target: no reference resolution, no host in "//".
