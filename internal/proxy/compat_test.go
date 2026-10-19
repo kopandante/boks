@@ -19,7 +19,9 @@ const oldBoks = "09b6657"
 // so a reload is the applied config written — what a server whose proxy is stopped does.
 type dirServer struct{ dir string }
 
-func (l dirServer) Run(ctx context.Context, args ...string) (string, error) { return l.Pipe(ctx, nil, args...) }
+func (l dirServer) Run(ctx context.Context, args ...string) (string, error) {
+	return l.Pipe(ctx, nil, args...)
+}
 
 func (l dirServer) Pipe(ctx context.Context, in []byte, args ...string) (string, error) {
 	if args[0] == "docker" {
