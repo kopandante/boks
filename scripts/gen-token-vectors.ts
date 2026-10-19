@@ -111,6 +111,15 @@ const tokens: Token[] = [
 	{ name: "age ttl+1", class: "ttl", token: issued({ fp: FP, ip: IP, age: TTL + 1 }) },
 	{ name: "iat in the future", class: "ttl", token: issued({ fp: FP, ip: IP, age: -1 }) },
 	{ name: "other address", class: "ip", token: issued({ fp: FP, ip: OTHER }) },
+	// The address is compared as a string: another spelling of the client's own is another address.
+	{ name: "own address v4-mapped", class: "ip", token: issued({ fp: FP, ip: `::ffff:${IP}` }) },
+	{ name: "own address ipv6 upper case", class: "ip", token: issued({ fp: FP, ip: IPV6.toUpperCase() }) },
+	{ name: "iat fractional, signed", class: "valid", token: signed(b64url(JSON.stringify({ iat: NOW - 1000.5, nonce: "00", fp: FP, ip: IP }))) },
+	{ name: "nonce a number, signed", class: "no_ip", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: 1, fp: FP, ip: IP }))) },
+	{ name: "nonce null, signed", class: "no_ip", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: null, fp: FP, ip: IP }))) },
+	// fp or ip of another type only a holder of the secret writes: the proxy refuses the payload.
+	{ name: "fp a number, signed", class: "stricter", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: "00", fp: 123, ip: IP }))) },
+	{ name: "fp false, signed", class: "stricter", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: "00", fp: false, ip: IP }))) },
 	{ name: "fp only, no ip", class: "no_ip", token: issued({ fp: FP }) },
 	{ name: "no fp, no ip (page token of a site)", class: "no_ip", token: issued({}) },
 	{
@@ -147,6 +156,7 @@ type Req = { name: string; method: string; path: string; fingerprint?: string; v
 const requests: Req[] = [
 	{ name: "GET with its fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP },
 	{ name: "GET with another fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP2 },
+	{ name: "GET with its fp upper case", method: "GET", path: "/api/encar/catalog", fingerprint: FP.toUpperCase() },
 	{ name: "GET without fp", method: "GET", path: "/api/encar/catalog" },
 	{ name: "POST with its fp", method: "POST", path: "/api/encar/catalog", fingerprint: FP },
 	{ name: "POST with another fp", method: "POST", path: "/api/encar/catalog", fingerprint: FP2 },
@@ -159,6 +169,7 @@ const requests: Req[] = [
 	{ name: "GET pics, fp skipped", method: "GET", path: "/api/encar/pics/1.jpg" },
 	{ name: "GET pics with another fp, skipped", method: "GET", path: "/api/encar/pics/1.jpg", fingerprint: FP2 },
 	{ name: "POST pics without fp, skipped", method: "POST", path: "/api/encar/pics/1.jpg" },
+	{ name: "POST picsX without fp, skipped by raw prefix", method: "POST", path: "/api/encar/picsX" },
 ];
 
 const gate = createProxy({ api: { skipFingerprintPrefixes: ["/api/encar/pics"] } });
