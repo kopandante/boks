@@ -45,6 +45,8 @@ boks (§5) и критерии готовности (§7 и «Новые AC») �
   - [x] 1e log/enforce, XFF (S13/T3), журнал доступа (R11), `recover` (решение владельца 2)
 - [ ] 2. `proxy/Dockerfile`: `--with .../proxy/gate=/src/gate`, проверка `list-modules`; `proxy/TAG` → `…-ban8-gate1`;
   `DefaultProxyImage` (`config.go:32`) — новый digest.
+  - [x] 2a `proxy/Dockerfile` + `proxy/TAG` (`2.11.7-fp0aab84d-ban8-gate1`), локальная сборка: `list-modules` даёт `http.handlers.boks_gate`; `scripts/gate-smoke.sh` (AC9) — прогон на стенде с заглушкой сайта: одна cookie, картинки 200 (с cookie сайта и без)
+  - [ ] 2b `DefaultProxyImage` по digest образа из CI (второй PR)
 - [ ] 3. `internal/config/server.go`: разбор `gate:` — группа ссылается на `app:` (R10), не на список хостов; проверки boks
   только структурные (`app` есть на узле, приложение не в двух группах, `secret_env`/`digests_env` заданы, секрет ≥ 32);
   остальное содержимое `gate` — непрозрачный JSON, его проверяет схема Caddy при reload (`DisallowUnknownFields`,
