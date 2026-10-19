@@ -227,6 +227,34 @@ func TestSetPolicyPutsTheGatesSecretsBack(t *testing.T) {
 	}
 }
 
+// A secret the apply brings replaces the one the server keeps: a rotation reaches Caddy and the file.
+func TestSetPolicyRotatesAGateSecret(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPolicy(context.Background(), d, io.Discard, gated()); err != nil {
+		t.Fatal(err)
+	}
+	rotated := strings.Repeat("r", 32)
+	next := gated()
+	next.Revision, next.Floor = 17, 17
+	next.GateSecrets = map[string][]string{"SHOP_SECRET": {rotated, siteSecret}}
+	if err := SetPolicy(context.Background(), d, io.Discard, next); err != nil {
+		t.Fatal(err)
+	}
+	var kept map[string][]string
+	if err := json.Unmarshal([]byte(d.files[ServerDir+"/gate.secret"]), &kept); err != nil {
+		t.Fatal(err)
+	}
+	if got := kept["SHOP_SECRET"]; len(got) != 2 || got[0] != rotated || len(kept["SHOP_DIGESTS"]) != 1 {
+		t.Errorf("want the rotated secret first and the digests kept: %v", kept)
+	}
+	if !strings.Contains(d.caddy, rotated) {
+		t.Errorf("Caddy runs the gate without the rotated secret")
+	}
+}
+
 // Two policies with the same gate are one policy, whatever secrets each carries: the secrets are not
 // the policy.
 func TestSamePolicySeesTheGate(t *testing.T) {
