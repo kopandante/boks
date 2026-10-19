@@ -207,4 +207,6 @@ for (const via of ["header", "cookie-empty"] as const) {
 	vectors.push({ name: `no token / ${req.name}`, class: "garbage", token: "", method: req.method, path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy: s });
 }
 
-console.log(JSON.stringify({ key_current: CURRENT, key_previous: PREVIOUS, now_ms: NOW, skip_fp: ["/api/encar/pics"], vectors }, null, "\t"));
+// One vector per line: the file stays reviewable as a diff without tripling its length.
+const head = JSON.stringify({ key_current: CURRENT, key_previous: PREVIOUS, now_ms: NOW, skip_fp: ["/api/encar/pics"] });
+console.log(`${head.slice(0, -1)},"vectors":[\n${vectors.map((v) => JSON.stringify(v)).join(",\n")}\n]}`);
