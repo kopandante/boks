@@ -136,9 +136,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if h.Mode == "off" {
 		return next.ServeHTTP(w, r)
 	}
-	d := h.decide(r, clientIP(r))
-	if h.Mode == "enforce" && d.refuse != nil {
-		return refuse(w, d.refuse)
+	ip := clientIP(r)
+	d := h.decide(r, ip)
+	if h.Mode == "enforce" {
+		switch {
+		case d.refuse != nil:
+			return refuse(w, d.refuse)
+		case d.verdict == "issue":
+			return h.issue(w, r, ip)
+		}
 	}
 	return next.ServeHTTP(w, r)
 }
@@ -163,6 +169,9 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 	if h.exempted(p, r.Method) {
 		if p == tokenPath && !sameOrigin(r) {
 			return deny("foreign_origin", foreignOrigin)
+		}
+		if p == tokenPath && r.Method == http.MethodPost {
+			return decision{verdict: "issue"}
 		}
 		return allow("exempt")
 	}

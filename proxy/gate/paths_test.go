@@ -99,7 +99,7 @@ func TestExemptions(t *testing.T) {
 		exempt             bool
 	}{
 		// Every site's: the token's issue, the env check, the routes with their own authorization, the probe.
-		{"template", "POST", "/api/auth/token", true},
+		{"template", "GET", "/api/auth/token", true}, // POST is issued by the proxy (TestIssue)
 		{"template", "GET", "/api/env-check", true},
 		{"template", "POST", "/api/admin/login", true},
 		{"template", "GET", "/api/admin", true},
