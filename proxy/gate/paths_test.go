@@ -256,6 +256,11 @@ func TestUncleanPaths(t *testing.T) {
 		{"/p%5cq/../api/encar/catalog", 400},
 		{`/api\encar\catalog`, 400},
 		{"/api/admin/x", 200},
+		// A Next.js data URL is the route it names: /_next/data/<id>/api/x.json runs /api/x.
+		{"/_next/data/b1d/api/encar/catalog.json", 401},
+		{"/_next/data/b1d/api/admin/x.json", 200},
+		{"/_next/data/b1d/api/encar/..%2f..%2fx.json", 400},
+		{"/_next/data/b1d/catalog.json", 200},
 		// A page with the same characters is the app's business, not the gate's.
 		{"/catalog/a%2fb", 200},
 		{`/catalog/a\b`, 200},
@@ -304,5 +309,13 @@ func TestValidateRefuses(t *testing.T) {
 		if err := h.Provision(ctxForTest(t)); err == nil {
 			t.Errorf("%s: provisioned", name)
 		}
+	}
+}
+
+// A write through a Next.js data URL runs the API route too: checked as one.
+func TestNextDataURLWrite(t *testing.T) {
+	h := enforcing(t, &Handler{}, time.Now())
+	if w := serve(t, h, request("POST", "/_next/data/b1d/api/delivery/suggest.json", visitor)); w.Code != 401 {
+		t.Errorf("POST through the data URL: %d", w.Code)
 	}
 }

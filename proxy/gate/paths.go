@@ -68,6 +68,23 @@ func compileExempt(list []Exempt) ([]exemptRule, error) {
 	return out, nil
 }
 
+// nextData is a Next.js data URL: /_next/data/<build id>/<route>.json, which Next.js serves as <route>
+// before anything is dispatched — /_next/data/<id>/api/x.json runs the API route /api/x. The sites'
+// middleware sees it under the route's own path.
+var nextData = regexp.MustCompile(`^/_next/data/[^/]+(/.*)\.json$`)
+
+// routePath is the path a request is judged on: cleaned, as Caddy's matchers and the apps resolve it,
+// and a Next.js data URL as the route it names (/index.json is the root).
+func routePath(raw string) string {
+	p := path.Clean(raw)
+	if m := nextData.FindStringSubmatch(p); m != nil {
+		if p = path.Clean(m[1]); p == "/index" {
+			p = "/"
+		}
+	}
+	return p
+}
+
 // underPrefix is request-gate's prefix: the paths that start with it, and its root without the slash
 // it ends in — /api/encar/ covers /api/encar too, not /api/encarx.
 func underPrefix(p, prefix string) bool {
@@ -114,7 +131,7 @@ func unclean(u *url.URL) bool {
 			return true
 		}
 	}
-	return strings.HasPrefix(path.Clean(slashed), "/api/") || strings.HasPrefix(path.Clean(u.Path), "/api/")
+	return strings.HasPrefix(routePath(slashed), "/api/") || strings.HasPrefix(routePath(u.Path), "/api/")
 }
 
 // sameOrigin is request-gate's check on the token's issue: the Origin, or the Referer without one,
