@@ -42,6 +42,10 @@ type Handler struct {
 	// Mode is log — the verdict in the access log, every request passed on — or enforce. off passes
 	// everything without a word; boks writes no route for a group that is off.
 	Mode string `json:"mode"`
+	// SiteGate says whether the site still checks the token itself: on, the default, while it does —
+	// a failure of this handler passes the request on to that check; off once the site no longer does
+	// — a failure is 503, never a pass (owner's decision 2). off only in enforce.
+	SiteGate string `json:"site_gate,omitempty"`
 	// Secrets are the site's API_SECRET_CURRENT and, while one is rotated out, the previous one: a
 	// token signed with either passes, the proxy signs with the first.
 	Secrets []string `json:"secrets"`
@@ -61,6 +65,9 @@ type Handler struct {
 	bearer *bearer
 	logger *zap.Logger
 	now    func() time.Time
+	// fault and cookieFault, when set, run where the handler decides and where it fixes a cookie: the
+	// tests' way to make it fail.
+	fault, cookieFault func()
 }
 
 // CaddyModule returns the Caddy module information.
@@ -93,6 +100,10 @@ func (h *Handler) Validate() error {
 		return errors.New("name: required")
 	case h.Mode != "off" && h.Mode != "log" && h.Mode != "enforce":
 		return fmt.Errorf("mode %q must be off, log or enforce", h.Mode)
+	case h.SiteGate != "" && h.SiteGate != "on" && h.SiteGate != "off":
+		return fmt.Errorf("site_gate %q must be on or off", h.SiteGate)
+	case h.SiteGate == "off" && h.Mode != "enforce":
+		return errors.New("site_gate off goes with mode enforce: with the site's own check gone, only the proxy's stands")
 	case len(h.Secrets) == 0 || len(h.Secrets) > 2:
 		return fmt.Errorf("secrets: %d of them; the current one, and the previous one while it is rotated out", len(h.Secrets))
 	}
@@ -117,6 +128,7 @@ var (
 	fpMismatch      = &refusal{http.StatusForbidden, "Fingerprint mismatch"}
 	addressMismatch = &refusal{http.StatusForbidden, "Token address mismatch"}
 	badPath         = &refusal{http.StatusBadRequest, "Bad request"}
+	unavailable     = &refusal{http.StatusServiceUnavailable, "Service unavailable"}
 )
 
 // decision is the gate's verdict on a request: what the access log records, and the refusal when there is one.
@@ -131,23 +143,94 @@ func deny(reason string, r *refusal) decision {
 	return decision{verdict: "deny", reason: reason, refuse: r}
 }
 
-// ServeHTTP decides, and in enforce answers a refused request itself.
+// ServeHTTP decides, writes the verdict into the access log, and in enforce answers a refused request
+// and the token's issue itself and fixes the token's cookie of the app's response. In log and enforce
+// the app gets X-Forwarded-For with the address Caddy decided alone: its getClientIp takes the first
+// one, which a visitor behind a trusted proxy could otherwise write, and the token is bound to Caddy's.
+// reverse_proxy adds a trusted peer's address after it, or replaces it with the connection's — the
+// same address — when the peer is not trusted.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	if h.Mode == "off" {
 		return next.ServeHTTP(w, r)
 	}
 	ip := clientIP(r)
-	d := h.decide(r, ip)
-	if h.Mode == "enforce" {
-		switch {
-		case d.refuse != nil:
-			return refuse(w, d.refuse)
-		case d.verdict == "issue":
-			return h.issue(w, r, ip)
+	if ip != "unknown" {
+		r.Header.Set("X-Forwarded-For", ip)
+	}
+	var d decision
+	if !h.guard(r, func() { d = h.decide(r, ip) }) {
+		return h.failed(w, r, next)
+	}
+	h.record(r, d)
+	if h.Mode != "enforce" {
+		return next.ServeHTTP(w, r)
+	}
+	switch {
+	case d.refuse != nil:
+		return refuse(w, d.refuse)
+	case d.verdict == "issue":
+		var err error
+		if !h.guard(r, func() { err = h.issue(w, r, ip) }) {
+			return h.failed(w, r, next)
 		}
-		w = h.cookieWriter(w, r, ip)
+		return err
+	}
+	cw := w
+	if !h.guard(r, func() { cw = h.cookieWriter(w, r, ip) }) {
+		return h.failed(w, r, next)
+	}
+	return next.ServeHTTP(cw, r)
+}
+
+// guard runs fn and says whether it returned: a panic is written to the journal and the access log,
+// not left to Caddy's 500.
+func (h *Handler) guard(r *http.Request, fn func()) (ok bool) {
+	defer func() {
+		if v := recover(); v != nil {
+			h.logger.Error("gate failed", zap.String("group", h.Name), zap.String("host", r.Host),
+				zap.String("path", r.URL.Path), zap.Any("panic", v), zap.String("site_gate", h.siteGate()))
+			setField(r, zap.String("gate_verdict", "error"))
+			ok = false
+		}
+	}()
+	fn()
+	return true
+}
+
+// failed answers a request the handler failed on: passed on to the site's own check while it has one,
+// 503 once the proxy is the only gate.
+func (h *Handler) failed(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	if h.siteGate() == "off" {
+		return refuse(w, unavailable)
 	}
 	return next.ServeHTTP(w, r)
+}
+
+func (h *Handler) siteGate() string {
+	if h.SiteGate == "" {
+		return "on"
+	}
+	return h.SiteGate
+}
+
+// record writes a verdict on /api/ into the access log's entry of the request: one entry then holds
+// the proxy's verdict and the site's status, which is what log mode is read for.
+func (h *Handler) record(r *http.Request, d decision) {
+	if d.verdict == "page" {
+		return
+	}
+	setField(r, zap.String("gate_group", h.Name))
+	setField(r, zap.String("gate_mode", h.Mode))
+	setField(r, zap.String("gate_verdict", d.verdict))
+	if d.reason != "" {
+		setField(r, zap.String("gate_reason", d.reason))
+	}
+}
+
+func setField(r *http.Request, f zap.Field) {
+	if extra, ok := r.Context().Value(caddyhttp.ExtraLogFieldsCtxKey).(*caddyhttp.ExtraLogFields); ok {
+		extra.Set(f)
+	}
 }
 
 // cookieWriter is w fixing the token's cookie of the response (cookie.go). Whether the proxy sets its
@@ -162,7 +245,15 @@ func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string
 		}
 	}
 	return &cookieWriter{ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
-		fix: func(hdr http.Header) { h.cookies(hdr, r, ip, own, ownFP) }}
+		fix: func(hdr http.Header) {
+			// A failure leaves the headers as the site wrote them: the response is already under way.
+			h.guard(r, func() {
+				if h.cookieFault != nil {
+					h.cookieFault()
+				}
+				h.cookies(hdr, r, ip, own, ownFP)
+			})
+		}}
 }
 
 // requestToken is the token a request brings: the cookie, or the header when the cookie is missing or
@@ -180,6 +271,9 @@ func requestToken(r *http.Request) string {
 // the site lets it through: the proxy never issues one, and the pages' tokens without it are what the
 // gate closes.
 func (h *Handler) decide(r *http.Request, ip string) decision {
+	if h.fault != nil {
+		h.fault()
+	}
 	if unclean(r.URL) {
 		return deny("unclean_path", badPath)
 	}
