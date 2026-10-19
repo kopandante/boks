@@ -2,6 +2,7 @@ package gate
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -177,6 +178,31 @@ func TestDuplicateCookieLastCounts(t *testing.T) {
 		}
 		if w.Code != c.want {
 			t.Errorf("Cookie: %s, header %t: got %d, want %d", c.cookie, c.header != "", w.Code, c.want)
+		}
+	}
+}
+
+// The issue reads body.fingerprint by its exact name, as route.ts does; the last of two keys counts.
+func TestIssueFingerprintKey(t *testing.T) {
+	h := provisioned(t, &Handler{Name: "site", Mode: "enforce", Secrets: []string{strings.Repeat("k", 32)}})
+	fp := strings.Repeat("a", 64)
+	for body, want := range map[string]int{
+		`{"fingerprint":"` + fp + `"}`:                    http.StatusOK,
+		`{"Fingerprint":"` + fp + `"}`:                    http.StatusForbidden,
+		`{"fingerprint":"` + fp + `","Fingerprint":null}`: http.StatusOK,
+		`{"fingerprint":null,"fingerprint":"` + fp + `"}`: http.StatusOK,
+		`{"fingerprint":"` + fp + `","fingerprint":null}`: http.StatusForbidden,
+		`{"fingerprint":1}`:                               http.StatusForbidden,
+	} {
+		r := request(http.MethodPost, "/api/auth/token", "203.0.113.7")
+		r.Body = io.NopCloser(strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		if err := h.issue(w, r, "203.0.113.7"); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != want {
+			t.Errorf("%s: got %d, want %d", body, w.Code, want)
 		}
 	}
 }
