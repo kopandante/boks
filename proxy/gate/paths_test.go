@@ -242,8 +242,8 @@ func TestUncleanPaths(t *testing.T) {
 		status int
 	}{
 		{"/api/admin/../encar/catalog", 401},
-		{"/api/admin/%2e%2e/encar/catalog", 401},
-		{"/api/admin/%2E%2E/encar/catalog", 401},
+		{"/api/admin/%2e%2e/encar/catalog", 400},
+		{"/api/admin/%2E%2E/encar/catalog", 400},
 		{"/api/admin/..%2fencar/catalog", 400},
 		{"/api/admin/..%2Fencar/catalog", 400},
 		{"/api/admin/..%5cencar/catalog", 400},
@@ -273,6 +273,10 @@ func TestUncleanPaths(t *testing.T) {
 		// An escaped slash under /api/ is refused without a dot segment too.
 		{"/api/auth%2Ftoken", 400},
 		{"/api%2fencar/catalog", 400},
+		// An escaped letter under /api/: Go matches the exempt /api/admin/, Next.js a dynamic sibling.
+		{"/api/%61dmin/x", 400},
+		{"/api/adm%69n/x", 400},
+		{"/%61bout", 200},
 	}
 	for _, c := range cases {
 		// Parsed as the server parses a request's target: no reference resolution, no host in "//".
