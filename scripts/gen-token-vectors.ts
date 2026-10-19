@@ -152,7 +152,10 @@ const tokens: Token[] = [
 	{ name: "payload in the standard alphabet, signed", class: "stricter", token: signed(stdAlphabetPayload()) },
 ];
 
-type Req = { name: string; method: string; path: string; fingerprint?: string; via?: "header" | "cookie-empty" | "cookie+header"; headerToken?: string };
+type Req = { name: string; method: string; path: string; fingerprint?: string };
+// How the token comes: the cookie (no via), the header alone, the header behind an empty cookie, or the
+// cookie with another token in the header.
+type Delivery = { via?: "header" | "cookie-empty" | "cookie+header"; header?: string };
 const requests: Req[] = [
 	{ name: "GET with its fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP },
 	{ name: "GET with another fp", method: "GET", path: "/api/encar/catalog", fingerprint: FP2 },
@@ -174,19 +177,14 @@ const requests: Req[] = [
 
 const gate = createProxy({ api: { skipFingerprintPrefixes: ["/api/encar/pics"] } });
 
-async function site(token: string | undefined, req: Req, ip: string) {
+async function site(token: string | undefined, req: Req, ip: string, d: Delivery) {
 	const headers = new Headers({ host: "cars.example.com", "x-forwarded-for": ip });
 	if (req.fingerprint) headers.set("x-fingerprint", req.fingerprint);
 	let cookie: string | undefined = token;
-	if (req.via === "header") {
-		cookie = undefined;
-		if (token) headers.set("x-api-token", token);
-	} else if (req.via === "cookie-empty") {
-		cookie = "";
-		if (token) headers.set("x-api-token", token);
-	} else if (req.via === "cookie+header" && req.headerToken) {
-		headers.set("x-api-token", req.headerToken);
-	}
+	const header = d.via === "cookie+header" ? d.header : d.via ? token : undefined;
+	if (d.via === "header") cookie = undefined;
+	if (d.via === "cookie-empty") cookie = "";
+	if (header) headers.set("x-api-token", header);
 	const request = {
 		method: req.method,
 		headers,
@@ -203,41 +201,26 @@ async function site(token: string | undefined, req: Req, ip: string) {
 	}
 }
 
-const vectors = [];
+const vectors: object[] = [];
+// The proxy's column is the site's, but for the classes the plan lets it be stricter in.
+async function push(t: Token, req: Req, ip: string, d: Delivery = {}) {
+	const s = await site(t.token || undefined, req, ip, d);
+	const proxy = t.class === "no_ip" || t.class === "stricter" ? { status: 401, body: '{"error":"Access denied"}' } : s;
+	const name = `${t.name} / ${req.name}${d.via ? `, token by ${d.via}${d.via === "cookie+header" ? (d.header === fresh ? " (valid)" : " (bad)") : ""}` : ""}`;
+	vectors.push({ name, class: t.class, token: t.token, ...(d.via && { via: d.via }), ...(d.header && { header_token: d.header }), method: req.method, path: req.path, fingerprint: req.fingerprint ?? "", client_ip: ip, site: s, proxy });
+}
 for (const t of tokens) {
-	for (const req of requests) {
-		const ip = t.name.includes("ipv6") ? IPV6 : IP;
-		const s = await site(t.token, req, ip);
-		let proxy = s;
-		if (t.class === "no_ip" || t.class === "stricter") proxy = { status: 401, body: '{"error":"Access denied"}' };
-		vectors.push({ name: `${t.name} / ${req.name}`, class: t.class, token: t.token, method: req.method, path: req.path, fingerprint: req.fingerprint ?? "", client_ip: ip, site: s, proxy });
-	}
+	for (const req of requests) await push(t, req, t.name.includes("ipv6") ? IPV6 : IP);
 }
-// The token's way in: the X-Api-Token header, and an empty cookie that leaves it to the header — with
-// tokens that fail too, so a header token is checked, not just let through.
+// The delivery axis, on tokens that pass and that fail each check: a header token is checked, not
+// just let through, and the cookie decides over the header whatever the header holds.
 const viaTokens = tokens.filter((t) => ["fp+ip", "fp+ip signed with a stranger", "age ttl+1", "other address", "no fp, no ip (page token of a site)"].includes(t.name));
-for (const via of ["header", "cookie-empty"] as const) {
-	const req: Req = { name: `GET with its fp, token by ${via}`, method: "GET", path: "/api/encar/catalog", fingerprint: FP, via };
-	for (const t of viaTokens) {
-		const s = await site(t.token, req, IP);
-		const proxy = t.class === "no_ip" ? { status: 401, body: '{"error":"Access denied"}' } : s;
-		vectors.push({ name: `${t.name} / ${req.name}`, class: t.class, token: t.token, via, method: "GET", path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy });
-	}
+const strangerToken = viaTokens.find((t) => t.class === "signature")?.token ?? "";
+const deliveries: Delivery[] = [{ via: "header" }, { via: "cookie-empty" }, { via: "cookie+header", header: fresh }, { via: "cookie+header", header: strangerToken }];
+for (const d of deliveries) {
+	for (const t of viaTokens) await push(t, requests[0], IP, d);
 }
-// A cookie and the header both: the cookie decides, whatever the header holds.
-const stranger = viaTokens.find((t) => t.name === "fp+ip signed with a stranger");
-for (const [t, header] of [...viaTokens.filter((t) => t.token !== fresh).map((t) => [t, fresh] as const), [tokens[0], stranger?.token ?? ""] as const]) {
-	const req: Req = { name: `GET with its fp, cookie and header (${header === fresh ? "valid" : "bad"})`, method: "GET", path: "/api/encar/catalog", fingerprint: FP, via: "cookie+header", headerToken: header };
-	const s = await site(t.token, req, IP);
-	const proxy = t.class === "no_ip" ? { status: 401, body: '{"error":"Access denied"}' } : s;
-	vectors.push({ name: `${t.name} / ${req.name}`, class: t.class, token: t.token, via: req.via, header_token: header, method: "GET", path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy });
-}
-// No token at all.
-{
-	const req = requests[0];
-	const s = await site(undefined, req, IP);
-	vectors.push({ name: `no token / ${req.name}`, class: "garbage", token: "", method: req.method, path: req.path, fingerprint: FP, client_ip: IP, site: s, proxy: s });
-}
+await push({ name: "no token", class: "garbage", token: "" }, requests[0], IP);
 
 // One vector per line: the file stays reviewable as a diff without tripling its length.
 const head = JSON.stringify({ key_current: CURRENT, key_previous: PREVIOUS, now_ms: NOW, skip_fp: ["/api/encar/pics"] });
