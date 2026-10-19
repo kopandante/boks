@@ -41,7 +41,7 @@ boks (§5) и критерии готовности (§7 и «Новые AC») �
   - [x] 1a формат токена (`token.go`), векторы TS→Go (`scripts/gen-token-vectors.ts`, AC1), проверка токена → fp → ip
   - [x] 1b освобождения (е), `gated`, Bearer (R3), сырые пути (R7, AC12), ответы по таблице (г) (AC2)
   - [x] 1c выдача `POST /api/auth/token` (контракт R2)
-  - [ ] 1d подмена `Set-Cookie: x-api-token` и своя cookie (R1, S3, S4, T1), Flush/Unwrap
+  - [x] 1d подмена `Set-Cookie: x-api-token` и своя cookie (R1, S3, S4, T1), Flush/Unwrap
   - [ ] 1e log/enforce, XFF (S13/T3), журнал доступа (R11), `recover` (решение владельца 2)
 - [ ] 2. `proxy/Dockerfile`: `--with .../proxy/gate=/src/gate`, проверка `list-modules`; `proxy/TAG` → `…-ban8-gate1`;
   `DefaultProxyImage` (`config.go:32`) — новый digest.

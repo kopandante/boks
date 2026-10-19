@@ -145,8 +145,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		case d.verdict == "issue":
 			return h.issue(w, r, ip)
 		}
+		w = h.cookieWriter(w, r, ip)
 	}
 	return next.ServeHTTP(w, r)
+}
+
+// cookieWriter is w fixing the token's cookie of the response (cookie.go). Whether the proxy sets its
+// own is decided by the request, before it goes on: a page without a valid token of this address, the
+// fingerprint kept from the token it brings when the group's secret signed it.
+func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string) http.ResponseWriter {
+	own, ownFP := false, ""
+	if pageRequest(r, path.Clean(r.URL.Path)) {
+		own = true
+		if pl, reason := h.verify(requestToken(r), h.now()); reason == "" {
+			own, ownFP = pl.ip != ip, pl.fp
+		}
+	}
+	return &cookieWriter{ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
+		fix: func(hdr http.Header) { h.cookies(hdr, r, ip, own, ownFP) }}
+}
+
+// requestToken is the token a request brings: the cookie, or the header when the cookie is missing or
+// empty, as request-gate reads it.
+func requestToken(r *http.Request) string {
+	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return r.Header.Get(tokenHeader)
 }
 
 // decide is the API gate of request-gate.ts (apiGate), on the cleaned path, as Caddy's path matcher and
@@ -178,13 +203,7 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 	if h.bearer != nil && h.bearer.admits(r, p) {
 		return allow("bearer")
 	}
-	tok := ""
-	if c, err := r.Cookie(cookieName); err == nil {
-		tok = c.Value
-	}
-	if tok == "" {
-		tok = r.Header.Get(tokenHeader)
-	}
+	tok := requestToken(r)
 	if tok == "" {
 		return deny("no_token", accessDenied)
 	}
