@@ -500,4 +500,20 @@ func TestCheckHostsSeesTheGate(t *testing.T) {
 	if err := CheckHosts(p, shopAndBlog, "img", []Route{{Host: "img.example.com", Dial: "img:1", TLS: true}}); err != nil {
 		t.Errorf("a host of its own: %v", err)
 	}
+	// A group that is off has no route, so its app's host is no gate's to keep.
+	if err := CheckHosts(p, shopAndBlog, "img", []Route{{Host: "blog.example.com", Path: "/img", Dial: "img:1", TLS: true}}); err != nil {
+		t.Errorf("a path beside an app whose group is off: %v", err)
+	}
+}
+
+// A group whose app has no routes on the server gates nothing — a typo, or a group meant for another
+// server: refused before anything changes.
+func TestCheckGateRefusesAGroupWithoutRoutes(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "blog", shopAndBlog[0].Routes); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckGate(context.Background(), d, gated()); err == nil || !strings.Contains(err.Error(), "shop has no routes") {
+		t.Errorf("want the group without routes refused, got %v", err)
+	}
 }
