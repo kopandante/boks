@@ -221,13 +221,15 @@ func TestBearer(t *testing.T) {
 			t.Errorf("%s: %d, want %d", c.name, w.Code, c.status)
 		}
 	}
-	// A POST with a valid Bearer still passes with a valid token: the Bearer only adds a way in.
-	r := request("POST", "/api/encar/catalog", visitor)
-	r.Header.Set("Authorization", "Bearer "+partner)
-	r.Header.Set(fpHeader, fp)
-	r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, visitor)})
-	if w := serve(t, h, r); w.Code != 200 {
-		t.Errorf("POST with Bearer and a token: %d", w.Code)
+	// A Bearer that does not let a request in leaves it to the token: the Bearer only adds a way in.
+	for method, bearer := range map[string]string{"POST": partner, "GET": strings.Repeat("q", 40)} {
+		r := request(method, "/api/encar/catalog", visitor)
+		r.Header.Set("Authorization", "Bearer "+bearer)
+		r.Header.Set(fpHeader, fp)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, visitor)})
+		if w := serve(t, h, r); w.Code != 200 {
+			t.Errorf("%s with a Bearer that does not pass and a token: %d", method, w.Code)
+		}
 	}
 }
 
