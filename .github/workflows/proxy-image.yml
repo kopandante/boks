@@ -27,9 +27,10 @@ permissions:
   contents: read
   packages: write
 
-# Two runs of one ref must not both see a tag as absent and both push it.
+# Two runs must not both see a tag as absent and both push it. main (base tag, retag) is one group; any
+# other ref writes <TAG>-<sha7>, so its runs are grouped by commit — two branches at one sha share a lock.
 concurrency:
-  group: proxy-image-${{ github.ref }}
+  group: proxy-image-${{ github.ref == 'refs/heads/main' && 'main' || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -99,7 +100,8 @@ jobs:
           [[ $TAG =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "bad tag: $TAG" >&2; exit 1; }
           [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "bad digest: $DIGEST" >&2; exit 1; }
           before=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$REPO:$TAG" 2>/dev/null || echo none)
-          docker buildx imagetools create -t "$REPO:$TAG" "$REPO@$DIGEST"
+          # --prefer-index=false copies the source as is: a platform manifest stays one, same digest.
+          docker buildx imagetools create --prefer-index=false -t "$REPO:$TAG" "$REPO@$DIGEST"
           after=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$REPO:$TAG")
           [ "$after" = "$DIGEST" ] || { echo "$REPO:$TAG is $after, not $DIGEST" >&2; exit 1; }
           echo "$REPO:$TAG: $before -> $after" >> "$GITHUB_STEP_SUMMARY"
