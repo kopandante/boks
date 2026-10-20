@@ -17,6 +17,7 @@ import (
 )
 
 // tokenTTL is api-token.ts's TOKEN_TTL_MS: a token of that age still passes, a millisecond older not.
+// A group whose site checks no token itself may set its own (Handler.TokenTTL).
 const tokenTTL = 3 * time.Minute
 
 // payload is what the gate reads of a token. fp and ip are empty when the token has none, and also
@@ -24,6 +25,8 @@ const tokenTTL = 3 * time.Minute
 // then compares neither.
 type payload struct {
 	fp, ip string
+	// iat is when the token was issued, in milliseconds.
+	iat float64
 }
 
 // claims is the payload as the proxy writes it, in createApiToken's order.
@@ -89,7 +92,7 @@ func (h *Handler) verify(tok string, now time.Time) (payload, string) {
 	if v, ok := fields["iat"]; !ok || string(v) == "null" || json.Unmarshal(v, &iat) != nil {
 		return payload{}, "bad_payload"
 	}
-	var p payload
+	p := payload{iat: iat}
 	var nonce string
 	if v, ok := fields["nonce"]; ok && string(v) != "null" && json.Unmarshal(v, &nonce) == nil {
 		for name, dst := range map[string]*string{"fp": &p.fp, "ip": &p.ip} {
@@ -103,7 +106,7 @@ func (h *Handler) verify(tok string, now time.Time) (payload, string) {
 			}
 		}
 	}
-	if age := float64(now.UnixMilli()) - iat; age < 0 || age > float64(tokenTTL.Milliseconds()) {
+	if age := float64(now.UnixMilli()) - iat; age < 0 || age > float64(h.ttl().Milliseconds()) {
 		return p, "expired"
 	}
 	return p, ""

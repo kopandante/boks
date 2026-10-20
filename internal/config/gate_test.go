@@ -83,6 +83,11 @@ func TestParseServerGateRejects(t *testing.T) {
 		"revision: required":                       "servers: [a]\ngate:\n  groups:\n    - " + ok + "}\n",
 		"the name is used twice":                   "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + ok + "}\n    - {name: a, app: b, mode: log, secret_env: B}\n",
 		"in two groups":                            "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + ok + "}\n    - {name: b, app: a, mode: log, secret_env: B}\n",
+		"token_ttl goes with site_gate off":        group(ok + ", token_ttl: 12h}"),
+		`token_ttl "soon": a duration`:             group("{name: a, app: a, mode: enforce, site_gate: off, secret_env: A_SECRET, token_ttl: soon}"),
+		"token_ttl 1m0s must be from":              group("{name: a, app: a, mode: enforce, site_gate: off, secret_env: A_SECRET, token_ttl: 1m}"),
+		"token_ttl 48h0m0s must be from":           group("{name: a, app: a, mode: enforce, site_gate: off, secret_env: A_SECRET, token_ttl: 48h}"),
+		"token_ttl: a string; quote it":            group("{name: a, app: a, mode: enforce, site_gate: off, secret_env: A_SECRET, token_ttl: 3600}"),
 	}
 	for want, file := range cases {
 		_, err := ParseServer([]byte(file))
@@ -169,5 +174,16 @@ func TestGateSecretsRefuseHalfAPairAndKeepDigestsOut(t *testing.T) {
 		if _, err := s.Gate.Secrets(); err == nil || !strings.Contains(err.Error(), "entry 1") {
 			t.Errorf("want a digest in capitals refused, got %v", err)
 		}
+	}
+}
+
+// token_ttl of a site that checks nothing itself goes to the handler as written.
+func TestParseServerGateTokenTTL(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [a]\nrevision: 1\ngate:\n  groups:\n    - {name: e, app: e, mode: enforce, site_gate: off, secret_env: E_SECRET, skip_fp: [/api/], token_ttl: 12h}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Gate.Groups[0].TokenTTL != "12h" || !strings.Contains(string(s.Gate.JSON), `"token_ttl":"12h"`) {
+		t.Errorf("%+v %s", s.Gate.Groups[0], s.Gate.JSON)
 	}
 }
