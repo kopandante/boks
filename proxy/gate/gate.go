@@ -32,6 +32,8 @@ const (
 	tokenHeader = "X-Api-Token"
 	fpHeader    = "X-Fingerprint"
 	minSecret   = 32
+	// maxTokenTTL bounds a group's token_ttl: the token stays a proof of a visit from the address, not a key.
+	maxTokenTTL = 24 * time.Hour
 )
 
 // Handler is http.handlers.boks_gate, one group of the policy.
@@ -60,6 +62,12 @@ type Handler struct {
 	Gated []string `json:"gated,omitempty"`
 	// Bearer lets a partner's server read without the browser's token (glavdoroga).
 	Bearer *Bearer `json:"bearer,omitempty"`
+	// TokenTTL is how long a token of this group lives, for a site that checks no token itself and whose
+	// page renews none — the proxy alone issues it (encarexport): three minutes unless set, from three
+	// minutes to a day, only with site_gate off, as a site still checking would refuse a token past its
+	// own three. Set, the proxy also renews the token on the responses of the visitor's requests — a page
+	// or the API — once half of it is spent, so a visitor scrolling a catalog keeps a valid one.
+	TokenTTL caddy.Duration `json:"token_ttl,omitempty"`
 
 	exempt []exemptRule
 	bearer *bearer
@@ -104,6 +112,10 @@ func (h *Handler) Validate() error {
 		return fmt.Errorf("site_gate %q must be on or off", h.SiteGate)
 	case h.SiteGate == "off" && h.Mode != "enforce":
 		return errors.New("site_gate off goes with mode enforce: with the site's own check gone, only the proxy's stands")
+	case h.TokenTTL != 0 && (time.Duration(h.TokenTTL) < tokenTTL || time.Duration(h.TokenTTL) > maxTokenTTL):
+		return fmt.Errorf("token_ttl %s must be from %s to %s", time.Duration(h.TokenTTL), tokenTTL, maxTokenTTL)
+	case h.TokenTTL != 0 && h.SiteGate != "off":
+		return errors.New("token_ttl goes with site_gate off: a site that checks the token itself refuses one past its three minutes")
 	case len(h.Secrets) == 0 || len(h.Secrets) > 2:
 		return fmt.Errorf("secrets: %d of them; the current one, and the previous one while it is rotated out", len(h.Secrets))
 	}
@@ -238,10 +250,15 @@ func setField(r *http.Request, f zap.Field) {
 // fingerprint kept from the token it brings when the group's secret signed it.
 func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string) http.ResponseWriter {
 	own, reqFP := false, ""
-	if pageRequest(r, path.Clean(r.URL.Path)) {
+	if p := path.Clean(r.URL.Path); pageRequest(r, p) {
 		pl, reason := h.verify(requestToken(r), h.now())
-		own = reason != "" || pl.ip != ip
+		own = reason != "" || pl.ip != ip || h.halfSpent(pl)
 		reqFP = signedFP(pl, reason)
+	} else if h.TokenTTL != 0 && strings.HasPrefix(p, "/api/") {
+		// A request decide let through with a token: renewed once half spent, as nothing else renews it.
+		if pl, reason := h.verify(requestToken(r), h.now()); reason == "" && pl.ip == ip && h.halfSpent(pl) {
+			own, reqFP = true, pl.fp
+		}
 	}
 	return &cookieWriter{ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w},
 		fix: func(hdr http.Header) {
@@ -253,6 +270,20 @@ func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string
 				h.cookies(hdr, r, ip, own, reqFP)
 			})
 		}}
+}
+
+// ttl is how long the group's token lives.
+func (h *Handler) ttl() time.Duration {
+	if h.TokenTTL != 0 {
+		return time.Duration(h.TokenTTL)
+	}
+	return tokenTTL
+}
+
+// halfSpent says whether a valid token of a group with its own lifetime is past half of it: the proxy
+// renews it then. Never for a group without token_ttl — its sites renew their own.
+func (h *Handler) halfSpent(pl payload) bool {
+	return h.TokenTTL != 0 && float64(h.now().UnixMilli())-pl.iat > float64(h.ttl().Milliseconds())/2
 }
 
 // signedFP is the fingerprint of a token the group's secret signed, expired or not: a renewal keeps it.

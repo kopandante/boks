@@ -15,6 +15,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -45,7 +46,16 @@ type GateGroup struct {
 		// DigestsEnv names the variable holding the hex SHA-256 of the partners' tokens, comma-separated.
 		DigestsEnv string `yaml:"digests_env"`
 	} `yaml:"bearer"`
+	// TokenTTL is the group's token lifetime, a Go duration, for a site that checks no token itself
+	// (proxy/gate Handler.TokenTTL): with site_gate off only, from MinTokenTTL to MaxTokenTTL.
+	TokenTTL string `yaml:"token_ttl"`
 }
+
+// MinTokenTTL and MaxTokenTTL bound a group's token_ttl: the sites' own three minutes, and a day.
+const (
+	MinTokenTTL = 3 * time.Minute
+	MaxTokenTTL = 24 * time.Hour
+)
 
 // gateWritten are the keys of a group boks writes itself into the handler, which server.yml must not:
 // a secret in the file would be in the repository and the policy's history.
@@ -112,7 +122,7 @@ func (g *Gate) UnmarshalYAML(n *yaml.Node) error {
 		}
 		// What boks reads is a string to the handler too: `app: 2048` unquoted is a number in the JSON
 		// the handler decodes, and a string in the YAML boks checks.
-		for _, k := range []string{"name", "app", "mode", "site_gate", "secret_env"} {
+		for _, k := range []string{"name", "app", "mode", "site_gate", "secret_env", "token_ttl"} {
 			if v, set := m[k]; set {
 				if _, ok := v.(string); !ok {
 					return fmt.Errorf("gate.groups[%d]: %s: a string; quote it", i, k)
@@ -189,6 +199,17 @@ func (g *Gate) validate() error {
 			return fmt.Errorf("groups[%s]: secret_env %q must name an environment variable (%s)", gr.Name, gr.SecretEnv, envNameRe)
 		case gr.Bearer != nil && !envNameRe.MatchString(gr.Bearer.DigestsEnv):
 			return fmt.Errorf("groups[%s]: bearer.digests_env %q must name an environment variable (%s)", gr.Name, gr.Bearer.DigestsEnv, envNameRe)
+		}
+		if gr.TokenTTL != "" {
+			d, err := time.ParseDuration(gr.TokenTTL)
+			switch {
+			case err != nil:
+				return fmt.Errorf("groups[%s]: token_ttl %q: a duration such as 12h", gr.Name, gr.TokenTTL)
+			case d < MinTokenTTL || d > MaxTokenTTL:
+				return fmt.Errorf("groups[%s]: token_ttl %s must be from %s to %s", gr.Name, d, MinTokenTTL, MaxTokenTTL)
+			case gr.SiteGate != "off":
+				return fmt.Errorf("groups[%s]: token_ttl goes with site_gate off: a site that checks the token itself refuses one past its three minutes", gr.Name)
+			}
 		}
 	}
 	// One variable, one role: the secrets are kept by name, so a name that is a group's current secret

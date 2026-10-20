@@ -44,10 +44,11 @@ func (h *Handler) issue(w http.ResponseWriter, r *http.Request, ip string) error
 }
 
 // cookie is the token's cookie as the sites set it: readable by the page's script (the client sends it
-// back as a header too), strict, for three minutes, Secure when the visitor came by HTTPS.
+// back as a header too), strict, for the token's lifetime — three minutes unless the group set its own —,
+// Secure when the visitor came by HTTPS.
 func (h *Handler) cookie(tok string, r *http.Request) *http.Cookie {
-	return &http.Cookie{Name: cookieName, Value: tok, Path: "/", MaxAge: int(tokenTTL / time.Second),
-		Expires: h.now().Add(tokenTTL), Secure: https(r), SameSite: http.SameSiteStrictMode}
+	return &http.Cookie{Name: cookieName, Value: tok, Path: "/", MaxAge: int(h.ttl() / time.Second),
+		Expires: h.now().Add(h.ttl()), Secure: https(r), SameSite: http.SameSiteStrictMode}
 }
 
 // https says whether the visitor came by HTTPS: to this server, or to a trusted proxy in front of it
