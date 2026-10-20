@@ -1,20 +1,41 @@
-# Builds the proxy image (proxy/Dockerfile) for amd64 and arm64 and pushes it to GHCR under the tag in
-# proxy/TAG, on any push that changes proxy/ — the branch's own copy of this file runs, so the image is
-# there before the change that pins it is merged. The digest it prints goes into
-# config.DefaultProxyImage: a server only ever runs an image pinned in a reviewed commit.
+# Builds the proxy image (proxy/Dockerfile) for amd64 and arm64 and pushes it to GHCR on any push that
+# changes proxy/. The digest it prints goes into config.DefaultProxyImage: a server only ever runs an
+# image pinned in a reviewed commit.
+#
+# No build ever moves an existing tag. The tag in proxy/TAG is written only from main and only while it
+# does not exist yet; every other build — a branch, or main with proxy/TAG left unbumped — pushes
+# <TAG>-<sha7> instead, and skips the push when that tag exists too. Branch images are still there to
+# test before merge, under their own tag.
+#
+# workflow_dispatch with retag_tag and retag_digest (from main only) points a tag at an image already in
+# the repository — the one repair for a tag that was moved, e.g. back to the digest a pin names.
 name: proxy image
 
 on:
   push:
     paths: [proxy/**, .github/workflows/proxy-image.yml]
   workflow_dispatch:
+    inputs:
+      retag_tag:
+        description: "Tag to point at retag_digest (leave both empty to build)"
+        required: false
+      retag_digest:
+        description: "sha256:… of an image already in boks-caddy"
+        required: false
 
 permissions:
   contents: read
   packages: write
 
+# Two runs must not both see a tag as absent and both push it. main (base tag, retag) is one group; any
+# other ref writes <TAG>-<sha7>, so its runs are grouped by commit — two branches at one sha share a lock.
+concurrency:
+  group: proxy-image-${{ github.ref == 'refs/heads/main' && 'main' || github.sha }}
+  cancel-in-progress: false
+
 jobs:
   build:
+    if: github.event_name == 'push' || (inputs.retag_tag == '' && inputs.retag_digest == '')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -26,12 +47,61 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: tag
-        run: echo "tag=$(cat proxy/TAG)" >> "$GITHUB_OUTPUT"
+        env:
+          REPO: ghcr.io/${{ github.repository_owner }}/boks-caddy
+          ON_MAIN: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          # exists TAG: 0 if REPO:TAG exists, 1 if the registry says not found, and the job fails on
+          # any other error — an unreadable registry must not read as "free to push".
+          exists() {
+            local out
+            if out=$(docker buildx imagetools inspect "$REPO:$1" 2>&1); then return 0; fi
+            if grep -q ': not found$' <<<"$out"; then return 1; fi
+            echo "$out" >&2
+            exit 1
+          }
+          base=$(cat proxy/TAG)
+          tag="$base-${GITHUB_SHA::7}"
+          if [ "$ON_MAIN" = true ] && ! exists "$base"; then tag=$base; fi
+          if exists "$tag"; then
+            echo "$REPO:$tag exists — not pushed again" >> "$GITHUB_STEP_SUMMARY"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - id: build
+        if: steps.tag.outputs.push == 'true'
         uses: docker/build-push-action@v6
         with:
           context: proxy
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/boks-caddy:${{ steps.tag.outputs.tag }}
-      - run: echo "ghcr.io/${{ github.repository_owner }}/boks-caddy:${{ steps.tag.outputs.tag }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.tag.outputs.push == 'true'
+        run: echo "ghcr.io/${{ github.repository_owner }}/boks-caddy:${{ steps.tag.outputs.tag }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+
+  retag:
+    if: github.event_name == 'workflow_dispatch' && (inputs.retag_tag != '' || inputs.retag_digest != '')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - env:
+          REPO: ghcr.io/${{ github.repository_owner }}/boks-caddy
+          TAG: ${{ inputs.retag_tag }}
+          DIGEST: ${{ inputs.retag_digest }}
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "retag runs from main only" >&2; exit 1; }
+          [[ $TAG =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "bad tag: $TAG" >&2; exit 1; }
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "bad digest: $DIGEST" >&2; exit 1; }
+          before=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$REPO:$TAG" 2>/dev/null || echo none)
+          # --prefer-index=false copies the source as is: a platform manifest stays one, same digest.
+          docker buildx imagetools create --prefer-index=false -t "$REPO:$TAG" "$REPO@$DIGEST"
+          after=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$REPO:$TAG")
+          [ "$after" = "$DIGEST" ] || { echo "$REPO:$TAG is $after, not $DIGEST" >&2; exit 1; }
+          echo "$REPO:$TAG: $before -> $after" >> "$GITHUB_STEP_SUMMARY"
