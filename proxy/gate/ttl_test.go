@@ -133,3 +133,28 @@ func TestTokenTTLRenewal(t *testing.T) {
 		}
 	}
 }
+
+// A tab left longer than the lifetime: its first API request is refused, the reload of the page sets a
+// new cookie, and the API passes again with it — a visitor gets a 401 only without reloading.
+func TestTokenTTLAfterIdle(t *testing.T) {
+	now := time.Now()
+	h := ownTTL(t, now)
+	stale := issuedAgo(h, now, 13*time.Hour, fp, visitor)
+	api := func(tok string) int {
+		r := request("GET", "/api/encar/catalog", visitor)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: tok})
+		return through(t, h, r, site(200)).Code
+	}
+	if code := api(stale); code != http.StatusUnauthorized {
+		t.Fatalf("API with the stale token: %d, want 401", code)
+	}
+	r := request("GET", "/cars", visitor)
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: stale})
+	got := tokenCookies(through(t, h, r, site(200)))
+	if len(got) != 1 {
+		t.Fatalf("reload: %v, want a new cookie", got)
+	}
+	if code := api(valueOf(got[0])); code != http.StatusOK {
+		t.Errorf("API after the reload: %d, want 200", code)
+	}
+}
