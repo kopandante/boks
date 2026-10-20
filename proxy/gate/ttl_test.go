@@ -54,6 +54,13 @@ func TestTokenTTLVerify(t *testing.T) {
 	if _, reason := own.verify(issuedAgo(own, now, 13*time.Hour, fp, visitor), now); reason != "expired" {
 		t.Errorf("13h old under 12h: %q, want expired", reason)
 	}
+	// The boundary as api-token.ts draws it: exactly the lifetime passes, a millisecond more not.
+	if _, reason := own.verify(issuedAgo(own, now, 12*time.Hour, fp, visitor), now); reason != "" {
+		t.Errorf("exactly 12h: %q", reason)
+	}
+	if _, reason := own.verify(issuedAgo(own, now, 12*time.Hour+time.Millisecond, fp, visitor), now); reason != "expired" {
+		t.Errorf("12h and 1ms: %q, want expired", reason)
+	}
 	plain := enforcing(t, &Handler{}, now)
 	if _, reason := plain.verify(issuedAgo(plain, now, 4*time.Minute, fp, visitor), now); reason != "expired" {
 		t.Errorf("4m old without token_ttl: %q, want expired", reason)
@@ -66,7 +73,7 @@ func TestTokenTTLCookie(t *testing.T) {
 	h := ownTTL(t, now)
 	w := through(t, h, request("GET", "/cars", visitor), site(200))
 	cs := w.Result().Cookies()
-	if len(cs) != 1 || cs[0].MaxAge != int((12*time.Hour)/time.Second) {
+	if len(cs) != 1 || cs[0].MaxAge != int((12*time.Hour)/time.Second) || !cs[0].Expires.Equal(now.Add(12*time.Hour).Truncate(time.Second)) {
 		t.Fatalf("%v", tokenCookies(w))
 	}
 	if pl, reason := h.verify(cs[0].Value, now); reason != "" || pl.ip != visitor {
@@ -93,6 +100,8 @@ func TestTokenTTLRenewal(t *testing.T) {
 		{"api, 7h of 12h", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 7*time.Hour, fp, visitor), 200, true},
 		{"api POST, 7h of 12h", own, "POST", "/api/contact", issuedAgo(own, now, 7*time.Hour, fp, visitor), 200, true},
 		{"api picture, 7h of 12h", own, "GET", "/api/encar/pics/1.jpg", issuedAgo(own, now, 7*time.Hour, "", visitor), 200, true},
+		{"api, exactly half", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 6*time.Hour, fp, visitor), 200, false},
+		{"api, half and 1ms", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 6*time.Hour+time.Millisecond, fp, visitor), 200, true},
 		{"api, 1h of 12h", own, "GET", "/api/encar/catalog", issuedAgo(own, now, time.Hour, fp, visitor), 200, false},
 		{"api, token of another address", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 7*time.Hour, fp, "198.51.100.9"), 403, false},
 		{"api, expired", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 13*time.Hour, fp, visitor), 401, false},
