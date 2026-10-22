@@ -33,10 +33,10 @@ Base: 8260f05 | Branch: feat/ban-deny-ranges
 - [x] 2 реализация
 - [x] 3 PR (#116)
 - [x] 4 review-loop green (agent-only, codex в лимите)
-- [ ] 5 merge, образ, DefaultProxyImage по digest
-- [ ] 6 выкатка образа: hb-sites, hb-shchr, hb-poolapi
-- [ ] 7 пин boks по флоту (формат 9), PR политики hb-sites, apply
-- [ ] 8 проверка в журнале, удаление `inet filter blockpre`
+- [x] 5 merge (#116 18e7a21), образ ban9, DefaultProxyImage по digest (#117 13ebf73)
+- [x] 6 выкатка образа: hb-shchr, hb-sites, hb-poolapi (22.10 19:21–19:36 KST)
+- [x] 7 пин boks по флоту (22 PR), backends#732 ревизия 33, apply 22.10 20:36 KST
+- [x] 8 nft-блок снят (backends#734, точечно на узле); n8n в 21:01 не пришёл — проверено синтетикой на образе ban9 (403, `address denied`)
 
 ### Task 1: config
 - [x] `Ban.DenyRanges`, `DenyPrefixes`, проверки + тесты; `policyOf`.

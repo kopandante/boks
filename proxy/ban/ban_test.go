@@ -713,8 +713,8 @@ func TestADeniedAddressIsRefusedFirst(t *testing.T) {
 	}
 }
 
-// The denied address is the client Caddy decided past the trusted proxies, as the ban's: hb-edge or
-// Docker's bridge in front of the client is not denied for it, and without the variable the
+// The denied address is the client Caddy decided past the trusted proxies, as the ban's: a trusted
+// proxy or Docker's bridge in front of the client is not denied for it, and without the variable the
 // connection's address is judged.
 func TestDenyJudgesTheClientAddress(t *testing.T) {
 	fixture(t)
