@@ -6,6 +6,9 @@
 # changes under a moving tag changes every app's routing. boks's handlers are built from this directory,
 # the build's context, so the image carries the code of the commit it was built from.
 FROM caddy:2.11.7-builder-alpine AS build
+# The builder tag carries the Go it was published with (1.27.2 on 2026-10-20); GOTOOLCHAIN pins the
+# compiler to a release with the crypto/x509 fix GO-2026-6809, fetched and checksum-verified by go.
+ENV GOTOOLCHAIN=go1.27.3
 COPY ban /src/ban
 COPY gate /src/gate
 RUN xcaddy build v2.11.7 --with github.com/caddyserver/forwardproxy@0aab84dad4fc2830789f34e27b4d7bc22a40889e \
