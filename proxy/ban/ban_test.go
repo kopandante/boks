@@ -685,6 +685,9 @@ func TestADeniedAddressIsRefusedFirst(t *testing.T) {
 	if n := shared.len(); n != 0 {
 		t.Errorf("want a denied request counted by no rule, %d addresses tracked", n)
 	}
+	if n, forged := len(shared.prints), logs.FilterMessage("forged request").Len(); n != 0 || forged != 0 {
+		t.Errorf("want a denied forged request kept from the heuristics: %d fingerprints, %d lines", n, forged)
+	}
 	lines := func() map[string]int {
 		out := map[string]int{}
 		for _, e := range logs.FilterMessage("address denied").All() {
