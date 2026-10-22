@@ -243,7 +243,8 @@ func TestGoogleRanges(t *testing.T) {
 }
 
 // alpn asks only a TLS connection: a browser on a plain-HTTP gated host passes it. fp of a request
-// without a valid token is the header alone: the token's refusal speaks for the token.
+// without a valid token is the header alone: the token's refusal speaks for the token. Off skip_fp
+// paths Fetch Metadata asks all three headers: same-origin with a navigation's mode or dest fails.
 func TestChecksEdges(t *testing.T) {
 	h := enforcing(t, &Handler{Checks: &Checks{FP: "enforce", ALPN: "enforce"}}, time.Now())
 	r, extra := withLog(client{ua: chromeUA, fpHeader: true, tokenFP: true}.request(h, "GET", "/api/encar/catalog"))
@@ -256,5 +257,13 @@ func TestChecksEdges(t *testing.T) {
 	w := serve(t, h, r)
 	if got := fields(extra); w.Code != 401 || got["gate_reason"] != "no_token" || got["gate_shadow"] != nil {
 		t.Errorf("the header without a token: %d %v", w.Code, got)
+	}
+	fm := enforcing(t, &Handler{Checks: &Checks{FetchMeta: "enforce"}}, time.Now())
+	for hdr, v := range map[string]string{"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"} {
+		r, extra := withLog(client{ua: chromeUA, fetchMeta: true, h2: true}.request(fm, "GET", "/api/encar/catalog"))
+		r.Header.Set(hdr, v)
+		if w := serve(t, fm, r); w.Code != 403 || fields(extra)["gate_reason"] != "check_fetch_meta" {
+			t.Errorf("%s %s: %d %v", hdr, v, w.Code, fields(extra))
+		}
 	}
 }
