@@ -4,7 +4,8 @@ package gate
 // https://developers.google.com/static/crawling/ipranges/ (the old search/apis/ipranges/ URLs redirect
 // there): common-crawlers.json — Googlebot — and user-triggered-fetchers-google.json — Google's own
 // fetchers a user asks for, Read Aloud among them. An address in them passes fetch_meta and alpn: by
-// the address Google publishes, never by a User-Agent anyone can write. The lists change rarely; a new
+// the address Google publishes, never by a User-Agent anyone can write. The files are Google's JSON
+// compacted to one line (`curl -sL <url> | jq -c .`), the same data. The lists change rarely; a new
 // download is a new image.
 
 import (
