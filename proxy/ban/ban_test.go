@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -654,5 +655,103 @@ func TestARuleOfAClassAndPaths(t *testing.T) {
 		if got := shared.counters(ip.String()); !maps.Equal(got, c.want) {
 			t.Errorf("%s %s %v: want %v, got %v", c.r.Method, c.r.URL.Path, c.r.Header, c.want, got)
 		}
+	}
+}
+
+// A denied address gets 403 before anything else is asked of its request: an exempt range, a private
+// one, Next.js's files and the heuristics give way, and nothing is counted. The journal has one line
+// for the address in each duration, however many requests it sends; another address of the range has
+// a line of its own.
+func TestADeniedAddressIsRefusedFirst(t *testing.T) {
+	c := fixture(t)
+	h, logs := provisioned(t, `{"limit": 100, "window": "1m", "duration": "1h", "heuristics": {"mode": "ban", "cluster": {"limit": 1, "window": "1m", "min_addresses": 2}},
+		"exempt_ranges": ["89.167.100.0/24"], "deny_ranges": ["89.167.100.21/32", "10.9.0.0/16", "2001:db8::/32"]}`)
+	for _, r := range []*http.Request{
+		request("89.167.100.21", "/api/encar/inspection/1", "User-Agent", "n8n"),
+		request("89.167.100.21", "/_next/static/chunks/main.js"),
+		request("89.167.100.21", "/x.css", "Sec-Fetch-Dest", "style"),
+		request("89.167.100.21", "/api/encar/nav", "Sec-Fetch-Mode", "cors"),
+		request("10.9.1.1", "/"),
+		request("2001:db8::7", "/"),
+		request("::ffff:89.167.100.21", "/"),
+	} {
+		if code := serve(t, h, r); code != 403 {
+			t.Errorf("%s %s: want 403, got %d", r.Context().Value(caddyhttp.VarsCtxKey), r.URL.Path, code)
+		}
+	}
+	if code := serve(t, h, request("89.167.100.22", "/")); code != 200 {
+		t.Errorf("an address beside the denied one: %d", code)
+	}
+	if n := shared.len(); n != 0 {
+		t.Errorf("want a denied request counted by no rule, %d addresses tracked", n)
+	}
+	lines := func() map[string]int {
+		out := map[string]int{}
+		for _, e := range logs.FilterMessage("address denied").All() {
+			out[e.ContextMap()["ip"].(string)]++
+		}
+		return out
+	}
+	if got, want := lines(), map[string]int{"89.167.100.21": 1, "10.9.1.1": 1, "2001:db8::7": 1}; !maps.Equal(got, want) {
+		t.Errorf("want a line per address: %v", got)
+	}
+	e := logs.FilterMessage("address denied").All()[0]
+	if m := e.ContextMap(); m["range"] != "89.167.100.21/32" || m["host"] != "cars.dbauto.kr" || m["user_agent"] != "n8n" {
+		t.Errorf("want the range, the host and the user agent in the line: %v", m)
+	}
+	c.add(59 * time.Minute)
+	serve(t, h, request("89.167.100.21", "/"))
+	if n := lines()["89.167.100.21"]; n != 1 {
+		t.Errorf("within the duration: want no second line, %d", n)
+	}
+	c.add(time.Minute)
+	if code := serve(t, h, request("89.167.100.21", "/")); code != 403 || lines()["89.167.100.21"] != 2 {
+		t.Errorf("after the duration: want 403 and a second line, got %d, %d lines", code, lines()["89.167.100.21"])
+	}
+}
+
+// The denied address is the client Caddy decided past the trusted proxies, as the ban's: hb-edge or
+// Docker's bridge in front of the client is not denied for it, and without the variable the
+// connection's address is judged.
+func TestDenyJudgesTheClientAddress(t *testing.T) {
+	fixture(t)
+	h, _ := provisioned(t, `{"limit": 100, "window": "1m", "duration": "1h", "deny_ranges": ["172.18.0.0/16", "198.51.100.8/32"]}`)
+	if code := serve(t, h, request("198.51.100.7", "/")); code != 200 {
+		t.Errorf("a client behind a denied connection: %d", code)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "198.51.100.8:5555"
+	if code := serve(t, h, r); code != 403 {
+		t.Errorf("want the connection's address without the variable: %d", code)
+	}
+}
+
+// The lines of denied addresses are tracked up to max_tracked: past it, a new address is refused
+// without a line, and the lines expire after the duration to make room.
+func TestDenyLinesAreBounded(t *testing.T) {
+	c := fixture(t)
+	h, logs := provisioned(t, `{"limit": 100, "window": "1m", "duration": "1h", "max_tracked": 2, "deny_ranges": ["198.51.100.0/24"]}`)
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"} {
+		if code := serve(t, h, request(ip, "/")); code != 403 {
+			t.Errorf("%s: %d", ip, code)
+		}
+	}
+	if n := logs.FilterMessage("address denied").Len(); n != 2 {
+		t.Errorf("want 2 lines at the bound, got %d", n)
+	}
+	c.add(time.Hour)
+	serve(t, h, request("198.51.100.3", "/"))
+	if n := logs.FilterMessage("address denied").Len(); n != 3 {
+		t.Errorf("want room made after the duration, got %d lines", n)
+	}
+}
+
+// A deny range that is not a CIDR range stops the config.
+func TestDenyRangesMustParse(t *testing.T) {
+	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+	defer cancel()
+	h := Handler{DenyRanges: []string{"89.167.100.21"}}
+	if err := h.Provision(ctx); err == nil || !strings.Contains(err.Error(), "deny_ranges") {
+		t.Errorf("want refused naming deny_ranges: %v", err)
 	}
 }

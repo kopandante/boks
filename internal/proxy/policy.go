@@ -64,6 +64,9 @@ type Ban struct {
 	ExemptPaths []string `json:"exempt_paths,omitempty"`
 	// ExemptRanges are CIDR ranges never counted, beside loopback and the private networks.
 	ExemptRanges []string `json:"exempt_ranges,omitempty"`
+	// DenyRanges are CIDR ranges refused whatever they send, before the allows, the exemptions, the
+	// rules and the gate. A policy with them needs DenyFormat.
+	DenyRanges []string `json:"deny_ranges,omitempty"`
 }
 
 // BanRule counts an address's requests of Class — all, page or api — on a path one of Paths matches,
@@ -115,6 +118,9 @@ func (b *Ban) String() string {
 	if h := b.Heuristics; h != nil {
 		s += fmt.Sprintf("; heuristics %s, cluster of %d in %s from %d addresses", h.Mode, h.Cluster.Limit, h.Cluster.Window, h.Cluster.MinAddresses)
 	}
+	if len(b.DenyRanges) > 0 {
+		s += "; denied: " + strings.Join(b.DenyRanges, ", ")
+	}
 	return s
 }
 
@@ -146,8 +152,12 @@ type BotAllow struct {
 	UserAgent string   `json:"user_agent,omitempty"`
 }
 
-// policyFormat is the format a policy needs boks to know: the gate's with a gate, the fragments' without.
+// policyFormat is the format a policy needs boks to know: the deny's with a deny, the gate's with a
+// gate, the fragments' with neither.
 func policyFormat(p Policy) int {
+	if p.Ban != nil && len(p.Ban.DenyRanges) > 0 {
+		return DenyFormat
+	}
 	if len(p.Gate) > 0 {
 		return GateFormat
 	}
@@ -300,13 +310,19 @@ func allowed(p Policy) []match {
 // host, a host no app routes included, before a block or an app's route can answer. Not terminal —
 // the handler passes what it does not refuse on to the routes after it. The policy's allows sit in
 // `not`, as they do for the blocks, so the ban counts and refuses none of what they let through; the
-// handler leaves out the rest (private networks, /_next/, subresources, the exempt paths).
+// handler leaves out the rest (private networks, /_next/, subresources, the exempt paths). A denied
+// range is a matcher set of its own beside them — Caddy runs a route when any one set matches — so
+// a denied address reaches the handler, which refuses it first, with what the allows let through too.
 func banRoute(b Ban, p Policy) caddyRoute {
+	m := []match{{Not: allowed(p)}}
+	if len(b.DenyRanges) > 0 {
+		m = append(m, match{ClientIP: &remoteIP{Ranges: b.DenyRanges}})
+	}
 	// A ban of format 6 goes to the handler in its own form, which ban3 and every later handler take:
 	// as rules, it would be refused by the ban3 a server runs until its proxy is upgraded — every
 	// deploy's reload, and the upgrade's own.
-	return caddyRoute{Match: []match{{Not: allowed(p)}}, Handle: []handler{{Handler: "boks_ban", Limit: b.Limit, Window: b.Window,
-		Rules: b.Rules, Heuristics: b.Heuristics, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges}}}
+	return caddyRoute{Match: m, Handle: []handler{{Handler: "boks_ban", Limit: b.Limit, Window: b.Window, Rules: b.Rules,
+		Heuristics: b.Heuristics, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges, DenyRanges: b.DenyRanges}}}
 }
 
 // domainsPattern matches a Host that is one of domains or under one at any depth, with or without a

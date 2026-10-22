@@ -12,8 +12,12 @@ import (
 	"testing"
 )
 
-// oldBoks is the boks every app's CI pins until the fleet's pin is raised: format 7.
-const oldBoks = "09b6657"
+// oldBoks is the boks of format 7 every app's CI pinned before the gate; gateBoks the one of format 8
+// they pin until the fleet's pin is raised past the deny.
+const (
+	oldBoks  = "09b6657"
+	gateBoks = "e57f5b7"
+)
 
 // local is a server in a directory: its commands run there, and docker answers that no proxy runs,
 // so a reload is the applied config written — what a server whose proxy is stopped does.
@@ -73,14 +77,14 @@ func main() {
 }
 `
 
-// buildOld builds oldDeploy inside boks@09b6657's own tree, from this repository's history.
-func buildOld(t *testing.T) string {
+// buildOld builds oldDeploy inside boks@rev's own tree, from this repository's history.
+func buildOld(t *testing.T, rev string) string {
 	t.Helper()
 	if testing.Short() {
-		t.Skip("builds boks@" + oldBoks)
+		t.Skip("builds boks@" + rev)
 	}
-	if err := exec.Command("git", "cat-file", "-e", oldBoks+"^{commit}").Run(); err != nil {
-		t.Skipf("boks@%s is not in this clone's history: %v", oldBoks, err)
+	if err := exec.Command("git", "cat-file", "-e", rev+"^{commit}").Run(); err != nil {
+		t.Skipf("boks@%s is not in this clone's history: %v", rev, err)
 	}
 	src := t.TempDir()
 	top, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
@@ -88,7 +92,7 @@ func buildOld(t *testing.T) string {
 		t.Fatal(err)
 	}
 	// From the top: run in a subdirectory, git archive takes that subdirectory alone.
-	archive := exec.Command("git", "archive", oldBoks)
+	archive := exec.Command("git", "archive", rev)
 	archive.Dir = strings.TrimSpace(string(top))
 	untar := exec.Command("tar", "-x", "-C", src)
 	pipe, _ := archive.StdoutPipe()
@@ -112,7 +116,7 @@ func buildOld(t *testing.T) string {
 	build := exec.Command("go", "build", "-o", bin, "./cmd/olddeploy")
 	build.Dir = src
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("building boks@%s: %v\n%s", oldBoks, err, out)
+		t.Fatalf("building boks@%s: %v\n%s", rev, err, out)
 	}
 	return bin
 }
@@ -122,7 +126,7 @@ func buildOld(t *testing.T) string {
 // loudly and before it changes anything, while this boks still deploys; a rollback to a revision
 // without the gate lets 09b6657 in again at once, no app deployed anew.
 func TestOldBoksAndTheGate(t *testing.T) {
-	old := buildOld(t)
+	old := buildOld(t, oldBoks)
 	node := dirServer{t.TempDir()}
 	ctx := context.Background()
 	oldDeploys := func(app string) (string, bool) {
@@ -171,5 +175,64 @@ func TestOldBoksAndTheGate(t *testing.T) {
 	}
 	if out, ok := oldDeploys("wiki"); !ok {
 		t.Errorf("boks@%s after a rollback to a revision without the gate: %s", oldBoks, out)
+	}
+}
+
+// The same three steps for the deny and boks@e57f5b7, the boks of format 8 the fleet pins: on a server
+// whose policy has a gate and no deny it deploys; a policy with a deny turns it away before it changes
+// anything — it would read the policy without the deny and reload the config with the denied address
+// let in — while this boks still deploys; a rollback to the revision without the deny lets it in again.
+func TestOldBoksAndTheDeny(t *testing.T) {
+	old := buildOld(t, gateBoks)
+	node := dirServer{t.TempDir()}
+	ctx := context.Background()
+	oldDeploys := func(app string) (string, bool) {
+		out, err := exec.Command(old, node.dir, app, app+".example.com").CombinedOutput()
+		return string(out), err == nil
+	}
+	if _, err := SetRoutes(ctx, node, io.Discard, "shop", []Route{{Host: "shop.example.com", Dial: "shop:3000", TLS: true}}); err != nil {
+		t.Fatal(err)
+	}
+	ban := &Ban{Duration: "24h", Rules: []BanRule{{Name: "all", Limit: 1500, Window: "1m", Class: "all"}}}
+	gate := Policy{Revision: 1, Floor: 1, Ban: ban,
+		Gate:        json.RawMessage(`{"groups":[{"name":"shop","app":"shop","mode":"log","secret_env":"SHOP_SECRET"}]}`),
+		GateSecrets: map[string][]string{"SHOP_SECRET": {strings.Repeat("s", 32)}}}
+	if err := SetPolicy(ctx, node, io.Discard, gate); err != nil {
+		t.Fatal(err)
+	}
+	if out, ok := oldDeploys("blog"); !ok {
+		t.Fatalf("boks@%s on a server with a gate and no deny: %s", gateBoks, out)
+	}
+
+	deny := gate
+	deny.Revision, deny.Floor = 2, 2
+	withDeny := *ban
+	withDeny.DenyRanges = []string{"89.167.100.21/32"}
+	deny.Ban = &withDeny
+	if err := SetPolicy(ctx, node, io.Discard, deny); err != nil {
+		t.Fatal(err)
+	}
+	applied, _ := os.ReadFile(filepath.Join(node.dir, Dir, "caddy.json"))
+	out, ok := oldDeploys("wiki")
+	if ok || !strings.Contains(out, "update boks before changing this server") {
+		t.Errorf("boks@%s on a server with a deny: want a refusal naming the update, got %v %s", gateBoks, ok, out)
+	}
+	if now, _ := os.ReadFile(filepath.Join(node.dir, Dir, "caddy.json")); !bytes.Equal(now, applied) || !bytes.Contains(now, []byte("deny_ranges")) {
+		t.Errorf("boks@%s changed the applied config", gateBoks)
+	}
+	if _, err := SetRoutes(ctx, node, io.Discard, "docs", []Route{{Host: "docs.example.com", Dial: "docs:3000", TLS: true}}); err != nil {
+		t.Errorf("this boks on a server with a deny: %v", err)
+	}
+
+	back, _, err := History(ctx, node, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back.Floor = 2
+	if err := SetPolicy(ctx, node, io.Discard, back); err != nil {
+		t.Fatal(err)
+	}
+	if out, ok := oldDeploys("wiki"); !ok {
+		t.Errorf("boks@%s after a rollback to a revision without the deny: %s", gateBoks, out)
 	}
 }

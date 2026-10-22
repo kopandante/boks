@@ -118,10 +118,18 @@ type Fragment struct {
 // fragments go on being written as 7 — no route of an app holds the gate — so a server without a gate
 // stays open to the boks of format 7 every app's CI pins until its pin is raised, and a rollback to a
 // revision without the gate opens it again at once, without every app deploying anew.
+//
+// Format 9 is the ban's deny_ranges: a boks of format 8 would read the policy without them, assemble
+// the config with no deny, and the next deploy from it would let the denied addresses in without a
+// word. Like 8, it is written only in the marker, by `boks server apply` of a policy with a deny: a
+// server without one stays open to the boks of format 8.
 const FragmentFormat = 7
 
-// GateFormat is the format of a server whose policy has a gate, and the newest this boks reads.
+// GateFormat is the format of a server whose policy has a gate.
 const GateFormat = 8
+
+// DenyFormat is the format of a server whose policy has a deny, and the newest this boks reads.
+const DenyFormat = 9
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -416,6 +424,9 @@ type (
 		Not []match `json:"not,omitempty"`
 		// RemoteIP matches the address of the connection — the client's, past Docker's DNAT.
 		RemoteIP *remoteIP `json:"remote_ip,omitempty"`
+		// ClientIP matches the client's address as Caddy decided it past the trusted proxies, the one
+		// the ban judges.
+		ClientIP *remoteIP `json:"client_ip,omitempty"`
 		// Expression is a CEL expression over the request and its placeholders.
 		Expression string `json:"expression,omitempty"`
 	}
@@ -462,6 +473,7 @@ type (
 		Duration     string         `json:"duration,omitempty"`
 		ExemptPaths  []string       `json:"exempt_paths,omitempty"`
 		ExemptRanges []string       `json:"exempt_ranges,omitempty"`
+		DenyRanges   []string       `json:"deny_ranges,omitempty"`
 		// raw is a handler boks passes as written — the gate's (gate.go) — and replaces every field above.
 		raw json.RawMessage
 	}
@@ -684,9 +696,9 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 		// The format a fragment opens with; one written before it was introduced has none.
 		var format int
 		if json.Unmarshal(v, &format) == nil {
-			if format > GateFormat {
+			if format > DenyFormat {
 				return nil, fmt.Errorf("reading the proxy's routes: a route file has format %d, newer than this boks (%d) knows; "+
-					"update boks before changing this server", format, GateFormat)
+					"update boks before changing this server", format, DenyFormat)
 			}
 			continue
 		}
