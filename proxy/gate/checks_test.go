@@ -241,3 +241,20 @@ func TestGoogleRanges(t *testing.T) {
 		}
 	}
 }
+
+// alpn asks only a TLS connection: a browser on a plain-HTTP gated host passes it. fp of a request
+// without a valid token is the header alone: the token's refusal speaks for the token.
+func TestChecksEdges(t *testing.T) {
+	h := enforcing(t, &Handler{Checks: &Checks{FP: "enforce", ALPN: "enforce"}}, time.Now())
+	r, extra := withLog(client{ua: chromeUA, fpHeader: true, tokenFP: true}.request(h, "GET", "/api/encar/catalog"))
+	r.TLS = nil
+	if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_shadow"] != nil {
+		t.Errorf("Chrome on plain HTTP: %d %v", w.Code, fields(extra))
+	}
+	r, extra = withLog(request("GET", "/api/encar/catalog", visitor))
+	r.Header.Set(fpHeader, fp)
+	w := serve(t, h, r)
+	if got := fields(extra); w.Code != 401 || got["gate_reason"] != "no_token" || got["gate_shadow"] != nil {
+		t.Errorf("the header without a token: %d %v", w.Code, got)
+	}
+}
