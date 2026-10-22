@@ -750,6 +750,15 @@ gate:
   новую cookie.
   В обоих `X-Forwarded-For` у апстрима начинается с `client_ip`. Вердикт — в доп. полях журнала доступа
   (`gate_group`, `gate_mode`, `gate_verdict`, `gate_reason`).
+- **Проверки отпечатка** (`checks`, `docs/plans/20261023-gate-checks.md`): `{fp, fetch_meta, alpn: off|log|enforce,
+  exempt_ranges: [...]}`. `fp` — `X-Fingerprint` на любом методе и токен с fp (снимает послабление 1.7.0 для
+  GET); `fetch_meta` — `Sec-Fetch-Site: same-origin`, `-Mode: cors`, `-Dest: empty` (на путях `skip_fp` —
+  только Site); `alpn` — UA браузера на прямом TLS без h2. Судят те же запросы, что токен (не exempt, не
+  Bearer). Сработавшие пишутся в `gate_shadow` в любом режиме; `enforce` (только в группе `enforce`) отказывает
+  запросу, который токен пропустил: `fp` — 403 `Fingerprint mismatch` (клиент 2.5 обновит токен), остальные —
+  403 `Forbidden`, `gate_reason: check_<имя>`. Опубликованные диапазоны Googlebot и user-triggered fetchers
+  Google (файлы в образе, `proxy/gate/google/`) проходят `fetch_meta` и `alpn`; `exempt_ranges` — все проверки.
+  Поле обработчика, поэтому boks его не читает: нужен образ gate3, формат не меняется.
 - **Сбой обработчика.** `site_gate: on` — пропуск к проверке сайта; `off` — 503.
 - **Переход.** `server apply` и `server rollback` отказывают без `--force`, если группа сейчас
   `site_gate: off`, а в целевой политике она не `enforce` + `site_gate: off` (или её нет). Проверка — до
