@@ -31,8 +31,8 @@ Base: 8260f05 | Branch: feat/ban-deny-ranges
 - [x] 0 worktree
 - [x] 1 план
 - [x] 2 реализация
-- [ ] 3 PR
-- [ ] 4 review-loop green
+- [x] 3 PR (#116)
+- [x] 4 review-loop green (agent-only, codex в лимите)
 - [ ] 5 merge, образ, DefaultProxyImage по digest
 - [ ] 6 выкатка образа: hb-sites, hb-shchr, hb-poolapi
 - [ ] 7 пин boks по флоту (формат 9), PR политики hb-sites, apply
@@ -49,7 +49,7 @@ Base: 8260f05 | Branch: feat/ban-deny-ranges
 - [x] `deny_ranges`: 403 первым делом, журнал раз в `duration`, ограничение памяти + тесты.
 
 ### Task 4: docs, образ
-- [ ] `docs/architecture.md` — раздел бана; proxy/TAG `…-ban9-…`; DefaultProxyImage по digest после сборки CI.
+- [x] `docs/architecture.md` — раздел бана; proxy/TAG `…-ban9-…`; DefaultProxyImage по digest после сборки CI.
 
 ## Non-goals
 - nftables, ipset; динамический список (API, файл на узле).
