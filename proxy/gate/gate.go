@@ -68,11 +68,15 @@ type Handler struct {
 	// own three. Set, the proxy also renews the token on the responses of the visitor's requests — a page
 	// or the API — once half of it is spent, so a visitor scrolling a catalog keeps a valid one.
 	TokenTTL caddy.Duration `json:"token_ttl,omitempty"`
+	// Checks are what the gate asks of a request beside its token — the fingerprint header, Fetch
+	// Metadata, h2 from a browser — each off, log or enforce (checks.go).
+	Checks *Checks `json:"checks,omitempty"`
 
-	exempt []exemptRule
-	bearer *bearer
-	logger *zap.Logger
-	now    func() time.Time
+	exempt       []exemptRule
+	checksExempt []netip.Prefix
+	bearer       *bearer
+	logger       *zap.Logger
+	now          func() time.Time
 	// fault and cookieFault, when set, run where the handler decides and where it fixes a cookie: the
 	// tests' way to make it fail.
 	fault, cookieFault func()
@@ -96,6 +100,11 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.Bearer != nil {
 		if h.bearer, err = h.Bearer.compile(); err != nil {
 			return fmt.Errorf("bearer: %w", err)
+		}
+	}
+	if h.Checks != nil {
+		if h.checksExempt, err = parseRanges(h.Checks.ExemptRanges); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -124,6 +133,9 @@ func (h *Handler) Validate() error {
 			return fmt.Errorf("secrets[%d]: shorter than %d characters, as the sites refuse it", i, minSecret)
 		}
 	}
+	if h.Checks != nil {
+		return h.Checks.validate(h.Mode)
+	}
 	return nil
 }
 
@@ -148,6 +160,7 @@ type decision struct {
 	verdict string // allow, deny
 	reason  string
 	refuse  *refusal
+	shadow  string // the checks the request fails, comma-separated (checks.go)
 }
 
 func allow(reason string) decision { return decision{verdict: "allow", reason: reason} }
@@ -236,6 +249,9 @@ func (h *Handler) record(r *http.Request, d decision) {
 	setField(r, zap.String("gate_verdict", d.verdict))
 	if d.reason != "" {
 		setField(r, zap.String("gate_reason", d.reason))
+	}
+	if d.shadow != "" {
+		setField(r, zap.String("gate_shadow", d.shadow))
 	}
 }
 
@@ -343,35 +359,56 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 	if h.bearer != nil && h.bearer.admits(r, p) {
 		return allow("bearer")
 	}
+	d, pl := h.decideToken(r, p, ip)
+	failed := h.shadow(r, p, ip, pl)
+	d.shadow = names(failed)
+	if d.refuse == nil {
+		for _, k := range failed {
+			if k.mode(h.Checks) == "enforce" {
+				return decision{verdict: "deny", reason: "check_" + k.name, refuse: k.refuse, shadow: d.shadow}
+			}
+		}
+	}
+	return d
+}
+
+// skipFP says whether the fingerprint is not compared on the cleaned path p.
+func (h *Handler) skipFP(p string) bool {
+	return slices.ContainsFunc(h.SkipFP, func(s string) bool { return strings.HasPrefix(p, s) })
+}
+
+// decideToken is decide's verdict on the token of a request to a gated path, and the token's payload
+// when its signature and age pass, nil otherwise.
+func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload) {
 	tok := requestToken(r)
 	if tok == "" {
-		return deny("no_token", accessDenied)
+		return deny("no_token", accessDenied), nil
 	}
 	pl, reason := h.verify(tok, h.now())
 	if reason != "" {
-		return deny(reason, accessDenied)
+		return deny(reason, accessDenied), nil
 	}
 	if pl.ip == "" {
-		return deny("no_ip", accessDenied)
+		return deny("no_ip", accessDenied), &pl
 	}
-	if !slices.ContainsFunc(h.SkipFP, func(s string) bool { return strings.HasPrefix(p, s) }) {
+	if !h.skipFP(p) {
 		if fp := r.Header.Get(fpHeader); fp != "" {
 			// A token without the fingerprint passes a GET: the same GET without the header passes
 			// anyway (request-gate 1.7.0), and the pages' tokens have none.
 			if pl.fp != "" && pl.fp != fp {
-				return deny("fp_mismatch", fpMismatch)
+				return deny("fp_mismatch", fpMismatch), &pl
 			}
 			if pl.fp == "" && r.Method != http.MethodGet {
-				return deny("fp_missing", fpMismatch)
+				return deny("fp_missing", fpMismatch), &pl
 			}
 		} else if r.Method != http.MethodGet {
-			return deny("no_fp_header", forbidden)
+			return deny("no_fp_header", forbidden), &pl
 		}
 	}
 	if pl.ip != ip {
-		return deny("ip_mismatch", addressMismatch)
+		return deny("ip_mismatch", addressMismatch), &pl
 	}
-	return allow("token")
+	return allow("token"), &pl
 }
 
 // refuse answers as NextResponse.json({error}, {status}) does.
