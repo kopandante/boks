@@ -64,6 +64,9 @@ type Ban struct {
 	ExemptPaths []string `yaml:"exempt_paths"`
 	// ExemptRanges are addresses or CIDR ranges, such as a client's office.
 	ExemptRanges []string `yaml:"exempt_ranges"`
+	// DenyRanges are addresses or CIDR ranges the proxy refuses whatever they send: 403 on every host,
+	// before ExemptRanges, bots.allow, the rules and the gate are asked.
+	DenyRanges []string `yaml:"deny_ranges"`
 }
 
 // BanRule counts the requests of an address its selector takes: those of Class and, when Paths are
@@ -117,6 +120,9 @@ const (
 // ExemptPrefixes are ExemptRanges as CIDR ranges, as Prefixes are an egress's Allow.
 func (b *Ban) ExemptPrefixes() []netip.Prefix { return prefixes(b.ExemptRanges) }
 
+// DenyPrefixes are DenyRanges as CIDR ranges, as ExemptPrefixes are ExemptRanges.
+func (b *Ban) DenyPrefixes() []netip.Prefix { return prefixes(b.DenyRanges) }
+
 // Egress is the forward proxy the server's Caddy runs on a port of its own.
 type Egress struct {
 	// Port is where it listens, 3128 when not given — tinyproxy's and squid's port, so clients keep
@@ -168,15 +174,15 @@ func prefixes(list []string) []netip.Prefix {
 }
 
 // checkRanges refuses an entry of list that is not an address or a CIDR range, and one that covers
-// every address.
-func checkRanges(list []string, whom string) error {
+// every address, saying what such an entry would do: every, after the entry.
+func checkRanges(list []string, every string) error {
 	for _, a := range list {
 		p, ok := rangeOf(a)
 		if !ok {
 			return fmt.Errorf("%q is neither an address nor a CIDR range", a)
 		}
 		if p.Bits() == 0 {
-			return fmt.Errorf("%q lets every address in; name the %s", a, whom)
+			return fmt.Errorf("%q %s", a, every)
 		}
 	}
 	return nil
@@ -316,7 +322,7 @@ func (s *Server) validate() error {
 		}
 	}
 	// Trusting everyone hands every app the address a visitor writes into X-Forwarded-For.
-	if err := checkRanges(s.TrustedProxies, "proxies in front of boks"); err != nil {
+	if err := checkRanges(s.TrustedProxies, "lets every address in; name the proxies in front of boks"); err != nil {
 		return fmt.Errorf("trusted_proxies: %w", err)
 	}
 	if err := checkWrittenAsIPv4(s.TrustedProxies); err != nil {
@@ -377,7 +383,7 @@ func (e *Egress) validate() error {
 	if len(e.Allow) == 0 {
 		return errors.New("allow: the clients that may use it are required — open to everyone, it relays anyone's traffic from this server's address")
 	}
-	if err := checkRanges(e.Allow, "clients"); err != nil {
+	if err := checkRanges(e.Allow, "lets every address in; name the clients"); err != nil {
 		return fmt.Errorf("allow: %w", err)
 	}
 	if (e.User == "") != (e.PasswordEnv == "") {
@@ -469,11 +475,17 @@ func (b *Ban) validate() error {
 	if err := checkPatterns(b.ExemptPaths, "turn the ban off"); err != nil {
 		return fmt.Errorf("exempt_paths: %w", err)
 	}
-	if err := checkRanges(b.ExemptRanges, "addresses to leave uncounted"); err != nil {
+	if err := checkRanges(b.ExemptRanges, "lets every address in; name the addresses to leave uncounted"); err != nil {
 		return fmt.Errorf("exempt_ranges: %w", err)
 	}
 	if err := checkWrittenAsIPv4(b.ExemptRanges); err != nil {
 		return fmt.Errorf("exempt_ranges: %w", err)
+	}
+	if err := checkRanges(b.DenyRanges, "refuses every address; name the addresses to refuse"); err != nil {
+		return fmt.Errorf("deny_ranges: %w", err)
+	}
+	if err := checkWrittenAsIPv4(b.DenyRanges); err != nil {
+		return fmt.Errorf("deny_ranges: %w", err)
 	}
 	return nil
 }

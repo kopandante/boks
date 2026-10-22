@@ -611,6 +611,9 @@ func policyOf(sc *config.Server) proxy.Policy {
 		for _, pr := range b.ExemptPrefixes() {
 			p.Ban.ExemptRanges = append(p.Ban.ExemptRanges, pr.String())
 		}
+		for _, pr := range b.DenyPrefixes() {
+			p.Ban.DenyRanges = append(p.Ban.DenyRanges, pr.String())
+		}
 	}
 	if g := sc.Gate; g != nil {
 		p.Gate = g.JSON

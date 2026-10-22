@@ -264,11 +264,14 @@ func TestServerStatusSaysTheHairpinOfEveryServer(t *testing.T) {
 // The policy carries server.yml's ban as the config checked it: defaults filled in, limit and window
 // as the rule default, ranges as ranges, the rules and the heuristics typed.
 func TestPolicyOfCarriesTheBan(t *testing.T) {
-	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\nban:\n  window: 60s\n  exempt_paths: [\"^/api/[a-z]+/pics\"]\n  exempt_ranges: [203.0.113.7]\n"))
+	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\nban:\n  window: 60s\n  exempt_paths: [\"^/api/[a-z]+/pics\"]\n  exempt_ranges: [203.0.113.7]\n  deny_ranges: [89.167.100.21]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := policyOf(sc).Ban
+	if b == nil || strings.Join(b.DenyRanges, " ") != "89.167.100.21/32" {
+		t.Errorf("deny: %+v", b)
+	}
 	if b == nil || !reflect.DeepEqual(b.Rules, []proxy.BanRule{{Name: "default", Limit: 300, Window: "1m", Class: "all"}}) || b.Limit != 0 || b.Window != "" ||
 		b.Duration != "24h" || b.Heuristics != nil || strings.Join(b.ExemptPaths, " ") != "^/api/[a-z]+/pics" || strings.Join(b.ExemptRanges, " ") != "203.0.113.7/32" {
 		t.Errorf("ban: %+v", b)

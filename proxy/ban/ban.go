@@ -77,6 +77,9 @@ type Handler struct {
 	ExemptPaths []string `json:"exempt_paths,omitempty"`
 	// ExemptRanges are CIDR ranges never counted, beside the private ones.
 	ExemptRanges []string `json:"exempt_ranges,omitempty"`
+	// DenyRanges are CIDR ranges refused whatever they send: 403 before an exemption, a count or the
+	// heuristics are asked.
+	DenyRanges []string `json:"deny_ranges,omitempty"`
 	// Heuristics, when on, flag requests no browser sends and the clusters that send them.
 	Heuristics *Heuristics `json:"heuristics,omitempty"`
 	// MaxFingerprints bounds the heuristics' fingerprints tracked at once, DefaultMaxFingerprints when
@@ -86,6 +89,7 @@ type Handler struct {
 	rules  []rule
 	paths  []*regexp.Regexp
 	ranges []netip.Prefix
+	deny   []netip.Prefix
 	store  *store
 	logger *zap.Logger
 }
@@ -166,6 +170,14 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		}
 		h.ranges = append(h.ranges, p.Masked())
 	}
+	h.deny = nil
+	for _, s := range h.DenyRanges {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return fmt.Errorf("deny_ranges: %w", err)
+		}
+		h.deny = append(h.deny, p.Masked())
+	}
 	if h.store == nil {
 		h.store = shared
 	}
@@ -208,8 +220,10 @@ func (h *Handler) Validate() error {
 	return nil
 }
 
-// ServeHTTP answers 403 to a banned address and passes everything else on, counting what counts. A
-// request no rule counts for what it asks for — /_next/, a subresource, an exempt path — is still
+// ServeHTTP answers 403 to a denied address and to a banned one, and passes everything else on,
+// counting what counts. A denied address is refused first, whatever it asks for and wherever it is: an
+// exempt range, a private one and the heuristics give way to the deny, and its requests count toward
+// nothing; boks's ban route lets it past the policy's allows too. A request no rule counts for what it asks for — /_next/, a subresource, an exempt path — is still
 // refused to a banned address: the ban keeps the address from every app, its images and Next.js's
 // image optimizer included. An address in an exempt range is neither counted nor refused, so adding
 // a banned address's range to exempt_ranges lifts its ban with the next apply — and its fingerprint's
@@ -218,7 +232,17 @@ func (h *Handler) Validate() error {
 // never gets here: Caddy answers it before any route, and boks's ban route leaves it out by its matcher.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	addr, ok := clientAddr(r)
-	if !ok || h.exemptAddr(addr) {
+	if !ok {
+		return next.ServeHTTP(w, r)
+	}
+	if p, ok := h.deniedBy(addr); ok {
+		if h.store.denied(addr, time.Duration(h.Duration), h.MaxTracked) {
+			h.logger.Warn("address denied", zap.String("ip", addr.String()), zap.String("host", r.Host),
+				zap.Stringer("range", p), zap.String("user_agent", sample(r.UserAgent())))
+		}
+		return refuse(w, "Forbidden\n")
+	}
+	if h.exemptAddr(addr) {
 		return next.ServeHTTP(w, r)
 	}
 	if h.Heuristics.on() && forged(r.Header) && h.flag(r, addr) {
@@ -244,10 +268,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 func (h *Handler) flag(r *http.Request, addr netip.Addr) bool {
 	fp := fingerprint(r)
 	v := h.store.forged(addr, fp, h.Heuristics.cluster(), h.Heuristics.Mode, time.Duration(h.Duration), h.MaxFingerprints)
-	ua := r.UserAgent()
-	if len(ua) > uaSample {
-		ua = ua[:uaSample]
-	}
+	ua := sample(r.UserAgent())
 	if v.joined {
 		h.logger.Info("forged request", zap.String("ip", addr.String()), zap.String("host", r.Host), zap.String("fingerprint", fp),
 			zap.String("user_agent", ua), zap.String("path", r.URL.Path), zap.String("weak", strings.Join(weakSigns(r), ", ")))
@@ -290,6 +311,24 @@ func clientAddr(r *http.Request) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return a.WithZone("").Unmap(), true
+}
+
+// sample is a User-Agent as the journal has it: its first uaSample bytes.
+func sample(ua string) string {
+	if len(ua) > uaSample {
+		return ua[:uaSample]
+	}
+	return ua
+}
+
+// deniedBy is the deny range that holds a, if any.
+func (h *Handler) deniedBy(a netip.Addr) (netip.Prefix, bool) {
+	for _, p := range h.deny {
+		if p.Contains(a) {
+			return p, true
+		}
+	}
+	return netip.Prefix{}, false
 }
 
 // exemptAddr says whether an address is never counted: in a private or an exempt range.

@@ -979,12 +979,14 @@ func TestFragmentsCarryTheirFormat(t *testing.T) {
 	if err != nil || len(fs) != 2 || fs[0].App != "demo" || !reflect.DeepEqual(fs[0].Routes, routed) || fs[1].App != "old" {
 		t.Fatalf("want both fragments, with and without a format: %+v %v", fs, err)
 	}
-	// The gate's format, which only the marker holds, is one this boks reads; the next is not.
-	d.files[Dir+"/routes/_server.json"] = fmt.Sprintf("%d\n", GateFormat)
-	if _, err := Fragments(context.Background(), d); err != nil {
-		t.Errorf("want format %d read: %v", GateFormat, err)
+	// The gate's and the deny's formats, which only the marker holds, are ones this boks reads; the next is not.
+	for _, f := range []int{GateFormat, DenyFormat} {
+		d.files[Dir+"/routes/_server.json"] = fmt.Sprintf("%d\n", f)
+		if _, err := Fragments(context.Background(), d); err != nil {
+			t.Errorf("want format %d read: %v", f, err)
+		}
 	}
-	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", GateFormat+1)
+	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", DenyFormat+1)
 	if _, err := Fragments(context.Background(), d); err == nil || !strings.Contains(err.Error(), "newer than this boks") {
 		t.Errorf("want a newer format refused, got %v", err)
 	}

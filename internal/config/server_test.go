@@ -214,14 +214,21 @@ ban:
   duration: 1440m
   exempt_paths: ["^/api/[a-z]+/pics", "^/api/auctions/[^/]+/(image|video)"]
   exempt_ranges: [203.0.113.7, 198.51.100.9/24]
+  deny_ranges: [89.167.100.21, 2001:db8::7/32]
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := s.Ban
-	var ranges []string
+	var ranges, deny []string
 	for _, p := range b.ExemptPrefixes() {
 		ranges = append(ranges, p.String())
+	}
+	for _, p := range b.DenyPrefixes() {
+		deny = append(deny, p.String())
+	}
+	if strings.Join(deny, " ") != "89.167.100.21/32 2001:db8::/32" {
+		t.Errorf("deny: %v", deny)
 	}
 	if !reflect.DeepEqual(b.Rules, []BanRule{{Name: "default", Limit: 120, Window: "1m", Class: "all"}}) || b.Duration != "24h" ||
 		len(b.ExemptPaths) != 2 || strings.Join(ranges, " ") != "203.0.113.7/32 198.51.100.0/24" {
@@ -310,6 +317,9 @@ func TestParseServerBanRejects(t *testing.T) {
 		{ban(`{exempt_ranges: [office]}`), `exempt_ranges: "office" is neither an address nor a CIDR range`},
 		{ban(`{exempt_ranges: [0.0.0.0/0]}`), "lets every address in"},
 		{ban(`{exempt_ranges: ["::ffff:203.0.113.7"]}`), "written as IPv6"},
+		{ban(`{deny_ranges: [n8n]}`), `deny_ranges: "n8n" is neither an address nor a CIDR range`},
+		{ban(`{deny_ranges: ["::/0"]}`), "deny_ranges: \"::/0\" refuses every address"},
+		{ban(`{deny_ranges: ["::ffff:89.167.100.21"]}`), "deny_ranges: \"::ffff:89.167.100.21\" is an IPv4 address written as IPv6"},
 		{ban(`{limt: 3}`), "field limt not found"},
 		{ban(""), "ban: empty; write `ban: {}`"},
 		{"servers: [a]\nrevision: 1\nban:\n  # limit: 300\n", "ban: empty"},

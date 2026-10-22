@@ -159,7 +159,8 @@ func CheckEgress(ctx context.Context, r remote.Runner, p Policy) error {
 // nothing of its shape — validates banProbe in a container of its own. Caddy decodes a module's
 // config strictly, so an image without the handler, or with one older than the fields this boks
 // writes, refuses it; asking for the module alone would take the handler of format 6, which refuses
-// the rules on the next reload.
+// the rules on the next reload. The probe holds deny_ranges only when p has them: an image whose
+// handler predates them still runs a policy without.
 func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
 	if p.Ban == nil {
 		return nil
@@ -172,23 +173,35 @@ func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
 	if err != nil {
 		return err
 	}
-	if _, err := r.Pipe(ctx, banProbe, "docker", "run", "--rm", "-i", "--network", "none", "--entrypoint", "caddy", image, "validate", "--config", "/dev/stdin"); err != nil {
+	probe, fields := banProbe, "rules and heuristics"
+	if len(p.Ban.DenyRanges) > 0 {
+		probe, fields = banProbeDeny, "rules, heuristics and deny_ranges"
+	}
+	if _, err := r.Pipe(ctx, probe, "docker", "run", "--rm", "-i", "--network", "none", "--entrypoint", "caddy", image, "validate", "--config", "/dev/stdin"); err != nil {
 		verb := "runs"
 		if state != "running" {
 			verb = "is a stopped container of"
 		}
-		return fmt.Errorf("the proxy %s %s, whose Caddy refuses a ban with rules and heuristics (%w); "+
-			"`boks proxy upgrade` with boks's own image first, then apply again", verb, image, err)
+		return fmt.Errorf("the proxy %s %s, whose Caddy refuses a ban with %s (%w); "+
+			"`boks proxy upgrade` with boks's own image first, then apply again", verb, image, fields, err)
 	}
 	return nil
 }
 
-// banProbe is a config with every field of the ban handler this boks writes, and nothing else Caddy
-// would reach out for: no admin endpoint, one server no one connects to.
-var banProbe = []byte(`{"admin":{"disabled":true},"apps":{"http":{"servers":{"probe":{"listen":[":80"],"routes":[{"handle":[` +
-	`{"handler":"boks_ban","duration":"1h","rules":[{"name":"probe","limit":1,"window":"1m","class":"api","paths":["^/api/"]}],` +
-	`"heuristics":{"mode":"log","cluster":{"limit":1,"window":"1m","min_addresses":2}},` +
-	`"exempt_paths":["^/api/pics"],"exempt_ranges":["203.0.113.0/24"]}]}]}}}}}`)
+// banProbe is a config with every field of the ban handler this boks writes but deny_ranges, and
+// nothing else Caddy would reach out for: no admin endpoint, one server no one connects to.
+// banProbeDeny is it with deny_ranges, and the route's client_ip matcher.
+var (
+	banProbe     = probeOf(``, ``)
+	banProbeDeny = probeOf(`"match":[{"client_ip":{"ranges":["198.51.100.0/24"]}}],`, `,"deny_ranges":["198.51.100.0/24"]`)
+)
+
+func probeOf(match, deny string) []byte {
+	return []byte(`{"admin":{"disabled":true},"apps":{"http":{"servers":{"probe":{"listen":[":80"],"routes":[{` + match + `"handle":[` +
+		`{"handler":"boks_ban","duration":"1h","rules":[{"name":"probe","limit":1,"window":"1m","class":"api","paths":["^/api/"]}],` +
+		`"heuristics":{"mode":"log","cluster":{"limit":1,"window":"1m","min_addresses":2}},` +
+		`"exempt_paths":["^/api/pics"],"exempt_ranges":["203.0.113.0/24"]` + deny + `}]}]}}}}}`)
+}
 
 // checkModule refuses a running proxy whose Caddy lacks module. A proxy that is not running is left to
 // the boot or the upgrade that creates it from the image the config names.

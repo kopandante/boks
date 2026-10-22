@@ -37,6 +37,10 @@ type store struct {
 	prints      map[string]*print
 	printsSwept time.Time
 	printsFull  bool
+
+	// logged is when the journal last had a line of each denied address, swept at most once a duration.
+	logged      map[netip.Addr]time.Time
+	loggedSwept time.Time
 }
 
 // print is a fingerprint's cluster in its window, and its ban.
@@ -67,7 +71,8 @@ type counter struct {
 }
 
 func newStore(now func() time.Time) *store {
-	return &store{now: now, epoch: now(), entries: map[netip.Addr]*entry{}, prints: map[string]*print{}}
+	return &store{now: now, epoch: now(), entries: map[netip.Addr]*entry{}, prints: map[string]*print{},
+		logged: map[netip.Addr]time.Time{}}
 }
 
 type outcome int
@@ -265,4 +270,27 @@ func (s *store) forged(a netip.Addr, fp string, c cluster, mode string, duration
 		}
 	}
 	return v
+}
+
+// denied says whether a denied address's refusal goes to the journal: the first in each every since
+// its last line. The lines are tracked for up to max addresses — a denied range can be wide — and past
+// that a new address is refused without a line until old ones expire.
+func (s *store) denied(a netip.Addr, every time.Duration, max int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if now.Sub(s.loggedSwept) >= every {
+		s.loggedSwept = now
+		for k, t := range s.logged {
+			if now.Sub(t) >= every {
+				delete(s.logged, k)
+			}
+		}
+	}
+	t, known := s.logged[a]
+	if known && now.Sub(t) < every || !known && len(s.logged) >= max {
+		return false
+	}
+	s.logged[a] = now
+	return true
 }
