@@ -32,8 +32,8 @@ HTTP/1.1, токен через `POST /api/auth/token` с любым fp). Реш
 - [x] 0 worktree
 - [x] 1 план (scratchpad plan-gate-fp.md, решения владельца 23.10)
 - [x] 2 реализация
-- [ ] 3 PR
-- [ ] 4 review-loop green (agent-only, codex в лимите)
+- [x] 3 PR (#119)
+- [x] 4 review-loop green (agent-only, codex в лимите)
 - [ ] 5 merge, образ gate3, DefaultProxyImage по digest
 - [ ] 6 выкатка образа на hb-sites
 - [ ] 7 пин boks по флоту hb-sites, политика hb-sites: `checks` в log на всех группах
