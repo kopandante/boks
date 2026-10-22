@@ -79,6 +79,7 @@ func TestShadowByClient(t *testing.T) {
 		{"Safari on h2", with(browser, func(c *client) { c.ua = safariUA }), ""},
 		{"Telegram WebView on h2", with(browser, func(c *client) { c.ua = webviewUA }), ""},
 		{"the storm: everything but h2", with(browser, func(c *client) { c.ua, c.h2 = stormUA, false }), "alpn"},
+		{"Firefox on h1", with(browser, func(c *client) { c.ua, c.h2 = firefoxUA, false }), "alpn"},
 		{"Chrome on h1 past a trusted proxy", with(browser, func(c *client) { c.ua, c.h2, c.trusted = chromeUA, false, true }), ""},
 		{"a page's cookie, no fingerprint, no Fetch Metadata, h1", client{ua: chromeUA}, "fp,fetch_meta,alpn"},
 		{"the header but a page's token", with(browser, func(c *client) { c.ua, c.tokenFP = chromeUA, false }), "fp"},
@@ -90,6 +91,7 @@ func TestShadowByClient(t *testing.T) {
 		{"Googlebot from Google without the fingerprint", client{ua: googleUA, ip: "66.249.66.1"}, "fp"},
 		{"Googlebot's name from elsewhere", client{ua: googleUA, fpHeader: true, tokenFP: true}, "fetch_meta,alpn"},
 		{"an exempt address", client{ua: chromeUA, ip: "139.100.226.95"}, ""},
+		{"the exempt address's neighbour", client{ua: chromeUA, ip: "139.100.226.96"}, "fp,fetch_meta,alpn"},
 		{"an exempt range", client{ua: chromeUA, ip: "86.57.245.110"}, ""},
 	}
 	for _, c := range cases {
