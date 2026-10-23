@@ -31,6 +31,6 @@ Base: 0dfd71c | Branch: feat/gate-yandex
 - [x] 2 реализация
 - [x] 3 PR (#122)
 - [x] 4 review-loop green (agent-only, codex в лимите: 2 раунда по 2 линзы, 0 находок)
-- [ ] 5 merge, образ gate4, DefaultProxyImage по digest
+- [x] 5 merge (#122 6a235fb), образ gate4, DefaultProxyImage по digest
 - [ ] 6 выкатка образа на hb-sites, политика hb-sites (комментарий), пин boks по флоту
 - [ ] 7 проверка по журналу `gate_shadow`: роботы Яндекса с адресов Яндекса без `fetch_meta`/`alpn`
