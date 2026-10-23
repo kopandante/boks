@@ -12,12 +12,14 @@ import (
 )
 
 const (
-	chromeUA  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
-	firefoxUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0"
-	safariUA  = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
-	webviewUA = "Mozilla/5.0 (Linux; Android 14; SM-S918B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/141.0.7390.122 Mobile Safari/537.36 Telegram-Android/12.1.1"
-	googleUA  = "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.7390.122 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-	stormUA   = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+	chromeUA    = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+	firefoxUA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0"
+	safariUA    = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
+	webviewUA   = "Mozilla/5.0 (Linux; Android 14; SM-S918B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/141.0.7390.122 Mobile Safari/537.36 Telegram-Android/12.1.1"
+	googleUA    = "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.7390.122 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+	yandexUA    = "Mozilla/5.0 (compatible; YandexRenderResourcesBot/1.0; +http://yandex.com/bots) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0"
+	yandexBotUA = "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)"
+	stormUA     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 )
 
 // client is how a request of a kind of client looks to the gate: its headers, its protocol, its address.
@@ -90,6 +92,12 @@ func TestShadowByClient(t *testing.T) {
 		{"Read Aloud from Google", client{ua: chromeUA, fpHeader: true, tokenFP: true, ip: "142.250.32.5"}, ""},
 		{"Googlebot from Google without the fingerprint", client{ua: googleUA, ip: "66.249.66.1"}, "fp"},
 		{"Googlebot's name from elsewhere", client{ua: googleUA, fpHeader: true, tokenFP: true}, "fetch_meta,alpn"},
+		{"YandexRenderResourcesBot from Yandex", client{ua: yandexUA, fpHeader: true, tokenFP: true, ip: "213.180.203.222"}, ""},
+		{"YandexBot from Yandex over IPv6", client{ua: yandexBotUA, fpHeader: true, tokenFP: true, ip: "2a02:6b8:c0e:500:1::1"}, ""},
+		{"YandexRenderResourcesBot from Yandex without the fingerprint", client{ua: yandexUA, ip: "213.180.203.222"}, "fp"},
+		{"Yandex's name from elsewhere", client{ua: yandexUA, fpHeader: true, tokenFP: true}, "fetch_meta,alpn"},
+		{"Yandex's name from Yandex Cloud", client{ua: yandexUA, fpHeader: true, tokenFP: true, ip: "158.160.1.2"}, "fetch_meta,alpn"},
+		{"a browser from Yandex's address", client{ua: chromeUA, fpHeader: true, tokenFP: true, ip: "213.180.203.222"}, "fetch_meta,alpn"},
 		{"an exempt address", client{ua: chromeUA, ip: "139.100.226.95"}, ""},
 		{"the exempt address's neighbour", client{ua: chromeUA, ip: "139.100.226.96"}, "fp,fetch_meta,alpn"},
 		{"an exempt range", client{ua: chromeUA, ip: "86.57.245.110"}, ""},
@@ -241,6 +249,37 @@ func TestGoogleRanges(t *testing.T) {
 		if isGoogle(netip.MustParseAddr(ip)) {
 			t.Errorf("%s is Google's", ip)
 		}
+	}
+}
+
+// The image's Yandex file reads whole, and holds the addresses Yandex's robots came from on the sites,
+// all of them spider.yandex.com both ways; Yandex Cloud's addresses and an address beside the AS are not
+// Yandex's. A line that is not a prefix, or one that holds every address, fails the file.
+func TestYandexRanges(t *testing.T) {
+	ps, err := readYandex(yandexFile)
+	if err != nil || len(ps) < 15 {
+		t.Fatalf("%d ranges, %v", len(ps), err)
+	}
+	for _, ip := range []string{"213.180.203.222", "213.180.203.232", "95.108.213.228", "5.255.231.177", "87.250.224.101", "87.250.224.86", "2a02:6b8:c0e::1"} {
+		if !isYandex(netip.MustParseAddr(ip), yandexBotUA) {
+			t.Errorf("%s is not Yandex's", ip)
+		}
+	}
+	for _, ip := range []string{visitor, "158.160.1.2", "84.201.128.1", "178.154.192.1", "51.250.0.1", "213.180.224.1", "2a0d:d6c0::1"} {
+		if isYandex(netip.MustParseAddr(ip), yandexBotUA) {
+			t.Errorf("%s is Yandex's", ip)
+		}
+	}
+	if isYandex(netip.MustParseAddr("213.180.203.222"), googleUA) {
+		t.Error("Googlebot's name from Yandex's address is Yandex's robot")
+	}
+	for _, bad := range []string{"# c\n5.45.192.0/18\nnot-a-prefix\n", "0.0.0.0/0\n", "::/0\n"} {
+		if _, err := readYandex(bad); err == nil {
+			t.Errorf("%q reads", bad)
+		}
+	}
+	if ps, err := readYandex("# c\n\n  5.45.192.0/18  \n5.45.202.7/24\n"); err != nil || len(ps) != 2 || ps[1] != netip.MustParsePrefix("5.45.202.0/24") {
+		t.Errorf("%v %v", ps, err)
 	}
 }
 

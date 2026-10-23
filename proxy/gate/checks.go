@@ -16,7 +16,8 @@ package gate
 //     proxy the protocol is the proxy's and says nothing.
 //
 // Googlebot and Google's user-triggered fetchers (Read Aloud) send neither Fetch Metadata nor h2: their
-// published ranges (google.go) pass fetch_meta and alpn. The group's exempt_ranges pass every check.
+// published ranges (google.go) pass fetch_meta and alpn. So do Yandex's robots: a User-Agent that names
+// Yandex from Yandex's AS (yandex.go). The group's exempt_ranges pass every check.
 
 import (
 	"errors"
@@ -42,10 +43,10 @@ type Checks struct {
 // check is one check of a request: its name, as gate_shadow and gate_reason write it, and how it
 // refuses — fp as the client refreshes its token on, the others as request-gate's Forbidden.
 type check struct {
-	name   string
-	refuse *refusal
-	mode   func(*Checks) string
-	google bool // Google's crawlers and fetchers pass it
+	name    string
+	refuse  *refusal
+	mode    func(*Checks) string
+	crawler bool // Google's and Yandex's crawlers and fetchers pass it
 }
 
 var checks = []check{
@@ -118,8 +119,8 @@ func (h *Handler) shadow(r *http.Request, p, ip string, pl *payload) []check {
 	if inRanges(h.checksExempt, a) {
 		return nil
 	}
-	if isGoogle(a) {
-		failed = slices.DeleteFunc(failed, func(k check) bool { return k.google })
+	if isGoogle(a) || isYandex(a, r.UserAgent()) {
+		failed = slices.DeleteFunc(failed, func(k check) bool { return k.crawler })
 	}
 	return failed
 }
