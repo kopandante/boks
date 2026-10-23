@@ -34,9 +34,9 @@ HTTP/1.1, токен через `POST /api/auth/token` с любым fp). Реш
 - [x] 2 реализация
 - [x] 3 PR (#119)
 - [x] 4 review-loop green (agent-only, codex в лимите)
-- [x] 5 merge (#119 b5fe00b), образ gate3, DefaultProxyImage по digest
-- [ ] 6 выкатка образа на hb-sites
-- [ ] 7 пин boks по флоту hb-sites, политика hb-sites: `checks` в log на всех группах
+- [x] 5 merge (#119 b5fe00b), образ gate3, DefaultProxyImage по digest (#120 641aa4b)
+- [x] 6 выкатка образа на hb-sites (`proxy upgrade` 23.10 09:02–09:03 KST; 73 хоста — коды как до)
+- [x] 7 политика hb-sites ревизия 34 — `checks` в log на 13 группах (backends#745, apply 23.10 09:10 KST); пин boks 641aa4b по флоту (22 PR)
 - [ ] 8 enforce по группам — по метрикам (раздел ниже)
 
 ## Enforce
