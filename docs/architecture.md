@@ -757,7 +757,9 @@ gate:
   Bearer). Сработавшие пишутся в `gate_shadow` в любом режиме; `enforce` (только в группе `enforce`) отказывает
   запросу, который токен пропустил: `fp` — 403 `Fingerprint mismatch` (клиент 2.5 обновит токен), остальные —
   403 `Forbidden`, `gate_reason: check_<имя>`. Опубликованные диапазоны Googlebot и user-triggered fetchers
-  Google (файлы в образе, `proxy/gate/google/`) проходят `fetch_meta` и `alpn`; `exempt_ranges` — все проверки.
+  Google (файлы в образе, `proxy/gate/google/`) проходят `fetch_meta` и `alpn`; так же — роботы Яндекса: UA с
+  `Yandex` с адреса из анонсов AS13238 (`proxy/gate/yandex/as13238.txt`, RIPEstat; без DNS на запросе, образ
+  gate4); `exempt_ranges` — все проверки.
   Поле обработчика, поэтому boks его не читает: нужен образ gate3, формат не меняется.
 - **Сбой обработчика.** `site_gate: on` — пропуск к проверке сайта; `off` — 503.
 - **Переход.** `server apply` и `server rollback` отказывают без `--force`, если группа сейчас
