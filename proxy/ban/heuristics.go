@@ -5,8 +5,8 @@ package ban
 // 90+, Safari 16.4+), or none of it when older, but for Chromium 76–79, which sent Site and Mode
 // before Dest existed; a request with Sec-Fetch-Mode and without one of the others, and not of those
 // Chromiums, was made by something copying a browser's headers in part. That is the strong sign, read from
-// the headers alone, which reach boks as the client sent them: the node's Caddy terminates TLS and
-// nothing in front rewrites them. Of a storm of many addresses each under every rule — the one on dbauto, 72 home addresses at
+// the headers alone, which reach boks as the client sent them on the direct path and through
+// Cloudflare alike. Of a storm of many addresses each under every rule — the one on dbauto, 72 home addresses at
 // 37 requests an hour — the sign is what is common, and the cluster is its fingerprint across them.
 
 import (
