@@ -11,10 +11,12 @@ package gate
 // In log a match goes into the access log as gate_signature and nothing else changes; in enforce the
 // request is refused, and with signature_ban so is its address: every request of the group from it for
 // that long, gate_reason signature_ban. An enforced signature that matches is the verdict whatever
-// signature in log matches too. The bans are asked while one signature of the group at least is in
-// enforce: moving them all to log or off lifts the bans — a wrong signature is undone by a reload — and
-// turning one back to enforce brings back those not yet over. The addresses are kept by the process — every deploy on the
-// server reloads the proxy, which keeps them — and lost on its restart. Google's and Yandex's crawlers
+// signature in log matches too. The bans are asked while the group has signature_ban and one signature
+// at least in enforce: a reload that moves them all to log or off, or drops signature_ban, lifts the
+// bans, and one that brings both back brings back those not yet over. A ban does not know the signature
+// that made it, so a wrong pattern corrected in enforce keeps the addresses it banned: lift them first.
+// The addresses are kept by the process — every deploy on the server reloads the proxy, which keeps
+// them — and lost on its restart. Google's and Yandex's crawlers
 // and the checks' exempt_ranges are never matched nor banned.
 
 import (
@@ -136,7 +138,7 @@ func (h *Handler) validateSignatures() error {
 // signed is the signatures' verdict on r from ip, and whether they have one: a banned address, and a
 // request an enforced signature matches, are refused; a match in log is written and passed on to the
 // rest of the gate. The signature written is the one that decides: the first enforced one that matches,
-// the first in log when none does. A ban is asked only while a signature is in enforce.
+// the first in log when none does. A ban is asked only with signature_ban and a signature in enforce.
 func (h *Handler) signed(r *http.Request, ip string) (decision, bool) {
 	if len(h.Signatures) == 0 {
 		return decision{}, false

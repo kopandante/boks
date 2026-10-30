@@ -90,7 +90,11 @@ func TestSignatureBan(t *testing.T) {
 	if w := serve(t, g2, browserClient(chromeUA, ip).request(g2, "GET", "/api/x")); w.Code != 200 {
 		t.Errorf("another group: %d", w.Code)
 	}
-	now = now.Add(24*time.Hour + time.Second)
+	now = now.Add(24*time.Hour - time.Second)
+	if w := serve(t, h, browserClient(chromeUA, ip).request(h, "GET", "/api/x")); w.Code != 403 {
+		t.Errorf("a second before the ban's end: %d", w.Code)
+	}
+	now = now.Add(2 * time.Second)
 	if w := serve(t, h, browserClient(chromeUA, ip).request(h, "GET", "/api/x")); w.Code != 200 {
 		t.Errorf("after the ban: %d", w.Code)
 	}
@@ -184,10 +188,27 @@ func TestSignatureBanLiftedByLog(t *testing.T) {
 	if w := serve(t, lifted, browserClient(chromeUA, ip).request(lifted, "GET", "/en/heydealer")); w.Code != 200 {
 		t.Errorf("signatures in log, the banned address: %d", w.Code)
 	}
+	noBan := &Handler{Signatures: []Signature{scraperSig}, bans: h.bans}
+	noBan = enforcing(t, noBan, now)
+	if w := serve(t, noBan, browserClient(chromeUA, ip).request(noBan, "GET", "/en/heydealer")); w.Code != 200 {
+		t.Errorf("signature_ban dropped, the banned address: %d", w.Code)
+	}
 	back := &Handler{Signatures: []Signature{scraperSig}, SignatureBan: caddyDay, bans: h.bans}
 	back = enforcing(t, back, now)
 	if w := serve(t, back, browserClient(chromeUA, ip).request(back, "GET", "/en/heydealer")); w.Code != 403 {
 		t.Errorf("back in enforce: %d", w.Code)
+	}
+}
+
+// A header sent twice is matched by its first value.
+func TestSignatureFirstValue(t *testing.T) {
+	now := time.Now()
+	h := signing(t, &now, scraperSig)
+	r := browserClient(stormUA, "203.0.113.60").request(h, "GET", "/api/x")
+	r.Header.Set("Accept-Encoding", scraperAE)
+	r.Header.Add("Accept-Encoding", "zstd")
+	if w := serve(t, h, r); w.Code != 403 {
+		t.Errorf("the scraper's value first: %d", w.Code)
 	}
 }
 

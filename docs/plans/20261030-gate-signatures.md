@@ -43,7 +43,7 @@ Base: afbf32b | Branch: feat/gate-signatures | Задача: kopandante/todo#419
 - [x] 0 worktree
 - [x] 1 план
 - [x] 2 реализация (proxy/gate/signature.go + тесты, мутации 5/5 убиты)
-- [ ] 3 PR
+- [x] 3 PR (#127)
 - [ ] 4 review-loop green
 - [ ] 5 merge, образ gate5, DefaultProxyImage по digest
 - [ ] 6 `boks proxy upgrade` на hb-sites (слово infra-pm — перезапуск прокси)
