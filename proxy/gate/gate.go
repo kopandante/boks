@@ -455,10 +455,19 @@ func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload
 			return deny("no_fp_header", forbidden), &pl
 		}
 	}
-	if pl.ip != ip {
+	if pl.ip != ip && !googlePool(pl.ip, ip) {
 		return deny("ip_mismatch", addressMismatch), &pl
 	}
 	return allow("token"), &pl
+}
+
+// googlePool says whether the token's address a and the request's b are both Google's: its renderer takes
+// the token from one crawl address and calls the API from the next (66.249.77.193, then .192 —
+// cars.dbauto.kr 30.10), and the card it renders stays "loading" in the index (todo#419).
+func googlePool(a, b string) bool {
+	x, errA := netip.ParseAddr(a)
+	y, errB := netip.ParseAddr(b)
+	return errA == nil && errB == nil && isGoogle(x) && isGoogle(y)
 }
 
 // refuse answers as NextResponse.json({error}, {status}) does.

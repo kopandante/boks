@@ -349,3 +349,24 @@ func TestSkipFPAnchored(t *testing.T) {
 		}
 	}
 }
+
+// A token of one Google crawl address passes from another of Google's; a visitor's token from Google's
+// address, or Google's from a visitor's, is still refused.
+func TestGooglePool(t *testing.T) {
+	h := enforcing(t, &Handler{}, time.Now())
+	cases := []struct {
+		name, signedFor, from string
+		status                int
+	}{
+		{"Google's token from the next Google address", "66.249.77.193", "66.249.77.192", 200},
+		{"Google's token from a visitor", "66.249.77.193", visitor, 403},
+		{"a visitor's token from Google", visitor, "66.249.77.192", 403},
+	}
+	for _, c := range cases {
+		r := request(http.MethodGet, "/api/encar/catalog", c.from)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, c.signedFor)})
+		if w := serve(t, h, r); w.Code != c.status {
+			t.Errorf("%s: %d %s, want %d", c.name, w.Code, w.Body.String(), c.status)
+		}
+	}
+}
