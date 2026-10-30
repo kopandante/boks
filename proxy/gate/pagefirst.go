@@ -12,8 +12,14 @@ package gate
 // restart forgets them, and every visitor in the middle of a visit would then be an address without a
 // page; so would every visitor of a group whose page_first a reload turns on. So for warmup after
 // page_first goes on for a group in the process nothing is refused, and an address without a page is
-// written and kept as if it had one: the visit goes on. Google's and Yandex's crawlers, the checks' exempt_ranges, the partner's Bearer and
-// the health probe are never asked.
+// written and kept as if it had one: the visit goes on. Google's and Yandex's crawlers, the checks' exempt_ranges, the partner's Bearer,
+// the health probe and the exemptions — servers' calls that ask for no page — are never asked; the
+// token's issue, exempt as it is, is: a scraper asks for it, a browser after its page.
+//
+// An IPv6 address counts by its /64: a page from one address of it opens the API to all of it, as a
+// browser's privacy addresses change within one, and a /64 fills the store with one entry, not 2^64.
+// A full store fails open: an address it has no room for is not refused, and the overflow goes into the
+// log once while it lasts.
 
 import (
 	"fmt"
@@ -44,6 +50,9 @@ const (
 	// maxPages bounds the addresses kept over every group: a day of cars.dbauto.kr is under 2 000
 	// visitors' addresses, an entry under a hundred bytes.
 	maxPages = 500_000
+	// pageSweepEvery is how often at most a full store looks for entries past the window: not on every
+	// new address, which would scan it all under the one lock.
+	pageSweepEvery = time.Minute
 )
 
 func (pf *PageFirst) on() bool { return pf != nil && (pf.Mode == "log" || pf.Mode == "enforce") }
@@ -79,8 +88,16 @@ func (h *Handler) sawPage(r *http.Request, p, ip string) {
 	if !h.PageFirst.on() || !pageRequest(r, p) {
 		return
 	}
-	if a, err := netip.ParseAddr(ip); err == nil {
-		h.pageStore().saw(h.Name, a, h.now())
+	if a, err := netip.ParseAddr(ip); err == nil && h.pageStore().saw(h.Name, a, h.now()) {
+		h.logFull()
+	}
+}
+
+// logFull writes that the store of pages went full: an address it has no room for passes, page or not.
+func (h *Handler) logFull() {
+	if h.logger != nil {
+		h.logger.Error("page_first: the store of pages is full, new addresses pass unchecked",
+			zap.String("group", h.Name), zap.Int("max", maxPages))
 	}
 }
 
@@ -95,12 +112,15 @@ func (h *Handler) pageless(r *http.Request, p, ip string) (decision, bool) {
 	if err != nil || h.spared(r, a) {
 		return decision{}, false
 	}
-	seen, warming := h.pageStore().ask(h.Name, a, h.now(), time.Duration(pf.Window), pf.warmup())
-	if seen {
+	ans := h.pageStore().ask(h.Name, a, h.now(), time.Duration(pf.Window), pf.warmup())
+	if ans.firstFull {
+		h.logFull()
+	}
+	if ans.seen || ans.unkept {
 		return decision{}, false
 	}
 	setField(r, zap.String("gate_behavior", "no_page"))
-	if pf.Mode != "enforce" || warming {
+	if pf.Mode != "enforce" || ans.warming {
 		return decision{}, false
 	}
 	return deny("no_page", forbidden), true
@@ -126,6 +146,21 @@ type pageStore struct {
 	max    int
 	// window is the longest window the store was asked with, for the sweep.
 	window time.Duration
+	// swept is when a full store last looked for entries past the window.
+	swept time.Time
+	// full is set while a new address found no room, so the overflow is logged once per episode, as
+	// boks_ban's store does.
+	full bool
+}
+
+// pageKey is a's entry in group: an IPv6 address by its /64.
+func pageKey(group string, a netip.Addr) banKey {
+	if a.Is6() {
+		if p, err := a.Prefix(64); err == nil {
+			a = p.Addr()
+		}
+	}
+	return banKey{group, a}
 }
 
 // groupSpan is since when a group has had page_first on, and how many handlers provisioned have it on:
@@ -162,11 +197,19 @@ func (s *pageStore) end(group string) {
 	}
 }
 
-// saw keeps a page of a in group at now.
-func (s *pageStore) saw(group string, a netip.Addr, now time.Time) {
+// saw keeps a page of a in group at now, and says whether the store went full on it.
+func (s *pageStore) saw(group string, a netip.Addr, now time.Time) (firstFull bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.put(banKey{group, a}, now)
+	_, firstFull = s.put(pageKey(group, a), now)
+	return firstFull
+}
+
+// answer is ask's: whether the address asked for a page within the window; whether the group warms
+// up; whether the store, full, has no room for the address, which then passes; and whether that began
+// the overflow.
+type answer struct {
+	seen, warming, unkept, firstFull bool
 }
 
 // ask says whether a asked for a page of group within window before now, and whether the group is
@@ -176,36 +219,59 @@ func (s *pageStore) saw(group string, a netip.Addr, now time.Time) {
 // the warmup an address without a page is kept too: its page may have come before the process knew
 // the group's pages — a restart of the proxy, page_first turned on by a reload — and the visit goes on
 // without one.
-func (s *pageStore) ask(group string, a netip.Addr, now time.Time, window, warmup time.Duration) (seen, warming bool) {
+func (s *pageStore) ask(group string, a netip.Addr, now time.Time, window, warmup time.Duration) (ans answer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if window > s.window {
 		s.window = window
 	}
 	if g := s.groups[group]; g == nil || now.Sub(g.began) < warmup {
-		warming = true
+		ans.warming = true
 	}
-	k := banKey{group, a}
+	k := pageKey(group, a)
 	t, ok := s.last[k]
-	seen = ok && now.Sub(t) < window
-	if seen || warming {
-		s.put(k, now)
+	ans.seen = ok && now.Sub(t) < window
+	switch {
+	case ans.seen || ans.warming:
+		_, ans.firstFull = s.put(k, now)
+	case !ok:
+		// An address the store has no room for may have had its page then: it passes.
+		ans.unkept, ans.firstFull = s.noRoom(k, now)
 	}
-	return seen, warming
+	return ans
 }
 
-// put keeps k at now. A full store sweeps the entries past the window first; still full, it keeps no
-// new address, which then reads as without a page.
-func (s *pageStore) put(k banKey, now time.Time) {
-	if _, ok := s.last[k]; !ok && len(s.last) >= s.max {
+// noRoom says whether the store is full for k, a new key: swept of the entries past the window at most
+// once a pageSweepEvery, still full. firstFull is the first of an overflow.
+func (s *pageStore) noRoom(k banKey, now time.Time) (full, firstFull bool) {
+	if _, ok := s.last[k]; ok || len(s.last) < s.max {
+		return false, false
+	}
+	if now.Sub(s.swept) >= pageSweepEvery {
+		s.swept = now
 		for key, t := range s.last {
 			if now.Sub(t) >= s.window {
 				delete(s.last, key)
 			}
 		}
-		if len(s.last) >= s.max {
-			return
+		if len(s.last) < s.max {
+			return false, false
 		}
 	}
+	firstFull = !s.full
+	s.full = true
+	return true, firstFull
+}
+
+// put keeps k at now, unless the store is full for it.
+func (s *pageStore) put(k banKey, now time.Time) (kept, firstFull bool) {
+	_, had := s.last[k]
+	if full, first := s.noRoom(k, now); full {
+		return false, first
+	}
+	if !had {
+		s.full = false
+	}
 	s.last[k] = now
+	return true, false
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -185,21 +186,129 @@ func TestPageFirstValidate(t *testing.T) {
 	}
 }
 
+// A full store fails open: an address it has no room for passes, and the overflow is told once while it
+// lasts; a page past the window is swept for a new address.
 func TestPageStoreFull(t *testing.T) {
 	now := time.Now()
 	s := newPageStore()
 	s.begin("g", now.Add(-time.Hour))
 	s.max = 1
-	a, b := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2")
-	s.saw("g", a, now)
-	s.ask("g", a, now, time.Hour, time.Minute)
-	s.saw("g", b, now)
-	if seen, _ := s.ask("g", b, now, time.Hour, time.Minute); seen {
-		t.Error("kept past the bound")
+	a, b, c := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2"), netip.MustParseAddr("203.0.113.3")
+	if s.saw("g", a, now) {
+		t.Error("full with room")
 	}
-	s.saw("g", b, now.Add(2*time.Hour))
-	if seen, _ := s.ask("g", b, now.Add(2*time.Hour), time.Hour, time.Minute); !seen {
-		t.Error("a page past the window was not swept for a new one")
+	if ans := s.ask("g", a, now, time.Hour, time.Minute); !ans.seen || ans.unkept {
+		t.Errorf("a: %+v", ans)
+	}
+	if !s.saw("g", b, now) {
+		t.Error("the overflow's first page not told")
+	}
+	if ans := s.ask("g", b, now, time.Hour, time.Minute); !ans.unkept || ans.seen || ans.firstFull {
+		t.Errorf("b, no room: %+v", ans)
+	}
+	if ans := s.ask("g", c, now, time.Hour, time.Minute); !ans.unkept || ans.firstFull {
+		t.Errorf("c, no room, told once: %+v", ans)
+	}
+	if len(s.last) != 1 {
+		t.Errorf("kept %d past the bound", len(s.last))
+	}
+	later := now.Add(2 * time.Hour)
+	if s.saw("g", b, later) {
+		t.Error("swept and kept, yet told full")
+	}
+	if ans := s.ask("g", b, later, time.Hour, time.Minute); !ans.seen {
+		t.Errorf("a page past the window was not swept for a new one: %+v", ans)
+	}
+	// Kept again, the next overflow is told anew.
+	if !s.saw("g", c, later) {
+		t.Error("a new overflow not told")
+	}
+}
+
+// In enforce, an address the full store has no room for passes its API: the store full is no refusal.
+func TestPageFirstFullFailsOpen(t *testing.T) {
+	now := time.Now()
+	h := pageFirsting(t, &now, "enforce")
+	h.pages.max = 1
+	serve(t, h, browserClient(chromeUA, "203.0.113.80").request(h, "GET", "/"))
+	r, extra := withLog(browserClient(chromeUA, "203.0.113.81").request(h, "GET", "/api/x"))
+	if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_behavior"] != nil {
+		t.Errorf("no room, no page: %d %v", w.Code, fields(extra))
+	}
+	// With room, the address without a page is refused again.
+	h.pages.max = 2
+	if code := serve(t, h, browserClient(chromeUA, "203.0.113.81").request(h, "GET", "/api/x")).Code; code != 403 {
+		t.Errorf("room, no page: %d", code)
+	}
+}
+
+// A full store looks for entries past the window at most once a minute, not on every new address.
+func TestPageStoreSweepsOnceAMinute(t *testing.T) {
+	t0 := time.Now()
+	s := newPageStore()
+	s.begin("g", t0.Add(-time.Hour))
+	s.max = 2
+	s.ask("g", netip.MustParseAddr("203.0.113.9"), t0, time.Hour, time.Minute)
+	s.saw("g", netip.MustParseAddr("203.0.113.1"), t0)
+	s.saw("g", netip.MustParseAddr("203.0.113.2"), t0)
+	// Full, nothing past the window: the sweep finds nothing.
+	s.saw("g", netip.MustParseAddr("203.0.113.3"), t0.Add(59*time.Minute+50*time.Second))
+	// Both past the window now, but swept 20 seconds ago: no sweep, no room.
+	d := netip.MustParseAddr("203.0.113.4")
+	s.saw("g", d, t0.Add(time.Hour+10*time.Second))
+	if _, ok := s.last[pageKey("g", d)]; ok || len(s.last) != 2 {
+		t.Errorf("swept within the minute: %d kept", len(s.last))
+	}
+	// A minute after the last sweep: swept, kept.
+	e := netip.MustParseAddr("203.0.113.5")
+	s.saw("g", e, t0.Add(time.Hour+50*time.Second))
+	if _, ok := s.last[pageKey("g", e)]; !ok || len(s.last) != 1 {
+		t.Errorf("not swept past the minute: %d kept", len(s.last))
+	}
+}
+
+// An IPv6 address counts by its /64: a page from one address opens the API to the /64 and to no other,
+// and the /64's addresses are one entry.
+func TestPageFirstIPv6By64(t *testing.T) {
+	now := time.Now()
+	h := pageFirsting(t, &now, "enforce")
+	serve(t, h, browserClient(chromeUA, "2001:db8:1:2::1").request(h, "GET", "/"))
+	for _, ip := range []string{"2001:db8:1:2::1", "2001:db8:1:2:aaaa:bbbb:cccc:dddd"} {
+		if code := serve(t, h, browserClient(chromeUA, ip).request(h, "GET", "/api/x")).Code; code != 200 {
+			t.Errorf("%s, the /64's page: %d", ip, code)
+		}
+	}
+	if code := serve(t, h, browserClient(chromeUA, "2001:db8:1:3::1").request(h, "GET", "/api/x")).Code; code != 403 {
+		t.Errorf("another /64: %d", code)
+	}
+	for i := range 50 {
+		ip := "2001:db8:1:2::" + strconv.Itoa(i+10)
+		serve(t, h, browserClient(chromeUA, ip).request(h, "GET", "/"))
+	}
+	if len(h.pages.last) != 1 {
+		t.Errorf("one /64 kept as %d entries", len(h.pages.last))
+	}
+}
+
+// The exemptions — servers' calls, which ask for no page — are not asked; the token's issue is.
+func TestPageFirstExemptions(t *testing.T) {
+	now := time.Now()
+	h := pageFirsting(t, &now, "enforce")
+	h.Exempt = []Exempt{{Exact: "/api/china/sync", Methods: []string{"POST"}}}
+	h = enforcing(t, h, now.Add(-time.Hour))
+	h.now = func() time.Time { return now }
+	for _, c := range []struct{ method, target string }{
+		{"GET", "/api/env-check"}, {"GET", "/api/admin/users"}, {"POST", "/api/china/sync"},
+	} {
+		r, extra := withLog(request(c.method, c.target, "203.0.113.90"))
+		r = withVars(r, "203.0.113.90", false)
+		if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_reason"] != "exempt" || fields(extra)["gate_behavior"] != nil {
+			t.Errorf("%s %s without a page: %d %v", c.method, c.target, w.Code, fields(extra))
+		}
+	}
+	r, extra := withLog(browserClient(chromeUA, "203.0.113.91").request(h, "POST", tokenPath))
+	if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "no_page" {
+		t.Errorf("the token's issue without a page: %d %v", w.Code, fields(extra))
 	}
 }
 
