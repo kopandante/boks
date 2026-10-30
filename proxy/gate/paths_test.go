@@ -370,3 +370,31 @@ func TestGooglePool(t *testing.T) {
 		}
 	}
 }
+
+// An expired token of a Google address passes from a Google address for up to googleGrace past its
+// issue; a visitor's, a day-old one, one from the future or one from a visitor's address is refused.
+func TestGoogleLate(t *testing.T) {
+	now := time.Now()
+	h := enforcing(t, &Handler{}, now)
+	g1, g2 := "66.249.77.193", "66.249.77.192"
+	cases := []struct {
+		name, signedFor, from string
+		age                   time.Duration
+		status                int
+	}{
+		{"Google's expired token from Google", g1, g2, time.Hour, 200},
+		{"Google's token at the grace's end", g1, g1, googleGrace, 200},
+		{"Google's token past the grace", g1, g2, googleGrace + time.Minute, 401},
+		{"Google's token from the future", g1, g2, -time.Hour, 401},
+		{"Google's expired token from a visitor", g1, visitor, time.Hour, 401},
+		{"a visitor's expired token from Google", visitor, g2, time.Hour, 401},
+		{"a visitor's expired token", visitor, visitor, time.Hour, 401},
+	}
+	for _, c := range cases {
+		r := request(http.MethodGet, "/api/encar/catalog", c.from)
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: issuedAgo(h, now, c.age, fp, c.signedFor)})
+		if w := serve(t, h, r); w.Code != c.status {
+			t.Errorf("%s: %d %s, want %d", c.name, w.Code, w.Body.String(), c.status)
+		}
+	}
+}
