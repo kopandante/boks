@@ -76,11 +76,15 @@ type Handler struct {
 	// set, is how long an address an enforced one matched is refused by the group (signature.go).
 	Signatures   []Signature    `json:"signatures,omitempty"`
 	SignatureBan caddy.Duration `json:"signature_ban,omitempty"`
+	// PageFirst, when on, refuses the API to an address that asked for no page of the group within its
+	// window (pagefirst.go).
+	PageFirst *PageFirst `json:"page_first,omitempty"`
 
 	exempt       []exemptRule
 	checksExempt []netip.Prefix
 	bearer       *bearer
-	bans         *banStore // the tests' own; sharedBans when nil
+	bans         *banStore  // the tests' own; sharedBans when nil
+	pages        *pageStore // the tests' own; sharedPages when nil
 	logger       *zap.Logger
 	now          func() time.Time
 	// fault and cookieFault, when set, run where the handler decides and where it fixes a cookie: the
@@ -146,6 +150,11 @@ func (h *Handler) Validate() error {
 	}
 	if err := h.validateSignatures(); err != nil {
 		return err
+	}
+	if h.PageFirst != nil {
+		if err := h.PageFirst.validate(h.Mode); err != nil {
+			return err
+		}
 	}
 	if h.Checks != nil {
 		return h.Checks.validate(h.Mode)
@@ -359,11 +368,15 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 		return d
 	}
 	if !strings.HasPrefix(p, "/api/") {
+		h.sawPage(r, p, ip)
 		return decision{verdict: "page"}
 	}
 	// Before the gated prefixes, as request-gate answers the probe before its API gate.
 	if p == healthPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		return allow("health")
+	}
+	if d, ok := h.pageless(r, p, ip); ok {
+		return d
 	}
 	if h.exempted(p, r.Method) {
 		if p == tokenPath && !sameOrigin(r) {
