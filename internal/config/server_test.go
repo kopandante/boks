@@ -36,6 +36,21 @@ func TestParseServer(t *testing.T) {
 	}
 }
 
+// An allow by a header names its hosts by host or by domains, as the pool's gateway on hb-poolapi sells
+// its API by X-Cars-Key.
+func TestParseServerAllowByHeader(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [hb-poolapi]\nrevision: 1\nbots:\n  allow:\n" +
+		"    - {domains: [v1.backend.dev.habsidev.com], header: X-Cars-Key}\n" +
+		"    - {host: translate.habsidev.com, paths: [/api], header: X-Cars-Key}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := s.Bots.Allow
+	if len(a) != 2 || a[0].Domains[0] != "v1.backend.dev.habsidev.com" || a[0].Header != "X-Cars-Key" || a[1].Host != "translate.habsidev.com" {
+		t.Errorf("parsed wrong: %+v", a)
+	}
+}
+
 // A server.yml that only lists servers is what `boks server install` reads: it applies no policy, so
 // it needs no revision.
 func TestParseServerWithServersOnly(t *testing.T) {
@@ -69,6 +84,13 @@ func TestParseServerRejects(t *testing.T) {
 		"nothing to match":       allow(`{}`),
 		"one lowercase host":     allow(`{host: "*.habsidev.com"}`),
 		"absolute prefix":        allow(`{paths: [pics]}`),
+		// An allow by a header without its hosts would open every host of the server to anyone writing it.
+		"needs host or domains":               allow(`{header: X-Cars-Key}`),
+		"needs host or domains: without them": allow(`{header: X-Cars-Key, paths: [/api], user_agent: bot}`),
+		"a header's name":                     allow(`{host: translate.habsidev.com, header: "X Cars Key"}`),
+		"every request brings it":             allow(`{host: translate.habsidev.com, header: user-agent}`),
+		"one or the other":                    allow(`{host: translate.habsidev.com, domains: [habsidev.com], header: X-Cars-Key}`),
+		"domains: \"*.habsidev.com\"":         allow(`{domains: ["*.habsidev.com"], header: X-Cars-Key}`),
 	}
 	for want, doc := range cases {
 		if _, err := ParseServer([]byte(doc)); err == nil || !strings.Contains(err.Error(), want) {

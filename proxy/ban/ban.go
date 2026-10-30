@@ -85,13 +85,17 @@ type Handler struct {
 	// MaxFingerprints bounds the heuristics' fingerprints tracked at once, DefaultMaxFingerprints when
 	// not given.
 	MaxFingerprints int `json:"max_fingerprints,omitempty"`
+	// Bearer are the gate groups' partner keys: a read one of them lets in is never counted, flagged or
+	// refused for its address's ban (bearer.go).
+	Bearer []Bearer `json:"bearer,omitempty"`
 
-	rules  []rule
-	paths  []*regexp.Regexp
-	ranges []netip.Prefix
-	deny   []netip.Prefix
-	store  *store
-	logger *zap.Logger
+	bearers []*bearer
+	rules   []rule
+	paths   []*regexp.Regexp
+	ranges  []netip.Prefix
+	deny    []netip.Prefix
+	store   *store
+	logger  *zap.Logger
 }
 
 // Rule counts the requests of an address it selects: those of Class and, when Paths are given, on a
@@ -178,6 +182,14 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		}
 		h.deny = append(h.deny, p.Masked())
 	}
+	h.bearers = nil
+	for i := range h.Bearer {
+		b, err := h.Bearer[i].compile()
+		if err != nil {
+			return fmt.Errorf("bearer[%d]: %w", i, err)
+		}
+		h.bearers = append(h.bearers, b)
+	}
 	if h.store == nil {
 		h.store = shared
 	}
@@ -227,7 +239,8 @@ func (h *Handler) Validate() error {
 // refused to a banned address: the ban keeps the address from every app, its images and Next.js's
 // image optimizer included. An address in an exempt range is neither counted nor refused, so adding
 // a banned address's range to exempt_ranges lifts its ban with the next apply — and its fingerprint's
-// too. With the heuristics on, a request with the strong sign goes to its fingerprint's cluster first,
+// too. A partner's read with a valid key of a gate group (bearer.go) is likewise neither counted, nor
+// flagged, nor refused: its address's other requests are, and its ban still holds for them. With the heuristics on, a request with the strong sign goes to its fingerprint's cluster first,
 // and in mode ban a banned fingerprint's flagged requests get 403 from any address. ACME's challenge
 // never gets here: Caddy answers it before any route, and boks's ban route leaves it out by its matcher.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
@@ -242,7 +255,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 		return refuse(w, "Forbidden\n")
 	}
-	if h.exemptAddr(addr) {
+	if h.exemptAddr(addr) || h.keyed(r) {
 		return next.ServeHTTP(w, r)
 	}
 	if h.Heuristics.on() && forged(r.Header) && h.flag(r, addr) {

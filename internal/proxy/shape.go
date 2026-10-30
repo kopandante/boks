@@ -173,10 +173,7 @@ func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
 	if err != nil {
 		return err
 	}
-	probe, fields := banProbe, "rules and heuristics"
-	if len(p.Ban.DenyRanges) > 0 {
-		probe, fields = banProbeDeny, "rules, heuristics and deny_ranges"
-	}
+	probe, fields := banProbeOf(p)
 	if _, err := r.Pipe(ctx, probe, "docker", "run", "--rm", "-i", "--network", "none", "--entrypoint", "caddy", image, "validate", "--config", "/dev/stdin"); err != nil {
 		verb := "runs"
 		if state != "running" {
@@ -188,13 +185,30 @@ func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
 	return nil
 }
 
-// banProbe is a config with every field of the ban handler this boks writes but deny_ranges, and
-// nothing else Caddy would reach out for: no admin endpoint, one server no one connects to.
-// banProbeDeny is it with deny_ranges, and the route's client_ip matcher.
-var (
-	banProbe     = probeOf(``, ``)
-	banProbeDeny = probeOf(`"match":[{"client_ip":{"ranges":["198.51.100.0/24"]}}],`, `,"deny_ranges":["198.51.100.0/24"]`)
+// The probe's parts beside every field of the ban handler this boks writes: deny_ranges with the route's
+// client_ip matcher, and the partners' keys — a key of no one, its digest the SHA-256 of nothing.
+const (
+	probeDenyMatch = `"match":[{"client_ip":{"ranges":["198.51.100.0/24"]}}],`
+	probeDeny      = `,"deny_ranges":["198.51.100.0/24"]`
+	probeBearer    = `,"bearer":[{"hosts":["probe.example.com"],"paths":["^/api/"],"methods":["GET"],` +
+		`"digests":["e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]}]`
 )
+
+// banProbeOf is a config of p's ban, and nothing else Caddy would reach out for — no admin endpoint, one
+// server no one connects to — with the fields it asks the image for: deny_ranges only when p has them,
+// the partners' keys only with spare_bearer, so an image whose handler predates either still runs a
+// policy without it.
+func banProbeOf(p Policy) ([]byte, string) {
+	match, extra, fields := ``, ``, "rules and heuristics"
+	if len(p.Ban.DenyRanges) > 0 {
+		match, extra, fields = probeDenyMatch, probeDeny, "rules, heuristics and deny_ranges"
+	}
+	if p.SpareBearer {
+		extra += probeBearer
+		fields += " and the gate's partner keys"
+	}
+	return probeOf(match, extra), fields
+}
 
 func probeOf(match, deny string) []byte {
 	return []byte(`{"admin":{"disabled":true},"apps":{"http":{"servers":{"probe":{"listen":[":80"],"routes":[{` + match + `"handle":[` +

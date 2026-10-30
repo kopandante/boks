@@ -16,8 +16,8 @@ package gate
 // bans, and one that brings both back brings back those not yet over. A ban does not know the signature
 // that made it, so a wrong pattern corrected in enforce keeps the addresses it banned: lift them first.
 // The addresses are kept by the process — every deploy on the server reloads the proxy, which keeps
-// them — and lost on its restart. Google's and Yandex's crawlers
-// and the checks' exempt_ranges are never matched nor banned.
+// them — and lost on its restart. Google's and Yandex's crawlers, the checks' exempt_ranges and a
+// partner's read with a valid Bearer are never matched nor banned.
 
 import (
 	"errors"
@@ -190,9 +190,12 @@ func (h *Handler) enforces() bool {
 	return false
 }
 
-// spared says whether a is never matched: an exempt address of the checks, Google's, Yandex's robots.
+// spared says whether r from a is never matched: an exempt address of the checks, Google's, Yandex's
+// robots, and a partner's read with a valid Bearer from wherever it comes. The partner's server sends
+// what its HTTP library sends — the very shapes a signature is written against — and a match would
+// refuse a read the owner sold and ban the partner's address with it; its ban, the read too.
 func (h *Handler) spared(r *http.Request, a netip.Addr) bool {
-	return inRanges(h.checksExempt, a) || isGoogle(a) || isYandex(a, r.UserAgent())
+	return inRanges(h.checksExempt, a) || isGoogle(a) || isYandex(a, r.UserAgent()) || h.keyed(r)
 }
 
 // banAddr bans a for the group's signature_ban, when it has one, and writes the ban's start.

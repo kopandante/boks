@@ -1,6 +1,9 @@
 package gate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -308,5 +311,55 @@ func TestBanStoreFull(t *testing.T) {
 	}
 	if !s.ban("g", b, now.Add(3*time.Hour), now.Add(2*time.Hour)) || !s.banned("g", b, now.Add(2*time.Hour)) {
 		t.Error("an ended ban was not swept for a new one")
+	}
+}
+
+// A partner's read with a valid Bearer is never matched nor banned, and an address already banned does
+// not refuse it: its server sends what its HTTP library sends, the very shape a signature names. A
+// Bearer that does not let the request in — another token, a write, a path outside its own — is matched
+// and banned like any request (todo#419).
+func TestSignatureSparesBearer(t *testing.T) {
+	partner := strings.Repeat("p", 40)
+	sum := sha256.Sum256([]byte(partner))
+	now := time.Now()
+	h := &Handler{Signatures: []Signature{scraperSig}, SignatureBan: caddyDay, bans: newBanStore(),
+		Bearer: &Bearer{Paths: []string{`^/api/encar(/|$)`}, Digests: []string{hex.EncodeToString(sum[:])}}}
+	h = enforcing(t, h, now)
+	keyed := func(method, target, ip, key string) *http.Request {
+		r := withVars(request(method, target, ip), ip, false)
+		r.Header.Set("User-Agent", stormUA)
+		r.Header.Set("Accept-Encoding", scraperAE)
+		r.Header.Set("Authorization", "Bearer "+key)
+		return r
+	}
+	partnerIP := "198.51.100.20"
+	r, extra := withLog(keyed("GET", "/api/encar/catalog", partnerIP, partner))
+	if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_reason"] != "bearer" || fields(extra)["gate_signature"] != nil {
+		t.Fatalf("the partner: %d %v", w.Code, fields(extra))
+	}
+	if h.bans.banned(h.Name, netip.MustParseAddr(partnerIP), now) {
+		t.Error("the partner's address was banned")
+	}
+	for name, c := range map[string]struct{ method, target, ip, key string }{
+		"another token":     {"GET", "/api/encar/catalog", "198.51.100.21", strings.Repeat("q", 40)},
+		"a write":           {"POST", "/api/encar/catalog", "198.51.100.22", partner},
+		"outside its paths": {"GET", "/api/rates", "198.51.100.23", partner},
+	} {
+		r, extra := withLog(keyed(c.method, c.target, c.ip, c.key))
+		if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "signature" {
+			t.Errorf("%s: %d %v, want 403 signature", name, w.Code, fields(extra))
+		}
+		if !h.bans.banned(h.Name, netip.MustParseAddr(c.ip), now) {
+			t.Errorf("%s: the address was not banned", name)
+		}
+	}
+	// The address the request with another token got banned: the partner's keyed read from it still
+	// passes, a browser's read from it does not.
+	if w := serve(t, h, keyed("GET", "/api/encar/catalog", "198.51.100.21", partner)); w.Code != 200 {
+		t.Errorf("the partner from a banned address: %d", w.Code)
+	}
+	r, extra = withLog(browserClient(chromeUA, "198.51.100.21").request(h, "GET", "/api/encar/catalog"))
+	if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "signature_ban" {
+		t.Errorf("a browser from the banned address: %d %v", w.Code, fields(extra))
 	}
 }

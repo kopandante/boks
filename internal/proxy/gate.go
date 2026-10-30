@@ -90,10 +90,21 @@ func secretNames(p Policy) ([]string, error) {
 	return names, err
 }
 
-// gateHandler is one group's handler with the secrets in place, and the app whose hosts it covers.
+// gateHandler is one group's handler with the secrets in place, the app whose hosts it covers, and its
+// partner's key when it has one.
 type gateHandler struct {
 	app, group string
 	raw        json.RawMessage
+	bearer     *banBearer
+}
+
+// banBearer is a group's partner key as the ban's handler takes it (proxy/ban, bearer.go): the paths and
+// methods of the group's bearer, its digests, and the hosts of its app on the server.
+type banBearer struct {
+	Hosts   []string `json:"hosts"`
+	Paths   []string `json:"paths"`
+	Methods []string `json:"methods,omitempty"`
+	Digests []string `json:"digests"`
 }
 
 // gateHandlers are the handlers of p's groups that are not off: the group as written, its secret_env
@@ -118,9 +129,14 @@ func gateHandlers(p Policy) ([]gateHandler, error) {
 			return nil, fmt.Errorf("gate group %s: the server keeps no secret %s; apply the policy again with it set", g.Name, g.SecretEnv)
 		}
 		h["secrets"] = secrets
+		var key *banBearer
 		if g.Bearer != nil {
 			var b map[string]json.RawMessage
 			if err := json.Unmarshal(g.raw["bearer"], &b); err != nil {
+				return nil, fmt.Errorf("gate group %s: bearer: %w", g.Name, err)
+			}
+			key = &banBearer{}
+			if err := json.Unmarshal(g.raw["bearer"], key); err != nil {
 				return nil, fmt.Errorf("gate group %s: bearer: %w", g.Name, err)
 			}
 			digests := p.GateSecrets[g.Bearer.DigestsEnv]
@@ -134,13 +150,14 @@ func gateHandlers(p Policy) ([]gateHandler, error) {
 			delete(bearer, "digests_env")
 			bearer["digests"] = digests
 			h["bearer"] = bearer
+			key.Hosts, key.Digests = nil, digests
 		}
 		h["handler"] = "boks_gate"
 		raw, err := json.Marshal(h)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, gateHandler{app: g.App, group: g.Name, raw: raw})
+		out = append(out, gateHandler{app: g.App, group: g.Name, raw: raw, bearer: key})
 	}
 	return out, nil
 }
@@ -157,6 +174,22 @@ func gateHandlers(p Policy) ([]gateHandler, error) {
 // another app routes on a covered host is left to that app, and the host's other paths, which fall
 // through to the wildcard, are gated.
 func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute, error) {
+	gm, err := gateMatches(hs, fragments, tls)
+	var out []caddyRoute
+	for _, g := range gm {
+		out = append(out, caddyRoute{Match: []match{g.m}, Handle: []handler{{raw: g.raw}}})
+	}
+	return out, err
+}
+
+// gatedMatch is a group's handler with the matcher of the requests it judges on one server.
+type gatedMatch struct {
+	gateHandler
+	m match
+}
+
+// gateMatches are gateRoutes' matchers, one a group with hosts on the server.
+func gateMatches(hs []gateHandler, fragments []Fragment, tls bool) ([]gatedMatch, error) {
 	apps := map[string][]string{} // canonical host -> the apps that route it
 	for _, f := range fragments {
 		for _, r := range f.Routes {
@@ -166,7 +199,7 @@ func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute,
 			}
 		}
 	}
-	var out []caddyRoute
+	var out []gatedMatch
 	for _, g := range hs {
 		var hosts []string
 		for _, r := range Of(fragments, g.app) {
@@ -218,9 +251,74 @@ func gateRoutes(hs []gateHandler, fragments []Fragment, tls bool) ([]caddyRoute,
 		if len(except) > 0 {
 			m.Not = except
 		}
-		out = append(out, caddyRoute{Match: []match{m}, Handle: []handler{{raw: g.raw}}})
+		out = append(out, gatedMatch{g, m})
 	}
 	return out, nil
+}
+
+// bearerAllows are the matchers of the requests no block refuses for their User-Agent on one server: a
+// group's own requests, as its gate route matches them, on its bearer's methods and paths, with
+// `Authorization: Bearer` and a token. A partner's server reading by the key is most often an HTTP
+// library — axios, python-requests — whose name is what a block refuses. The header alone is enough
+// here, unlike in the ban, which checks the key: the request goes on to the group's gate, which checks
+// the token's digest, and a request whose key does not pass gets 401 from the token check there — a
+// scraper writing the header gets past the block to a refusal still, and is counted by the ban.
+func bearerAllows(hs []gateHandler, fragments []Fragment, tls bool) ([]match, error) {
+	gm, err := gateMatches(hs, fragments, tls)
+	var out []match
+	for _, g := range gm {
+		if g.bearer == nil {
+			continue
+		}
+		m := g.m
+		m.Method = g.bearer.methods()
+		m.PathRegexp = &regexpMatch{Pattern: anyOf(g.bearer.Paths)}
+		m.HeaderRegexp = map[string]regexpMatch{"Authorization": {Pattern: `(?i)^bearer\s+\S`}}
+		out = append(out, m)
+	}
+	return out, err
+}
+
+// banBearers are the groups' partner keys with the hosts of their apps on the server, both 80's and
+// 443's — the ban judges every request of the server in one route — canonical, as the request's Host
+// arrives. A host under a group's wildcard that another app routes is the group's to the ban: the key
+// is the group's partner's still, and the other app's gate, if it has one, asks it nothing.
+func banBearers(hs []gateHandler, fragments []Fragment) []banBearer {
+	var out []banBearer
+	for _, g := range hs {
+		if g.bearer == nil {
+			continue
+		}
+		b := *g.bearer
+		for _, r := range Of(fragments, g.app) {
+			if h := hostname.Canonical(r.Host); !slices.Contains(b.Hosts, h) {
+				b.Hosts = append(b.Hosts, h)
+			}
+		}
+		if len(b.Hosts) == 0 {
+			continue
+		}
+		slices.Sort(b.Hosts)
+		out = append(out, b)
+	}
+	return out
+}
+
+// methods are the key's methods, GET and HEAD unless given, as the gate's handler takes them.
+func (b *banBearer) methods() []string {
+	if len(b.Methods) > 0 {
+		return b.Methods
+	}
+	return []string{"GET", "HEAD"}
+}
+
+// anyOf is one RE2 pattern matching what any of patterns matches.
+func anyOf(patterns []string) string {
+	q := make([]string, len(patterns))
+	for i, p := range patterns {
+		q[i] = "(?:" + p + ")"
+	}
+	return strings.Join(q, "|")
 }
 
 // checkGateHosts refuses routes that would put a host of a gated app beside another app's, without the

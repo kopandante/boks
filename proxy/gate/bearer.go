@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -78,4 +79,9 @@ func (b *bearer) admits(r *http.Request, p string) bool {
 		match |= subtle.ConstantTimeCompare(sum[:], d)
 	}
 	return match == 1
+}
+
+// keyed says whether r is a partner's read the group's Bearer lets in, on its cleaned path.
+func (h *Handler) keyed(r *http.Request) bool {
+	return h.bearer != nil && h.bearer.admits(r, path.Clean(r.URL.Path))
 }

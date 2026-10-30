@@ -123,13 +123,23 @@ type Fragment struct {
 // the config with no deny, and the next deploy from it would let the denied addresses in without a
 // word. Like 8, it is written only in the marker, by `boks server apply` of a policy with a deny: a
 // server without one stays open to the boks of format 8.
+//
+// Format 10 is the keys: a bots.allow by a header, and the partners of the gate's groups spared by the
+// ban and the blocks (spare_bearer). A boks of format 9 would read an allow by a header without the
+// header — an allow of the whole host, from the blocks and the ban — and assemble the config without
+// the partners' exemptions, so the next deploy from it would ban the partners again, without a word.
+// Like 8 and 9, it is written only in the marker, by `boks server apply` of a policy that has either.
 const FragmentFormat = 7
 
 // GateFormat is the format of a server whose policy has a gate.
 const GateFormat = 8
 
-// DenyFormat is the format of a server whose policy has a deny, and the newest this boks reads.
+// DenyFormat is the format of a server whose policy has a deny.
 const DenyFormat = 9
+
+// KeyFormat is the format of a server whose policy has a key — an allow by a header or spare_bearer —
+// and the newest this boks reads.
+const KeyFormat = 10
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -301,32 +311,13 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 	if len(skip) > 0 {
 		servers["https"].AutoHTTPS.SkipCertificates = skip
 	}
-	// The gate goes before the apps' routes, the redirect and the 404, after the blocks: a refused bot
-	// is no request to check a token of.
-	if len(p.Gate) > 0 {
-		hs, err := gateHandlers(p)
-		if err != nil {
+	hs, err := policyGate(p)
+	if err != nil {
+		return nil, err
+	}
+	for name, s := range servers {
+		if err := policyRoutes(p, hs, fragments, s, name == "https"); err != nil {
 			return nil, err
-		}
-		for name, s := range servers {
-			gate, err := gateRoutes(hs, fragments, name == "https")
-			if err != nil {
-				return nil, err
-			}
-			s.Routes = append(gate, s.Routes...)
-		}
-	}
-	// The policy's blocks go before everything else on each server — app routes, the redirect, the 404.
-	if bots := botRoutes(p); len(bots) > 0 {
-		for _, s := range servers {
-			s.Routes = append(slices.Clone(bots), s.Routes...)
-		}
-	}
-	// The ban before the blocks: a banned address is refused on any host before anything else is asked
-	// of its request, and a blocked bot's requests count toward a ban like anyone's.
-	if p.Ban != nil {
-		for _, s := range servers {
-			s.Routes = append([]caddyRoute{banRoute(*p.Ban, p)}, s.Routes...)
 		}
 	}
 	// A host no route names gets 404, as it did from kamal-proxy: Caddy alone answers it with an
@@ -357,6 +348,41 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 		return nil, err
 	}
 	return append(b, '\n'), nil
+}
+
+// policyGate are the handlers of p's gate, none without one.
+func policyGate(p Policy) ([]gateHandler, error) {
+	if len(p.Gate) == 0 {
+		return nil, nil
+	}
+	return gateHandlers(p)
+}
+
+// policyRoutes put the policy's routes before the apps' routes, the redirect and the 404 of one server:
+// the ban, then the blocks, then the gate. The ban first: a banned address is refused on any host before
+// anything else is asked of its request, and a blocked bot's requests count toward a ban like anyone's.
+// The gate after the blocks: a refused bot is no request to check a token of. With spare_bearer the
+// gate's partners are spared by the ban, which checks their key, and by the blocks (bearerAllows); a
+// policy without it — applied by an older boks — is assembled as that boks assembled it, so a proxy
+// whose ban knows no keys still takes the config.
+func policyRoutes(p Policy, hs []gateHandler, fragments []Fragment, s *server, tls bool) error {
+	gate, err := gateRoutes(hs, fragments, tls)
+	if err != nil {
+		return err
+	}
+	spared := hs
+	if !p.SpareBearer {
+		spared = nil
+	}
+	keys, err := bearerAllows(spared, fragments, tls)
+	if err != nil {
+		return err
+	}
+	s.Routes = slices.Concat(botRoutes(p, keys), gate, s.Routes)
+	if p.Ban != nil {
+		s.Routes = append([]caddyRoute{banRoute(*p.Ban, p, banBearers(spared, fragments))}, s.Routes...)
+	}
+	return nil
 }
 
 // The shape of Caddy's JSON config, as far as boks writes it.
@@ -415,8 +441,11 @@ type (
 		Terminal bool      `json:"terminal"`
 	}
 	match struct {
-		Host       []string               `json:"host,omitempty"`
-		Path       []string               `json:"path,omitempty"`
+		Host []string `json:"host,omitempty"`
+		Path []string `json:"path,omitempty"`
+		// PathRegexp matches the cleaned path by pattern; Method the request's method.
+		PathRegexp *regexpMatch           `json:"path_regexp,omitempty"`
+		Method     []string               `json:"method,omitempty"`
 		VarsRegexp map[string]regexpMatch `json:"vars_regexp,omitempty"`
 		// HeaderRegexp matches header values by pattern; Host is the request's host.
 		HeaderRegexp map[string]regexpMatch `json:"header_regexp,omitempty"`
@@ -474,6 +503,7 @@ type (
 		ExemptPaths  []string       `json:"exempt_paths,omitempty"`
 		ExemptRanges []string       `json:"exempt_ranges,omitempty"`
 		DenyRanges   []string       `json:"deny_ranges,omitempty"`
+		Bearer       []banBearer    `json:"bearer,omitempty"`
 		// raw is a handler boks passes as written — the gate's (gate.go) — and replaces every field above.
 		raw json.RawMessage
 	}
@@ -696,9 +726,9 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 		// The format a fragment opens with; one written before it was introduced has none.
 		var format int
 		if json.Unmarshal(v, &format) == nil {
-			if format > DenyFormat {
+			if format > KeyFormat {
 				return nil, fmt.Errorf("reading the proxy's routes: a route file has format %d, newer than this boks (%d) knows; "+
-					"update boks before changing this server", format, DenyFormat)
+					"update boks before changing this server", format, KeyFormat)
 			}
 			continue
 		}
