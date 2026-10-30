@@ -5,7 +5,8 @@
 // bodies, so the sites' client (lib/security 2.5) refreshes and retries as it does now; in log it
 // writes its verdict into the access log and lets everything through to the site, which still checks.
 //
-// The handler keeps no state: a reload or a restart of the proxy loses nothing.
+// The handler keeps no state but the addresses its signatures banned (signature.go): a reload loses
+// nothing, a restart of the proxy those bans.
 package gate
 
 import (
@@ -71,10 +72,15 @@ type Handler struct {
 	// Checks are what the gate asks of a request beside its token — the fingerprint header, Fetch
 	// Metadata, h2 from a browser — each off, log or enforce (checks.go).
 	Checks *Checks `json:"checks,omitempty"`
+	// Signatures are shapes of headers no browser sends, each off, log or enforce; SignatureBan, when
+	// set, is how long an address an enforced one matched is refused by the group (signature.go).
+	Signatures   []Signature    `json:"signatures,omitempty"`
+	SignatureBan caddy.Duration `json:"signature_ban,omitempty"`
 
 	exempt       []exemptRule
 	checksExempt []netip.Prefix
 	bearer       *bearer
+	bans         *banStore // the tests' own; sharedBans when nil
 	logger       *zap.Logger
 	now          func() time.Time
 	// fault and cookieFault, when set, run where the handler decides and where it fixes a cookie: the
@@ -107,6 +113,11 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 			return err
 		}
 	}
+	for i := range h.Signatures {
+		if err := h.Signatures[i].compile(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -132,6 +143,9 @@ func (h *Handler) Validate() error {
 		if len(s) < minSecret {
 			return fmt.Errorf("secrets[%d]: shorter than %d characters, as the sites refuse it", i, minSecret)
 		}
+	}
+	if err := h.validateSignatures(); err != nil {
+		return err
 	}
 	if h.Checks != nil {
 		return h.Checks.validate(h.Mode)
@@ -325,7 +339,8 @@ func requestToken(r *http.Request) string {
 }
 
 // decide is the API gate of request-gate.ts (apiGate), on the cleaned path, as Caddy's path matcher and
-// the apps see it: the exemptions, the partner's Bearer, then the token from the cookie or the header,
+// the apps see it. Past the path's own refusals, the signatures and their bans (signature.go) are asked of
+// every request, pages, the probe and the exemptions too; then, on /api/, the exemptions, the partner's Bearer, then the token from the cookie or the header,
 // its signature and age, the fingerprint, the address. A token without the address is refused, where
 // the site lets it through: the proxy never issues one, and the pages' tokens without it are what the
 // gate closes.
@@ -339,6 +354,9 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 	p := path.Clean(r.URL.Path)
 	if nextData(p) {
 		return deny("next_data", badPath)
+	}
+	if d, ok := h.signed(r, ip); ok {
+		return d
 	}
 	if !strings.HasPrefix(p, "/api/") {
 		return decision{verdict: "page"}
