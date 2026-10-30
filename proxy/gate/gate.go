@@ -85,6 +85,7 @@ type Handler struct {
 	bearer       *bearer
 	bans         *banStore  // the tests' own; sharedBans when nil
 	pages        *pageStore // the tests' own; sharedPages when nil
+	pageOn       bool       // counted in its group's page_first span, which Cleanup ends
 	logger       *zap.Logger
 	now          func() time.Time
 	// fault and cookieFault, when set, run where the handler decides and where it fixes a cookie: the
@@ -121,6 +122,19 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		if err := h.Signatures[i].compile(); err != nil {
 			return err
 		}
+	}
+	if h.PageFirst.on() {
+		h.pageStore().begin(h.Name, h.now())
+		h.pageOn = true
+	}
+	return nil
+}
+
+// Cleanup ends the handler's part in its group's page_first span (pagefirst.go).
+func (h *Handler) Cleanup() error {
+	if h.pageOn {
+		h.pageStore().end(h.Name)
+		h.pageOn = false
 	}
 	return nil
 }
@@ -472,5 +486,6 @@ func clientIP(r *http.Request) string {
 var (
 	_ caddy.Provisioner           = (*Handler)(nil)
 	_ caddy.Validator             = (*Handler)(nil)
+	_ caddy.CleanerUpper          = (*Handler)(nil)
 	_ caddyhttp.MiddlewareHandler = (*Handler)(nil)
 )

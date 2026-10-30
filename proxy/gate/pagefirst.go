@@ -7,10 +7,12 @@ package gate
 // address that asked for no page of the group within window goes into the access log as gate_behavior
 // no_page, and in enforce is refused, gate_reason no_page.
 //
-// The pages seen are kept by the process: a reload keeps them, a restart forgets them, and every
-// visitor in the middle of a visit would then be an address without a page. So a process refuses
-// nothing for warmup after it began — longer than a visit's pause between a page and its API calls —
-// and only writes. Google's and Yandex's crawlers, the checks' exempt_ranges, the partner's Bearer and
+// An address let through renews its window as a page does: a visitor working one page of a catalog
+// asks for none for as long as it works. The pages seen are kept by the process: a reload keeps them, a
+// restart forgets them, and every visitor in the middle of a visit would then be an address without a
+// page; so would every visitor of a group whose page_first a reload turns on. So for warmup after
+// page_first goes on for a group in the process nothing is refused, and an address without a page is
+// written and kept as if it had one: the visit goes on. Google's and Yandex's crawlers, the checks' exempt_ranges, the partner's Bearer and
 // the health probe are never asked.
 
 import (
@@ -27,9 +29,11 @@ import (
 // PageFirst is the group's rule of a page before the API: off — the default — log or enforce.
 type PageFirst struct {
 	Mode string `json:"mode,omitempty"`
-	// Window is how long an address's page lets its API requests through, renewed by each page.
+	// Window is how long an address's page lets its API requests through, renewed by each page and by
+	// each request it lets through.
 	Window caddy.Duration `json:"window"`
-	// Warmup is how long after the process began nothing is refused, defaultWarmup when not given.
+	// Warmup is how long after page_first went on for the group in the process nothing is refused,
+	// defaultWarmup when not given; not past the window.
 	Warmup caddy.Duration `json:"warmup,omitempty"`
 }
 
@@ -51,8 +55,8 @@ func (pf *PageFirst) warmup() time.Duration {
 	return defaultWarmup
 }
 
-// validate refuses a mode it does not know, enforce in a group that is not, and a window or a warmup
-// out of bounds.
+// validate refuses a mode it does not know, enforce in a group that is not, and, when on, a window or a
+// warmup out of bounds — the default warmup included.
 func (pf *PageFirst) validate(groupMode string) error {
 	w := time.Duration(pf.Window)
 	switch {
@@ -60,10 +64,12 @@ func (pf *PageFirst) validate(groupMode string) error {
 		return fmt.Errorf("page_first: mode %q must be off, log or enforce", pf.Mode)
 	case pf.Mode == "enforce" && groupMode != "enforce":
 		return fmt.Errorf("page_first: enforce goes with the group's mode enforce")
+	case !pf.on():
+		return nil
 	case w < minPageWindow || w > maxPageWindow:
 		return fmt.Errorf("page_first: window %s must be from %s to %s", w, minPageWindow, maxPageWindow)
-	case pf.Warmup != 0 && (time.Duration(pf.Warmup) < 0 || time.Duration(pf.Warmup) > w):
-		return fmt.Errorf("page_first: warmup %s must be from 0 to the window", time.Duration(pf.Warmup))
+	case pf.Warmup < 0 || pf.warmup() > w:
+		return fmt.Errorf("page_first: warmup %s must not be past the window %s", pf.warmup(), w)
 	}
 	return nil
 }
@@ -89,13 +95,12 @@ func (h *Handler) pageless(r *http.Request, p, ip string) (decision, bool) {
 	if err != nil || h.spared(r, a) {
 		return decision{}, false
 	}
-	now := h.now()
-	ps := h.pageStore()
-	if ps.seen(h.Name, a, now, time.Duration(pf.Window)) {
+	seen, warming := h.pageStore().ask(h.Name, a, h.now(), time.Duration(pf.Window), pf.warmup())
+	if seen {
 		return decision{}, false
 	}
 	setField(r, zap.String("gate_behavior", "no_page"))
-	if pf.Mode != "enforce" || ps.age(now) < pf.warmup() {
+	if pf.Mode != "enforce" || warming {
 		return decision{}, false
 	}
 	return deny("no_page", forbidden), true
@@ -108,31 +113,90 @@ func (h *Handler) pageStore() *pageStore {
 	return sharedPages
 }
 
-// sharedPages are the pages of every handler the process provisions; began is when the process did.
-var sharedPages = newPageStore(time.Now())
+// sharedPages are the pages of every handler the process provisions: a reload's handler of a group
+// finds the pages the one it replaced saw.
+var sharedPages = newPageStore()
 
-// pageStore is when each address last asked for a page, by group.
+// pageStore is when each address last asked for a page, or was let through by one, by group; and since
+// when each group has had page_first on in the process.
 type pageStore struct {
-	mu    sync.Mutex
-	last  map[banKey]time.Time
-	began time.Time
-	max   int
-	// window is the longest window a seen() asked with, for the sweep.
+	mu     sync.Mutex
+	last   map[banKey]time.Time
+	groups map[string]*groupSpan
+	max    int
+	// window is the longest window the store was asked with, for the sweep.
 	window time.Duration
 }
 
-func newPageStore(began time.Time) *pageStore {
-	return &pageStore{last: map[banKey]time.Time{}, began: began, max: maxPages}
+// groupSpan is since when a group has had page_first on, and how many handlers provisioned have it on:
+// a reload provisions the new ones before it cleans up the old, so the span goes on through it.
+type groupSpan struct {
+	began    time.Time
+	handlers int
 }
 
-func (s *pageStore) age(now time.Time) time.Duration { return now.Sub(s.began) }
+func newPageStore() *pageStore {
+	return &pageStore{last: map[banKey]time.Time{}, groups: map[string]*groupSpan{}, max: maxPages}
+}
 
-// saw keeps a page of a in group at now. A full store sweeps the pages past the window first; still
-// full, it keeps no new address, which then reads as without a page.
+// begin counts a handler of group with page_first on, provisioned at now: the first begins the span.
+func (s *pageStore) begin(group string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g := s.groups[group]
+	if g == nil {
+		g = &groupSpan{began: now}
+		s.groups[group] = g
+	}
+	g.handlers++
+}
+
+// end counts a handler of group cleaned up: with the last, the span is over.
+func (s *pageStore) end(group string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g := s.groups[group]; g != nil {
+		if g.handlers--; g.handlers <= 0 {
+			delete(s.groups, group)
+		}
+	}
+}
+
+// saw keeps a page of a in group at now.
 func (s *pageStore) saw(group string, a netip.Addr, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.put(banKey{group, a}, now)
+}
+
+// ask says whether a asked for a page of group within window before now, and whether the group is
+// still warming up — within warmup of page_first going on for it in the process. An address let
+// through is kept as seen at now: a visitor's API requests renew its window as its pages do, since a
+// catalog's filters change the URL with no request and the token is renewed every two minutes. Within
+// the warmup an address without a page is kept too: its page may have come before the process knew
+// the group's pages — a restart of the proxy, page_first turned on by a reload — and the visit goes on
+// without one.
+func (s *pageStore) ask(group string, a netip.Addr, now time.Time, window, warmup time.Duration) (seen, warming bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if window > s.window {
+		s.window = window
+	}
+	if g := s.groups[group]; g == nil || now.Sub(g.began) < warmup {
+		warming = true
+	}
 	k := banKey{group, a}
+	t, ok := s.last[k]
+	seen = ok && now.Sub(t) < window
+	if seen || warming {
+		s.put(k, now)
+	}
+	return seen, warming
+}
+
+// put keeps k at now. A full store sweeps the entries past the window first; still full, it keeps no
+// new address, which then reads as without a page.
+func (s *pageStore) put(k banKey, now time.Time) {
 	if _, ok := s.last[k]; !ok && len(s.last) >= s.max {
 		for key, t := range s.last {
 			if now.Sub(t) >= s.window {
@@ -144,15 +208,4 @@ func (s *pageStore) saw(group string, a netip.Addr, now time.Time) {
 		}
 	}
 	s.last[k] = now
-}
-
-// seen says whether a asked for a page of group within window before now.
-func (s *pageStore) seen(group string, a netip.Addr, now time.Time, window time.Duration) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if window > s.window {
-		s.window = window
-	}
-	t, ok := s.last[banKey{group, a}]
-	return ok && now.Sub(t) < window
 }
