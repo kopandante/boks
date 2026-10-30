@@ -54,6 +54,30 @@ func TestParseServerGate(t *testing.T) {
 	}
 }
 
+// A group's signatures go to the handler as written: their headers are values, not keys, so a header's
+// name with a hyphen or a capital passes the check on keys.
+func TestParseServerGateSignatures(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [a]\nrevision: 1\ngate:\n  groups:\n    - {name: a, app: a, mode: enforce, secret_env: A_SECRET, signature_ban: 24h,\n" +
+		"       signatures: [{name: node-chrome, mode: log, headers: [{name: Accept-Encoding, pattern: '^br, gzip, deflate$'}]}]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back struct {
+		Groups []struct {
+			SignatureBan string `json:"signature_ban"`
+			Signatures   []struct {
+				Headers []struct{ Name, Pattern string } `json:"headers"`
+			} `json:"signatures"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(s.Gate.JSON, &back); err != nil {
+		t.Fatal(err)
+	}
+	if g := back.Groups[0]; g.SignatureBan != "24h" || g.Signatures[0].Headers[0].Name != "Accept-Encoding" || g.Signatures[0].Headers[0].Pattern != "^br, gzip, deflate$" {
+		t.Errorf("json: %s", s.Gate.JSON)
+	}
+}
+
 func TestParseServerGateRejects(t *testing.T) {
 	group := func(g string) string { return "servers: [a]\nrevision: 1\ngate:\n  groups:\n    - " + g + "\n" }
 	ok := "{name: a, app: a, mode: log, secret_env: A_SECRET"
