@@ -339,7 +339,8 @@ func requestToken(r *http.Request) string {
 }
 
 // decide is the API gate of request-gate.ts (apiGate), on the cleaned path, as Caddy's path matcher and
-// the apps see it: the exemptions, the partner's Bearer, then the token from the cookie or the header,
+// the apps see it. Past the path's own refusals, the signatures and their bans (signature.go) are asked of
+// every request, pages, the probe and the exemptions too; then, on /api/, the exemptions, the partner's Bearer, then the token from the cookie or the header,
 // its signature and age, the fingerprint, the address. A token without the address is refused, where
 // the site lets it through: the proxy never issues one, and the pages' tokens without it are what the
 // gate closes.

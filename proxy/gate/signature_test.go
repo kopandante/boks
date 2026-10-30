@@ -2,6 +2,7 @@ package gate
 
 import (
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -84,7 +85,7 @@ func TestSignatureBan(t *testing.T) {
 	if w := serve(t, h, other); w.Code != 200 {
 		t.Errorf("the next address: %d", w.Code)
 	}
-	g2 := &Handler{Name: "other", bans: h.bans}
+	g2 := &Handler{Name: "other", bans: h.bans, Signatures: []Signature{scraperSig}, SignatureBan: caddyDay}
 	g2 = enforcing(t, g2, now)
 	if w := serve(t, g2, browserClient(chromeUA, ip).request(g2, "GET", "/api/x")); w.Code != 200 {
 		t.Errorf("another group: %d", w.Code)
@@ -139,13 +140,54 @@ func TestSignatureModes(t *testing.T) {
 	if h.bans.banned(h.Name, netip.MustParseAddr(ip), now) {
 		t.Error("log banned the address")
 	}
-	off := scraperSig
-	off.Mode = ""
-	h = signing(t, &now, off)
-	r, extra = withLog(browserClient(stormUA, ip).request(h, "GET", "/api/x"))
+	for _, mode := range []string{"", "off"} {
+		off := scraperSig
+		off.Mode = mode
+		h = signing(t, &now, off)
+		r, extra = withLog(browserClient(stormUA, ip).request(h, "GET", "/api/x"))
+		r.Header.Set("Accept-Encoding", scraperAE)
+		if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_signature"] != nil {
+			t.Errorf("off %q: %d %v", mode, w.Code, fields(extra))
+		}
+	}
+}
+
+// A signature in log listed first never shadows an enforced one that matches the same request.
+func TestSignatureLogBeforeEnforce(t *testing.T) {
+	now := time.Now()
+	broad := Signature{Name: "any-mozilla", Mode: "log", Headers: []HeaderPattern{{Name: "user-agent", Pattern: `^Mozilla/`}}}
+	h := signing(t, &now, broad, scraperSig)
+	ip := "203.0.113.40"
+	r, extra := withLog(browserClient(stormUA, ip).request(h, "GET", "/api/x"))
 	r.Header.Set("Accept-Encoding", scraperAE)
-	if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_signature"] != nil {
-		t.Errorf("off: %d %v", w.Code, fields(extra))
+	if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_signature"] != "node-chrome" || fields(extra)["gate_reason"] != "signature" {
+		t.Errorf("the scraper: %d %v", w.Code, fields(extra))
+	}
+	r, extra = withLog(browserClient(chromeUA, "203.0.113.41").request(h, "GET", "/api/x"))
+	if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_signature"] != "any-mozilla" {
+		t.Errorf("Chrome under the log one: %d %v", w.Code, fields(extra))
+	}
+}
+
+// Moving the signatures to log lifts their bans; back in enforce, the bans not yet over return.
+func TestSignatureBanLiftedByLog(t *testing.T) {
+	now := time.Now()
+	h := signing(t, &now, scraperSig)
+	ip := "203.0.113.50"
+	r := browserClient(stormUA, ip).request(h, "GET", "/api/x")
+	r.Header.Set("Accept-Encoding", scraperAE)
+	serve(t, h, r)
+	logSig := scraperSig
+	logSig.Mode = "log"
+	lifted := &Handler{Signatures: []Signature{logSig}, SignatureBan: caddyDay, bans: h.bans}
+	lifted = enforcing(t, lifted, now)
+	if w := serve(t, lifted, browserClient(chromeUA, ip).request(lifted, "GET", "/en/heydealer")); w.Code != 200 {
+		t.Errorf("signatures in log, the banned address: %d", w.Code)
+	}
+	back := &Handler{Signatures: []Signature{scraperSig}, SignatureBan: caddyDay, bans: h.bans}
+	back = enforcing(t, back, now)
+	if w := serve(t, back, browserClient(chromeUA, ip).request(back, "GET", "/en/heydealer")); w.Code != 403 {
+		t.Errorf("back in enforce: %d", w.Code)
 	}
 }
 
@@ -178,6 +220,8 @@ func TestSignatureValidate(t *testing.T) {
 		want string
 	}{
 		{"no name", Handler{Signatures: []Signature{sig(func(s *Signature) { s.Name = "" })}}, "name"},
+		{"a name with a capital and a space", Handler{Signatures: []Signature{sig(func(s *Signature) { s.Name = "Node Chrome" })}}, "must match"},
+		{"33 signatures", Handler{Signatures: thirtyThree()}, "more than 32"},
 		{"a bad mode", Handler{Signatures: []Signature{sig(func(s *Signature) { s.Mode = "ban" })}}, "mode"},
 		{"enforce in a group in log", Handler{Mode: "log", Signatures: []Signature{scraperSig}}, "group's mode enforce"},
 		{"no headers", Handler{Signatures: []Signature{sig(func(s *Signature) { s.Headers = nil })}}, "at least one"},
@@ -206,6 +250,29 @@ func TestSignatureValidate(t *testing.T) {
 	bad := Handler{Name: "site", Mode: "enforce", Secrets: []string{secret}, Signatures: []Signature{sig(func(s *Signature) { s.Headers[0].Pattern = "(" })}}
 	if err := bad.Provision(ctxForTest(t)); err == nil {
 		t.Error("a pattern that does not compile was provisioned")
+	}
+}
+
+// thirtyThree is one signature more than a group takes, each named apart.
+func thirtyThree() []Signature {
+	sigs := make([]Signature, 33)
+	for i := range sigs {
+		sigs[i] = scraperSig
+		sigs[i].Name = "s" + strconv.Itoa(i)
+	}
+	return sigs
+}
+
+// "off" written out is a valid mode.
+func TestSignatureOffValidates(t *testing.T) {
+	off := scraperSig
+	off.Mode = "off"
+	h := Handler{Name: "site", Mode: "enforce", Secrets: []string{secret}, Signatures: []Signature{off}, SignatureBan: caddyDay}
+	if err := h.Provision(ctxForTest(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Validate(); err != nil {
+		t.Error(err)
 	}
 }
 

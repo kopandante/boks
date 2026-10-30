@@ -10,7 +10,10 @@ package gate
 //
 // In log a match goes into the access log as gate_signature and nothing else changes; in enforce the
 // request is refused, and with signature_ban so is its address: every request of the group from it for
-// that long, gate_reason signature_ban. The addresses are kept by the process — every deploy on the
+// that long, gate_reason signature_ban. An enforced signature that matches is the verdict whatever
+// signature in log matches too. The bans are asked while one signature of the group at least is in
+// enforce: moving them all to log or off lifts the bans — a wrong signature is undone by a reload — and
+// turning one back to enforce brings back those not yet over. The addresses are kept by the process — every deploy on the
 // server reloads the proxy, which keeps them — and lost on its restart. Google's and Yandex's crawlers
 // and the checks' exempt_ranges are never matched nor banned.
 
@@ -111,7 +114,7 @@ func (h *Handler) validateSignatures() error {
 		return fmt.Errorf("signatures: %d of them, more than %d", len(h.Signatures), maxSignatures)
 	}
 	if h.SignatureBan != 0 && len(h.Signatures) == 0 {
-		return errNoSignatures
+		return errors.New("signature_ban goes with signatures")
 	}
 	names := map[string]bool{}
 	for i := range h.Signatures {
@@ -132,7 +135,8 @@ func (h *Handler) validateSignatures() error {
 
 // signed is the signatures' verdict on r from ip, and whether they have one: a banned address, and a
 // request an enforced signature matches, are refused; a match in log is written and passed on to the
-// rest of the gate. The first signature that matches is the one written.
+// rest of the gate. The signature written is the one that decides: the first enforced one that matches,
+// the first in log when none does. A ban is asked only while a signature is in enforce.
 func (h *Handler) signed(r *http.Request, ip string) (decision, bool) {
 	if len(h.Signatures) == 0 {
 		return decision{}, false
@@ -142,7 +146,7 @@ func (h *Handler) signed(r *http.Request, ip string) (decision, bool) {
 		return decision{}, false
 	}
 	now := h.now()
-	if h.SignatureBan != 0 && h.banStore().banned(h.Name, a, now) {
+	if h.SignatureBan != 0 && h.enforces() && h.banStore().banned(h.Name, a, now) {
 		return deny("signature_ban", forbidden), true
 	}
 	s := h.matching(r)
@@ -157,14 +161,31 @@ func (h *Handler) signed(r *http.Request, ip string) (decision, bool) {
 	return deny("signature", forbidden), true
 }
 
-// matching is the first signature on that matches r, nil when none does.
+// matching is the signature on that matches r — the first enforced one, the first in log when no
+// enforced one does — nil when none does: a signature in log never shadows an enforced one after it.
 func (h *Handler) matching(r *http.Request) *Signature {
+	var logged *Signature
 	for i := range h.Signatures {
-		if s := &h.Signatures[i]; s.on() && s.matches(r) {
+		s := &h.Signatures[i]
+		if !s.on() || (logged != nil && s.Mode != "enforce") || !s.matches(r) {
+			continue
+		}
+		if s.Mode == "enforce" {
 			return s
 		}
+		logged = s
 	}
-	return nil
+	return logged
+}
+
+// enforces says whether a signature of the group is in enforce.
+func (h *Handler) enforces() bool {
+	for i := range h.Signatures {
+		if h.Signatures[i].Mode == "enforce" {
+			return true
+		}
+	}
+	return false
 }
 
 // spared says whether a is never matched: an exempt address of the checks, Google's, Yandex's robots.
@@ -252,5 +273,3 @@ func (s *banStore) sweep(now time.Time) {
 		}
 	}
 }
-
-var errNoSignatures = errors.New("signature_ban goes with signatures")
