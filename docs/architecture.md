@@ -210,7 +210,10 @@ bots:
 - **Bearer групп гейта** — без строки в `server.yml`: `server apply` записывает в политику `spare_bearer`,
   когда у группы гейта (не `off`) есть `bearer`. Блоки пропускают на хостах группы в `enforce` (матчер её
   маршрута гейта), методах и путях её `bearer` запрос с `Authorization: Bearer <токен>` — проверяется
-  только наличие, ключ дальше проверяет гейт (недействительный — 401 проверки токена). Группа в `log`
+  только наличие, ключ дальше проверяет гейт (с недействительным запрос судится как любой другой: без токена сайта —
+  401 проверки токена). Это верно на путях, которые гейт проверяет: путь `bearer` под `exempt` группы
+  (свой или по умолчанию — `/api/auth/`, `/api/admin/`, `/api/env-check`) или вне `/api/` открыт одному
+  заголовку, поэтому пути `bearer` держать под `/api/` и не пересекать с `exempt`. Группа в `log`
   пропускает любой запрос дальше, поэтому блоки её партнёра не щадят (иначе заголовок провёл бы
   отказанного бота к API); бан и сигнатуры, сверяющие ключ, щадят его и в `log`. Бан получает ключи групп (хосты
   приложения, пути, методы, digests из `gate.secret` — тем же путём, что гейт) и запрос с ДЕЙСТВИТЕЛЬНЫМ
@@ -754,9 +757,9 @@ gate:
       mode: log                        # off | log | enforce
       site_gate: on                    # on — сайт ещё проверяет сам; off — только при enforce
       skip_fp: [/api/encar/pics]
-      exempt: [{prefix: /api/encar/}, {exact: /api/rates, methods: [POST]}, {regex: '^/api/auctions/image-proxy'}]
+      exempt: [{prefix: /api/encar/pics}, {exact: /api/rates, methods: [POST]}, {regex: '^/api/auctions/image-proxy'}]
       gated: [/api/admin/]
-      bearer: {paths: ['^/api/encar(/|$)'], methods: [GET, HEAD], digests_env: GLAVDOROGA_BEARER_DIGESTS}
+      bearer: {paths: ['^/api/encar/(catalog|car)(/|$)'], methods: [GET, HEAD], digests_env: KOREAAUTOTRADE_BEARER_DIGESTS}  # не под exempt
 ```
 
 - **Что читает boks.** Из группы — только `name`, `app`, `mode`, `site_gate`, `secret_env`,

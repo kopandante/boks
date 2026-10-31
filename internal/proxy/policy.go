@@ -42,8 +42,9 @@ type Policy struct {
 	Ban            *Ban     `json:"ban,omitempty"`
 	// Gate is the gate as server.yml writes it, the proxy's check of the sites' API token (gate.go).
 	Gate json.RawMessage `json:"gate,omitempty"`
-	// SpareBearer, set by the apply of a boks that knows it whenever a group of the gate has a bearer,
-	// spares the groups' partners — a read with a valid key — from the ban and the blocks (policyRoutes).
+	// SpareBearer, set by the apply of a boks that knows it whenever a group of the gate that is not off
+	// has a bearer, spares the groups' partners — a read with a valid key — from the ban, and from the
+	// blocks those of a group in enforce (policyRoutes, bearerAllows).
 	// A policy an older boks applied has it unset, and its config stays what that boks assembled: the
 	// proxy's ban of that time refuses the keys' field. A policy with it needs KeyFormat.
 	SpareBearer bool `json:"spare_bearer,omitempty"`

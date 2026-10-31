@@ -124,9 +124,10 @@ type Fragment struct {
 // word. Like 8, it is written only in the marker, by `boks server apply` of a policy with a deny: a
 // server without one stays open to the boks of format 8.
 //
-// Format 10 is the keys: a bots.allow by a header, and the partners of the gate's groups spared by the
-// ban and the blocks (spare_bearer). A boks of format 9 would read an allow by a header without the
-// header — an allow of the whole host, from the blocks and the ban — and assemble the config without
+// Format 10 is the keys: a bots.allow by a header or by domains, and the partners of the gate's groups
+// spared by the ban and the blocks (spare_bearer). A boks of format 9 would read an allow by a header
+// without the header, and one by domains without them — an allow of the whole host or of every host,
+// from the blocks and the ban — and assemble the config without
 // the partners' exemptions, so the next deploy from it would ban the partners again, without a word.
 // Like 8 and 9, it is written only in the marker, by `boks server apply` of a policy that has either.
 const FragmentFormat = 7
@@ -137,7 +138,8 @@ const GateFormat = 8
 // DenyFormat is the format of a server whose policy has a deny.
 const DenyFormat = 9
 
-// KeyFormat is the format of a server whose policy has a key — an allow by a header or spare_bearer —
+// KeyFormat is the format of a server whose policy has a key — an allow by a header or by domains, or
+// spare_bearer —
 // and the newest this boks reads.
 const KeyFormat = 10
 

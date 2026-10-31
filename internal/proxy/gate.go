@@ -96,7 +96,7 @@ type gateHandler struct {
 	app, group string
 	raw        json.RawMessage
 	bearer     *banBearer
-	// enforce says the group's gate refuses: a request whose key does not pass gets 401 there.
+	// enforce says the group's gate refuses: a request whose key does not pass needs the site's token there.
 	enforce bool
 }
 
@@ -263,8 +263,11 @@ func gateMatches(hs []gateHandler, fragments []Fragment, tls bool) ([]gatedMatch
 // `Authorization: Bearer` and a token. A partner's server reading by the key is most often an HTTP
 // library — axios, python-requests — whose name is what a block refuses. The header alone is enough
 // here, unlike in the ban, which checks the key: the request goes on to the group's gate, which checks
-// the token's digest, and a request whose key does not pass gets 401 from the token check there — a
-// scraper writing the header gets past the block to a refusal still, and is counted by the ban. Only a
+// the token's digest, and a request whose key does not pass is judged as any other there — without the
+// site's token it gets 401 — so a scraper writing the header gets past the block to the gate's checks
+// still, and is counted by the ban. That holds on the paths the gate checks: a bearer path under the
+// group's exempt, or outside /api/, would be open to the header alone, so the bearer's paths are kept
+// under /api/ and off the exempt (docs/architecture.md, «API по ключу мимо блоков»). Only a
 // group in enforce refuses so: one in log passes every request on, and its site may check no token at
 // all (encarexport's does not), so a header alone would let a refused bot past the block to the API.
 // The partner of a group in log is spared by the ban and the gate's signatures, which check the key,
