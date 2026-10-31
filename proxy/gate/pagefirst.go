@@ -105,7 +105,7 @@ func (h *Handler) logFull() {
 // enforce, past the warmup, when the address asked for no page within the window.
 func (h *Handler) pageless(r *http.Request, p, ip string) (decision, bool) {
 	pf := h.PageFirst
-	if !pf.on() || h.bearer != nil && h.bearer.admits(r, p) {
+	if !pf.on() || h.keyed(r) {
 		return decision{}, false
 	}
 	a, err := netip.ParseAddr(ip)

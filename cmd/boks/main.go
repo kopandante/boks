@@ -587,7 +587,7 @@ func policyOf(sc *config.Server) proxy.Policy {
 		p.Block = append(p.Block, proxy.BotBlock{Name: b.Name, Domains: b.Domains, UserAgent: b.UserAgent})
 	}
 	for _, a := range sc.Bots.Allow {
-		p.Allow = append(p.Allow, proxy.BotAllow{Host: a.Host, Paths: a.Paths, UserAgent: a.UserAgent})
+		p.Allow = append(p.Allow, proxy.BotAllow{Host: a.Host, Domains: a.Domains, Paths: a.Paths, UserAgent: a.UserAgent, Header: a.Header})
 	}
 	if e := sc.Egress; e != nil {
 		var allow []string
@@ -617,6 +617,10 @@ func policyOf(sc *config.Server) proxy.Policy {
 	}
 	if g := sc.Gate; g != nil {
 		p.Gate = g.JSON
+		// A group with a bearer has its partners spared by the ban and the blocks: no step of its own in
+		// server.yml, as the key is the group's already. A group that is off spares nothing (gateHandlers
+		// leaves it out), so it neither raises the format nor asks the proxy for the ban of the keys.
+		p.SpareBearer = slices.ContainsFunc(g.Groups, func(gr config.GateGroup) bool { return gr.Bearer != nil && gr.Mode != "off" })
 	}
 	return p
 }

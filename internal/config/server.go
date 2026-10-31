@@ -237,11 +237,81 @@ type BotBlock struct {
 }
 
 // BotAllow lets through what a rule would refuse: every field it gives must match. Host is one exact
-// host; Paths are prefixes, each the path itself and everything below it.
+// host; Domains, in its place, each domain and every host under it, as a block's; Paths are prefixes,
+// each the path itself and everything below it.
+//
+// Header makes the allow one of an API sold by key — X-Cars-Key, Authorization — on the hosts it names:
+// a request bringing the header, with any value but blanks, is refused by no block, whatever its
+// User-Agent, as a partner's server or bot is most often an HTTP library a block refuses by name. Its
+// presence is enough because the app checks the key itself and answers 401 without a valid one: a
+// scraper writing the header gets past the blocks to that refusal. So such an allow spares the blocks
+// alone, never the ban, which would otherwise spare any client writing the header; and it names its
+// hosts, Host or Domains — without them it would open every host of the server to anyone.
 type BotAllow struct {
 	Host      string   `yaml:"host"`
+	Domains   []string `yaml:"domains"`
 	Paths     []string `yaml:"paths"`
 	UserAgent string   `yaml:"user_agent"`
+	Header    string   `yaml:"header"`
+}
+
+// validate checks an allow: something to match, its hosts, its header with the hosts it is for, its
+// paths and its User-Agent.
+func (a BotAllow) validate() error {
+	if a.Host == "" && len(a.Domains) == 0 && len(a.Paths) == 0 && a.UserAgent == "" && a.Header == "" {
+		return errors.New("nothing to match: it would let every bot through")
+	}
+	if err := a.validateHosts(); err != nil {
+		return err
+	}
+	if err := a.validateHeader(); err != nil {
+		return err
+	}
+	return a.validatePaths()
+}
+
+// validateHosts checks an allow's host or its domains.
+func (a BotAllow) validateHosts() error {
+	if a.Host != "" && !domainRe.MatchString(a.Host) {
+		return fmt.Errorf("host %q must be one lowercase host such as img.example.com", a.Host)
+	}
+	if a.Host != "" && len(a.Domains) > 0 {
+		return errors.New("host and domains: one or the other")
+	}
+	for _, d := range a.Domains {
+		if !domainRe.MatchString(d) {
+			return fmt.Errorf("domains: %q must be a lowercase domain such as example.com — it covers every host under it", d)
+		}
+	}
+	return nil
+}
+
+// validateHeader checks an allow's header: a key's name, on the hosts it names.
+func (a BotAllow) validateHeader() error {
+	switch {
+	case a.Header == "":
+		return nil
+	case a.Host == "" && len(a.Domains) == 0:
+		return fmt.Errorf("header %s needs host or domains: without them anyone writing it would get past every block on every host of the server", a.Header)
+	case !headerRe.MatchString(a.Header):
+		return fmt.Errorf("header %q must be a header's name such as X-Cars-Key", a.Header)
+	case strings.EqualFold(a.Header, "Host") || strings.EqualFold(a.Header, "User-Agent"):
+		return fmt.Errorf("header %s: every request brings it; the allow is for a key's header", a.Header)
+	}
+	return nil
+}
+
+// validatePaths checks an allow's paths and its User-Agent.
+func (a BotAllow) validatePaths() error {
+	for _, p := range a.Paths {
+		if !pathRe.MatchString(p) {
+			return fmt.Errorf("path %q must be an absolute prefix without a trailing slash, such as /pics", p)
+		}
+	}
+	if a.UserAgent != "" {
+		return checkUserAgent(a.UserAgent)
+	}
+	return nil
 }
 
 // domainRe is a lowercase DNS name of two labels or more, without a wildcard.
@@ -350,21 +420,8 @@ func (s *Server) validate() error {
 		}
 	}
 	for i, a := range s.Bots.Allow {
-		if a.Host == "" && len(a.Paths) == 0 && a.UserAgent == "" {
-			return fmt.Errorf("bots.allow[%d] gives nothing to match, and would let every bot through", i)
-		}
-		if a.Host != "" && !domainRe.MatchString(a.Host) {
-			return fmt.Errorf("bots.allow[%d]: host %q must be one lowercase host such as img.example.com", i, a.Host)
-		}
-		for _, p := range a.Paths {
-			if !pathRe.MatchString(p) {
-				return fmt.Errorf("bots.allow[%d]: path %q must be an absolute prefix without a trailing slash, such as /pics", i, p)
-			}
-		}
-		if a.UserAgent != "" {
-			if err := checkUserAgent(a.UserAgent); err != nil {
-				return fmt.Errorf("bots.allow[%d]: %w", i, err)
-			}
+		if err := a.validate(); err != nil {
+			return fmt.Errorf("bots.allow[%d]: %w", i, err)
 		}
 	}
 	return nil

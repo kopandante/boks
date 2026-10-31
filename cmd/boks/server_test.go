@@ -321,6 +321,32 @@ func TestPolicyOfCarriesTheGate(t *testing.T) {
 	}
 }
 
+// A group with a bearer spares its partners with no line of its own in server.yml; without one nothing
+// is spared, and the policy stays one an older boks reads. An allow by a header goes with its header.
+func TestPolicyOfSparesTheBearer(t *testing.T) {
+	gate := "gate:\n  groups:\n    - {name: shop, app: shop, mode: log, secret_env: SHOP_SECRET"
+	bearer := ", bearer: {paths: ['^/api/encar(/|$)'], digests_env: SHOP_DIGESTS}}\n"
+	off := strings.Replace(gate, "mode: log", "mode: off", 1)
+	for doc, want := range map[string]bool{
+		gate + bearer: true,
+		gate + "}\n":  false,
+		off + bearer:  false, // a group that is off spares nothing
+		"bots:\n  allow:\n    - {host: translate.habsidev.com, header: X-Cars-Key}\n": false,
+	} {
+		sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\n" + doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p := policyOf(sc); p.SpareBearer != want {
+			t.Errorf("%s: spare_bearer %v, want %v", doc, p.SpareBearer, want)
+		}
+	}
+	sc, _ := config.ParseServer([]byte("servers: [a]\nrevision: 1\nbots:\n  allow:\n    - {domains: [v1.backend.dev.habsidev.com], header: X-Cars-Key}\n"))
+	if a := policyOf(sc).Allow; len(a) != 1 || a[0].Header != "X-Cars-Key" || a[0].Domains[0] != "v1.backend.dev.habsidev.com" {
+		t.Errorf("the allow: %+v", a)
+	}
+}
+
 // A rollback that would leave a site whose own check is gone without the proxy's is refused on every
 // server before any changes, naming --force; with --force it goes past that refusal.
 func TestServerRollbackKeepsTheGate(t *testing.T) {

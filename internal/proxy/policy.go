@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -40,6 +42,12 @@ type Policy struct {
 	Ban            *Ban     `json:"ban,omitempty"`
 	// Gate is the gate as server.yml writes it, the proxy's check of the sites' API token (gate.go).
 	Gate json.RawMessage `json:"gate,omitempty"`
+	// SpareBearer, set by the apply of a boks that knows it whenever a group of the gate that is not off
+	// has a bearer, spares the groups' partners — a read with a valid key — from the ban, and from the
+	// blocks those of a group in enforce (policyRoutes, bearerAllows).
+	// A policy an older boks applied has it unset, and its config stays what that boks assembled: the
+	// proxy's ban of that time refuses the keys' field. A policy with it needs KeyFormat.
+	SpareBearer bool `json:"spare_bearer,omitempty"`
 	// GateSecrets are the gate's secrets by the variable they came from, never recorded in the policy:
 	// they sit in gateSecretPath, read when the config is assembled.
 	GateSecrets map[string][]string `json:"-"`
@@ -145,16 +153,31 @@ type BotBlock struct {
 	UserAgent string   `json:"user_agent"`
 }
 
-// BotAllow is a request no block refuses: every field given must match.
+// BotAllow is a request no block refuses: every field given must match. Domains are matched as a
+// block's are, each and every host under it. An allow without Header is an allow from the ban too; one
+// with Header — a request that brings that header, an API by key — is an allow from the blocks alone.
 type BotAllow struct {
 	Host      string   `json:"host,omitempty"`
+	Domains   []string `json:"domains,omitempty"`
 	Paths     []string `json:"paths,omitempty"`
 	UserAgent string   `json:"user_agent,omitempty"`
+	Header    string   `json:"header,omitempty"`
 }
 
-// policyFormat is the format a policy needs boks to know: the deny's with a deny, the gate's with a
-// gate, the fragments' with neither.
+// keyed says whether p needs the keys' format: an allow by a header or by domains, or the gate's
+// partners spared. An allow by domains came with the keys, and a boks of format 9 reads it without them:
+// `{domains: [x]}` as an allow of nothing to match — every request, from every block and the ban — and
+// one with paths or a User-Agent beside as that allow on every host.
+func (p Policy) keyed() bool {
+	return p.SpareBearer || slices.ContainsFunc(p.Allow, func(a BotAllow) bool { return a.Header != "" || len(a.Domains) > 0 })
+}
+
+// policyFormat is the format a policy needs boks to know: the keys' with a key, the deny's with a deny,
+// the gate's with a gate, the fragments' with none.
 func policyFormat(p Policy) int {
+	if p.keyed() {
+		return KeyFormat
+	}
 	if p.Ban != nil && len(p.Ban.DenyRanges) > 0 {
 		return DenyFormat
 	}
@@ -271,9 +294,10 @@ func readPolicy(ctx context.Context, r remote.Runner, p string) (Policy, error) 
 // first would serve the bot. The domains are matched by a pattern on Host rather than by Caddy's host
 // matcher: that one covers a single label under `*.`, and every host it names on 443 is a name Caddy
 // sets out to obtain a certificate for. The allows sit in `not`, which Caddy's certificate discovery
-// does not look into, so their host matcher stays a matcher.
-func botRoutes(p Policy) []caddyRoute {
-	exempt := allowed(p)
+// does not look into, so their host matcher stays a matcher. Beside the allows, keys are the gate's
+// partners on this server (bearerAllows), and so are the allows by a header — what the ban counts still.
+func botRoutes(p Policy, keys []match) []caddyRoute {
+	exempt := slices.Concat(allowed(p), headerAllows(p), keys)
 	var rs []caddyRoute
 	for _, b := range p.Block {
 		h := map[string]regexpMatch{"User-Agent": {Pattern: b.UserAgent}}
@@ -287,23 +311,64 @@ func botRoutes(p Policy) []caddyRoute {
 }
 
 // allowed are the matcher sets of what no filter of the policy refuses: ACME's challenge and the
-// policy's allows — search engines and monitoring, which neither a block nor the ban may touch.
+// policy's allows without a header — search engines and monitoring, which neither a block nor the ban
+// may touch.
 func allowed(p Policy) []match {
 	exempt := []match{{Path: []string{acmeChallenge}}}
 	for _, a := range p.Allow {
-		var m match
-		if a.Host != "" {
-			m.Host = []string{a.Host}
+		if a.Header == "" {
+			exempt = append(exempt, allowMatch(a))
 		}
-		for _, p := range a.Paths {
-			m.Path = append(m.Path, p, p+"/*")
-		}
-		if a.UserAgent != "" {
-			m.HeaderRegexp = map[string]regexpMatch{"User-Agent": {Pattern: a.UserAgent}}
-		}
-		exempt = append(exempt, m)
 	}
 	return exempt
+}
+
+// headerAllows are the matcher sets of the allows by a header: an API sold by key on the hosts they
+// name, whose client — a server, a bot — is most often an HTTP library a block refuses by name. The
+// header's presence is enough, a value of anything but blanks: the app behind checks the key itself
+// and answers 401 without a valid one, so a scraper writing the header gets past the blocks to a
+// refusal still. The ban is not spared by them — it would be spared by any client writing the header
+// — and keeps counting these requests as anyone's.
+func headerAllows(p Policy) []match {
+	var out []match
+	for _, a := range p.Allow {
+		if a.Header != "" {
+			out = append(out, allowMatch(a))
+		}
+	}
+	return out
+}
+
+// allowMatch is an allow's matcher set: every field it gives.
+func allowMatch(a BotAllow) match {
+	var m match
+	if a.Host != "" {
+		m.Host = []string{a.Host}
+	}
+	for _, p := range a.Paths {
+		m.Path = append(m.Path, p, p+"/*")
+	}
+	m.HeaderRegexp = allowHeaders(a)
+	return m
+}
+
+// allowHeaders are the patterns an allow asks of the headers — its User-Agent, its domains on Host, the
+// presence of its header — none when it asks none.
+func allowHeaders(a BotAllow) map[string]regexpMatch {
+	h := map[string]regexpMatch{}
+	if a.UserAgent != "" {
+		h["User-Agent"] = regexpMatch{Pattern: a.UserAgent}
+	}
+	if len(a.Domains) > 0 {
+		h["Host"] = regexpMatch{Pattern: domainsPattern(a.Domains)}
+	}
+	if a.Header != "" {
+		h[http.CanonicalHeaderKey(a.Header)] = regexpMatch{Pattern: `\S`}
+	}
+	if len(h) == 0 {
+		return nil
+	}
+	return h
 }
 
 // banRoute is the policy's ban as a Caddy route, to go first on the servers on 80 and 443: on every
@@ -313,7 +378,8 @@ func allowed(p Policy) []match {
 // handler leaves out the rest (private networks, /_next/, subresources, the exempt paths). A denied
 // range is a matcher set of its own beside them — Caddy runs a route when any one set matches — so
 // a denied address reaches the handler, which refuses it first, with what the allows let through too.
-func banRoute(b Ban, p Policy) caddyRoute {
+// Keys are the gate's partners: the handler spares a read whose key it checks, after the deny.
+func banRoute(b Ban, p Policy, keys []banBearer) caddyRoute {
 	m := []match{{Not: allowed(p)}}
 	if len(b.DenyRanges) > 0 {
 		m = append(m, match{ClientIP: &remoteIP{Ranges: b.DenyRanges}})
@@ -322,7 +388,8 @@ func banRoute(b Ban, p Policy) caddyRoute {
 	// as rules, it would be refused by the ban3 a server runs until its proxy is upgraded — every
 	// deploy's reload, and the upgrade's own.
 	return caddyRoute{Match: m, Handle: []handler{{Handler: "boks_ban", Limit: b.Limit, Window: b.Window, Rules: b.Rules,
-		Heuristics: b.Heuristics, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges, DenyRanges: b.DenyRanges}}}
+		Heuristics: b.Heuristics, Duration: b.Duration, ExemptPaths: b.ExemptPaths, ExemptRanges: b.ExemptRanges, DenyRanges: b.DenyRanges,
+		Bearer: keys}}}
 }
 
 // domainsPattern matches a Host that is one of domains or under one at any depth, with or without a
