@@ -9,10 +9,12 @@ import (
 	"testing"
 )
 
-// spared is the gated policy with its partners spared, as the apply of this boks records it.
+// spared is the gated policy with its partners spared, as the apply of this boks records it, and shop's
+// gate in enforce: the gate refuses a request whose key does not pass, so the blocks may leave it out.
 func spared() Policy {
 	p := gated()
 	p.SpareBearer = true
+	p.Gate = json.RawMessage(strings.Replace(string(p.Gate), `"mode":"log"`, `"mode":"enforce"`, 1))
 	return p
 }
 
@@ -53,6 +55,24 @@ func TestConfigSparesTheGatesPartners(t *testing.T) {
 		if banNot, _ := json.Marshal(matchOf(t, routes[0])["not"]); strings.Contains(string(banNot), "Authorization") {
 			t.Errorf("%s: the ban's route leaves out a header alone: %s", name, banNot)
 		}
+	}
+}
+
+// A group in log passes every request on, so a header alone would take a refused bot past the blocks
+// to its API: the blocks leave out no partner of it, and the ban, which checks the key, still spares it.
+func TestAGroupInLogSparesItsPartnerFromTheBanAlone(t *testing.T) {
+	p := gated()
+	p.SpareBearer = true
+	b, err := Config(p, shopAndBlog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := dig(decoded(t, b), "apps", "http", "servers", "https", "routes").([]any)
+	if not, _ := json.Marshal(matchOf(t, routes[1])["not"]); strings.Contains(string(not), "Authorization") {
+		t.Errorf("the block leaves out a Bearer of a group in log: %s", not)
+	}
+	if keys, _ := json.Marshal(handlerOf(t, routes[0])["bearer"]); !strings.Contains(string(keys), digest) {
+		t.Errorf("want the ban to know the key of a group in log, got %s", keys)
 	}
 }
 
@@ -117,6 +137,9 @@ func TestAnAllowByAHeaderSparesTheBlocksAlone(t *testing.T) {
 func TestAKeyMarksFormat10(t *testing.T) {
 	byHeader := habsida
 	byHeader.Allow = []BotAllow{{Host: "translate.habsidev.com", Header: "X-Cars-Key"}}
+	// A boks of format 9 drops domains and reads the allow as one of every host: it must be refused.
+	byDomains := habsida
+	byDomains.Allow = []BotAllow{{Domains: []string{"habsidev.com"}, Paths: []string{"/pics"}}}
 	for _, c := range []struct {
 		name string
 		p    Policy
@@ -124,6 +147,7 @@ func TestAKeyMarksFormat10(t *testing.T) {
 	}{
 		{"plain", habsida, FragmentFormat}, {"gated", gated(), GateFormat}, {"denied", denied(), DenyFormat},
 		{"spared", spared(), KeyFormat}, {"an allow by a header", byHeader, KeyFormat},
+		{"an allow by domains", byDomains, KeyFormat},
 	} {
 		if got := policyFormat(c.p); got != c.want {
 			t.Errorf("%s: want format %d, got %d", c.name, c.want, got)

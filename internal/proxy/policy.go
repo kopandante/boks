@@ -163,9 +163,12 @@ type BotAllow struct {
 	Header    string   `json:"header,omitempty"`
 }
 
-// keyed says whether p has a key: an allow by a header, or the gate's partners spared.
+// keyed says whether p needs the keys' format: an allow by a header or by domains, or the gate's
+// partners spared. An allow by domains came with the keys, and a boks of format 9 reads it without them:
+// `{domains: [x]}` as an allow of nothing to match — every request, from every block and the ban — and
+// one with paths or a User-Agent beside as that allow on every host.
 func (p Policy) keyed() bool {
-	return p.SpareBearer || slices.ContainsFunc(p.Allow, func(a BotAllow) bool { return a.Header != "" })
+	return p.SpareBearer || slices.ContainsFunc(p.Allow, func(a BotAllow) bool { return a.Header != "" || len(a.Domains) > 0 })
 }
 
 // policyFormat is the format a policy needs boks to know: the keys' with a key, the deny's with a deny,

@@ -325,9 +325,12 @@ func TestPolicyOfCarriesTheGate(t *testing.T) {
 // is spared, and the policy stays one an older boks reads. An allow by a header goes with its header.
 func TestPolicyOfSparesTheBearer(t *testing.T) {
 	gate := "gate:\n  groups:\n    - {name: shop, app: shop, mode: log, secret_env: SHOP_SECRET"
+	bearer := ", bearer: {paths: ['^/api/encar(/|$)'], digests_env: SHOP_DIGESTS}}\n"
+	off := strings.Replace(gate, "mode: log", "mode: off", 1)
 	for doc, want := range map[string]bool{
-		gate + ", bearer: {paths: ['^/api/encar(/|$)'], digests_env: SHOP_DIGESTS}}\n": true,
-		gate + "}\n": false,
+		gate + bearer: true,
+		gate + "}\n":  false,
+		off + bearer:  false, // a group that is off spares nothing
 		"bots:\n  allow:\n    - {host: translate.habsidev.com, header: X-Cars-Key}\n": false,
 	} {
 		sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\n" + doc))

@@ -96,6 +96,8 @@ type gateHandler struct {
 	app, group string
 	raw        json.RawMessage
 	bearer     *banBearer
+	// enforce says the group's gate refuses: a request whose key does not pass gets 401 there.
+	enforce bool
 }
 
 // banBearer is a group's partner key as the ban's handler takes it (proxy/ban, bearer.go): the paths and
@@ -157,7 +159,7 @@ func gateHandlers(p Policy) ([]gateHandler, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, gateHandler{app: g.App, group: g.Name, raw: raw, bearer: key})
+		out = append(out, gateHandler{app: g.App, group: g.Name, raw: raw, bearer: key, enforce: g.Mode == "enforce"})
 	}
 	return out, nil
 }
@@ -262,12 +264,16 @@ func gateMatches(hs []gateHandler, fragments []Fragment, tls bool) ([]gatedMatch
 // library — axios, python-requests — whose name is what a block refuses. The header alone is enough
 // here, unlike in the ban, which checks the key: the request goes on to the group's gate, which checks
 // the token's digest, and a request whose key does not pass gets 401 from the token check there — a
-// scraper writing the header gets past the block to a refusal still, and is counted by the ban.
+// scraper writing the header gets past the block to a refusal still, and is counted by the ban. Only a
+// group in enforce refuses so: one in log passes every request on, and its site may check no token at
+// all (encarexport's does not), so a header alone would let a refused bot past the block to the API.
+// The partner of a group in log is spared by the ban and the gate's signatures, which check the key,
+// and by the blocks once its group is in enforce.
 func bearerAllows(hs []gateHandler, fragments []Fragment, tls bool) ([]match, error) {
 	gm, err := gateMatches(hs, fragments, tls)
 	var out []match
 	for _, g := range gm {
-		if g.bearer == nil {
+		if g.bearer == nil || !g.enforce {
 			continue
 		}
 		m := g.m
