@@ -66,6 +66,9 @@ func TestForwardedForIsTheClientThroughCaddy(t *testing.T) {
 		for _, v := range c.xff {
 			req.Header.Add("X-Forwarded-For", v)
 		}
+		mu.Lock()
+		before := len(seen)
+		mu.Unlock()
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -73,8 +76,18 @@ func TestForwardedForIsTheClientThroughCaddy(t *testing.T) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		mu.Lock()
-		got := seen[len(seen)-1]
+		n := len(seen) - before
+		reached := n == 1
+		var got string
+		if reached {
+			got = seen[before]
+		}
 		mu.Unlock()
+		// A request Caddy answered itself never reached the app: the last value seen is the case before.
+		if resp.StatusCode != http.StatusOK || !reached {
+			t.Errorf("%s: %d, the app saw %d requests, want 200 and one", c.name, resp.StatusCode, n)
+			continue
+		}
 		if got != c.want {
 			t.Errorf("%s: the app got X-Forwarded-For %q, want %q", c.name, got, c.want)
 		}
