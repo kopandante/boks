@@ -96,6 +96,7 @@ type Handler struct {
 	pages        *pageStore   // the tests' own; sharedPages when nil
 	rhythms      *rhythmStore // the tests' own; sharedRhythms when nil
 	pageOn       bool         // counted in its group's page_first span, which Cleanup ends
+	yandex       *yandexStore // the tests' own; sharedYandex when nil
 	logger       *zap.Logger
 	now          func() time.Time
 	// fault and cookieFault, when set, run where the handler decides and where it fixes a cookie: the

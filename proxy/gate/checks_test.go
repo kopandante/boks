@@ -100,6 +100,9 @@ func TestShadowByClient(t *testing.T) {
 		{"Yandex's name from elsewhere", client{ua: yandexUA, fpHeader: true, tokenFP: true}, "fetch_meta,alpn"},
 		{"Yandex's name from Yandex Cloud", client{ua: yandexUA, fpHeader: true, tokenFP: true, ip: "158.160.1.2"}, "fetch_meta,alpn"},
 		{"a browser from Yandex's address", client{ua: chromeUA, fpHeader: true, tokenFP: true, ip: "213.180.203.222"}, "fetch_meta,alpn"},
+		{"YandexTranslate from Yandex: a fetcher, not the robot", client{ua: yandexTranslateUA, fpHeader: true, tokenFP: true, ip: "213.180.203.222"}, "fetch_meta,alpn"},
+		{"YandexScreenshotBot from Yandex: a fetcher, not the robot", client{ua: yandexScreenshotUA, fpHeader: true, tokenFP: true, ip: "213.180.203.222"}, "fetch_meta"},
+		{"YandexBot from Yandex's AS whose reverse name is not Yandex's", client{ua: yandexBotUA, fpHeader: true, tokenFP: true, ip: notYandexPTR}, "fetch_meta"},
 		{"an exempt address", client{ua: chromeUA, ip: "139.100.226.95"}, ""},
 		{"the exempt address's neighbour", client{ua: chromeUA, ip: "139.100.226.96"}, "fp,fetch_meta,alpn"},
 		{"an exempt range", client{ua: chromeUA, ip: "86.57.245.110"}, ""},
@@ -263,17 +266,14 @@ func TestYandexRanges(t *testing.T) {
 		t.Fatalf("%d ranges, %v", len(ps), err)
 	}
 	for _, ip := range []string{"213.180.203.222", "213.180.203.232", "95.108.213.228", "5.255.231.177", "87.250.224.101", "87.250.224.86", "2a02:6b8:c0e::1"} {
-		if !isYandex(netip.MustParseAddr(ip), yandexBotUA) {
+		if !inRanges(yandexRanges(), netip.MustParseAddr(ip)) {
 			t.Errorf("%s is not Yandex's", ip)
 		}
 	}
 	for _, ip := range []string{visitor, "158.160.1.2", "84.201.128.1", "178.154.192.1", "51.250.0.1", "213.180.224.1", "2a0d:d6c0::1"} {
-		if isYandex(netip.MustParseAddr(ip), yandexBotUA) {
+		if inRanges(yandexRanges(), netip.MustParseAddr(ip)) {
 			t.Errorf("%s is Yandex's", ip)
 		}
-	}
-	if isYandex(netip.MustParseAddr("213.180.203.222"), googleUA) {
-		t.Error("Googlebot's name from Yandex's address is Yandex's robot")
 	}
 	for _, bad := range []string{"# c\n5.45.192.0/18\nnot-a-prefix\n", "0.0.0.0/0\n", "::/0\n"} {
 		if _, err := readYandex(bad); err == nil {

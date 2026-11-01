@@ -146,7 +146,7 @@ func (h *Handler) shadow(r *http.Request, p, ip string, pl *payload) []check {
 	if inRanges(h.checksExempt, a) || h.noBan(a) {
 		return nil
 	}
-	if isGoogle(a) || isYandex(a, r.UserAgent()) {
+	if isGoogle(a) || h.yandexRobot(r, a) {
 		failed = slices.DeleteFunc(failed, func(k check) bool { return k.crawler })
 	}
 	return failed

@@ -53,6 +53,8 @@ func TestSignatureByClient(t *testing.T) {
 		{"the scraper's headers from a user-triggered fetcher of Google", stormUA, scraperAE, "142.250.32.5", 403, "signature"},
 		{"the scraper's headers as YandexBot from Yandex", yandexBotUA, scraperAE, "213.180.203.222", 200, "token"},
 		{"the scraper's headers as YandexBot from elsewhere", yandexBotUA, scraperAE, "", 403, "signature"},
+		{"the scraper's headers as YandexTranslate from Yandex", yandexTranslateUA, scraperAE, "213.180.203.222", 403, "signature"},
+		{"the scraper's headers as YandexBot from Yandex's AS, the reverse name not Yandex's", yandexBotUA, scraperAE, notYandexPTR, 403, "signature"},
 		{"the scraper from the checks' exempt address", stormUA, scraperAE, "139.100.226.95", 200, "token"},
 		{"an encoding around the scraper's", stormUA, "br, gzip, deflate, zstd", "", 200, "token"},
 	}
