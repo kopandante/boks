@@ -181,8 +181,6 @@ func TestTrustedString(t *testing.T) {
 	}
 }
 
-// Apply and rollback refuse a CA out of force — the proxies in front would be refused at the handshake —
-// and take one in force, or none.
 // A policy holding Cloudflare's shared origin-pull CA — a revision to roll back to — is refused like
 // one out of force: apply and rollback ask CheckCATerm.
 func TestCheckCATermRefusesTheSharedCA(t *testing.T) {
@@ -198,6 +196,8 @@ func TestCheckCATermRefusesTheSharedCA(t *testing.T) {
 	}
 }
 
+// Apply and rollback refuse a CA out of force — the proxies in front would be refused at the handshake —
+// and take one in force, or none.
 func TestCheckCATerm(t *testing.T) {
 	p := pulled(t)
 	for _, now := range []time.Time{time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)} {
