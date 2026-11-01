@@ -903,7 +903,11 @@ gate:
   Google (файлы в образе, `proxy/gate/google/`) проходят `fetch_meta` и `alpn` — user-triggered fetchers только
   здесь (Read Aloud и т. п.), в сигнатурах, page_first и static_rhythm они как все (#151, образ gate12; до него — исключены везде). `fetch_meta` и `alpn` проходят и роботы Яндекса: UA с
   `Yandex` с адреса из анонсов AS13238 (`proxy/gate/yandex/as13238.txt`, RIPEstat; без DNS на запросе, образ
-  gate4); `exempt_ranges` — все проверки.
+  gate4); `exempt_ranges` — все проверки. `no_ban_ranges` (boks#160, образ gate14; решение владельца 01.11
+  «блокируем, но не баним» — офисы клиентов): fp, fetch_meta, alpn, page_first и static_rhythm для них не
+  спрашиваются, как для `exempt_ranges`, а сигнатуры сверяются: совпадение в `enforce` — 403 `Forbidden`,
+  `gate_reason: signature` и `gate_signature` в журнале, но бана нет — офис не теряет доступ на
+  `signature_ban` из-за одного скрейпера. Адрес в обоих списках — отказ провижна.
   Поле обработчика, поэтому boks его не читает: нужен образ gate3, формат не меняется.
 - **Сигнатуры заголовков** (`signatures`, `signature_ban`, `docs/plans/20261030-gate-signatures.md`):
   `signatures: [{name, mode: off|log|enforce, headers: [{name, pattern}]}]` — форма заголовков, которой не шлёт
