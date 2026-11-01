@@ -941,7 +941,10 @@ func registryDown(err error) bool {
 	for _, s := range []string{"tls handshake timeout", "i/o timeout", "connection reset by peer",
 		"timeout awaiting response headers", "request canceled while waiting for connection", "client.timeout exceeded",
 		"connection timed out", "connection refused", "no route to host", "network is unreachable", "server misbehaving",
-		"context deadline exceeded"} {
+		"context deadline exceeded",
+		// A pull is the same pull made again: a cut ssh to the server and a passing failure of DNS (unlike
+		// no such host) are tried again too (boks#153, infra-pm).
+		"broken pipe", "temporary failure in name resolution", "closed by remote host"} {
 		if strings.Contains(msg, s) {
 			return true
 		}

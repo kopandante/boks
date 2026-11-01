@@ -122,7 +122,7 @@ login, pull и logout идут одним скриптом под тем же п
 Pull образа приложения (deploy и rollback, с логином и без) при сетевой ошибке по словам docker
 (`TLS handshake timeout`, `i/o timeout`, `connection reset by peer`, `connection timed out`,
 `connection refused`, `no route to host`, `network is unreachable`, `server misbehaving`, `EOF` и
-`unexpected EOF`, HTTP 502/503/504, `context deadline exceeded`, таймауты ожидания ответа; список широкий
+`unexpected EOF`, HTTP 502/503/504, `context deadline exceeded`, `broken pipe`, `closed by remote host` (оборванный ssh — pull тот же, повтор безопасен), `temporary failure in name resolution` (временный сбой DNS, в отличие от `no such host`), таймауты ожидания ответа; список широкий
 нарочно — boks#153, решение infra-pm: повтор ограничен и безвреден, непойманный сбой — ручной перезапуск; 502/503/504 — только с текстом статуса HTTP, `503 Service Unavailable`: голое число может быть тегом образа или портом реестра из текста ошибки, boks#156)
 повторяется — всего 3 попытки, через 2 минуты, строка в выводе выката на каждый повтор (в журнал операций сервера не пишется: pull идёт до его записи).
 Отказ токена, «нет образа», `no such host` (опечатка в имени реестра — ждать нечего) и прочие ошибки — сразу отказ. Обрыв может быть и ssh boks до сервера, а не реестра: повтор так же безопасен, и итоговая ошибка называет оба (`failed on the network 3 times … the registry or this server's link to it`). Пауза прерывается отменой; pull идёт под
