@@ -22,5 +22,5 @@ Base: a331057 | Branch: fix/proxy-upgrade-no-downgrade
 - [x] 1 план (issue #145)
 - [x] 2 реализация
 - [x] 3 PR (#146)
-- [ ] 4 review-loop green
+- [x] 4 review-loop green (агентские линзы — codex в лимите; бэклог #147)
 - [ ] 5 merge
