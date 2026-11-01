@@ -725,3 +725,35 @@ func TestVersionAloneWithoutSocketDir(t *testing.T) {
 		t.Errorf("version: %d %q %q", code, out.String(), errw.String())
 	}
 }
+
+// apply writes the server's boks before its policy (#154, #159).
+func TestApplyWritesBoksBeforeThePolicy(t *testing.T) {
+	build := []byte("a build")
+	s := sha256.Sum256(build)
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { return build, nil }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &recorder{server: server{policyRead: "present\n{\"revision\":1,\"floor\":1}", "uname -m": "x86_64"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	// The fake answers no firewall, so the run ends in an error after the policy; what is checked is the
+	// order of what was written up to there.
+	run([]string{"server", "apply", path}, io.Discard, io.Discard)
+	boks, policy := -1, -1
+	for i, in := range a.stdin {
+		if in == string(build) && boks < 0 {
+			boks = i
+		}
+		// The journal's entry of the apply is the first thing it writes.
+		if strings.Contains(in, `"action":"server apply"`) && policy < 0 {
+			policy = i
+		}
+	}
+	if boks < 0 || policy < 0 || boks > policy {
+		t.Errorf("boks written at %d, the policy at %d", boks, policy)
+	}
+}

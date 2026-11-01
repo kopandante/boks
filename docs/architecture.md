@@ -1301,9 +1301,9 @@ egress:
 
 **Серверный boks** (boks#154, этап 1; решение владельца 01.11: «Сайт вообще не должен иметь понятия о
 boks»). У сервера один boks, его ставит infra. CI boks (`.github/workflows/boks-binary.yml`) на каждый
-push в main собирает `boks` linux/amd64 и arm64 (`CGO_ENABLED=0 -trimpath`, `-X main.commit=<sha>`) и
+push в main, меняющий Go-код (или вручную, workflow_dispatch), собирает `boks` linux/amd64 и arm64 (`CGO_ENABLED=0 -trimpath`, `-X main.commit=<sha>`) и
 кладёт в release `bin-<commit>` с `SHA256SUMS`; release не меняется никогда. `server.yml` называет
-версию — `boks: {commit: <sha>, sha256: {amd64: …, arm64: …}}` — и она проходит ревью, как
+версию — `boks: {commit: <sha>, sha256: {amd64: …, arm64: …}}` (commit с release; блок для `server.yml` — в заметках release) — и она проходит ревью, как
 `DefaultProxyImage`. `server install` и `server apply` (до политики) скачивают сборку для архитектуры
 сервера на машину оператора (одну на архитектуру за прогон) и сверяют sha256 с `server.yml` для каждого
 сервера до того, как меняют хоть один; затем пишут на сервер в
