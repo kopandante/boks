@@ -878,7 +878,7 @@ func missing(ctx context.Context, r remote.Runner, ref string) bool {
 // the private registry goes through the login; any other — a public image, or a release recorded
 // before the image moved — is pulled as it always was.
 //
-// A pull the registry's network failed (registryDown) is tried again, pullTries in all, pullPause
+// A pull that failed on the network (registryDown) is tried again, pullTries in all, pullPause
 // apart: Depot's layer store drops out from Russia for a minute or two at a time (todo#437). A refusal
 // of the token, an image that is not there, and any other error refuse at once.
 func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabled bool, login *Login) error {
@@ -891,9 +891,12 @@ func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabl
 			return err
 		}
 		if try == pullTries {
-			return fmt.Errorf("%w\nthe registry did not answer %d times, %s apart", err, pullTries, pullPause)
+			return fmt.Errorf("%w\nthe pull failed on the network %d times, %s apart: the registry or this server's link to it", err, pullTries, pullPause)
 		}
-		fmt.Fprintf(log, "pull %s: the registry did not answer (%v); trying again in %s (%d of %d)\n", ref, err, pullPause, try+1, pullTries)
+		// The error may come over several lines (the login's ends in what was not changed): one line
+		// in the log says it, and the retry after it.
+		fmt.Fprintf(log, "pull %s failed on the network (%s); trying again in %s (%d of %d)\n", ref,
+			strings.ReplaceAll(err.Error(), "\n", "; "), pullPause, try+1, pullTries)
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("%w; stopped waiting to try again: %w", err, ctx.Err())
@@ -902,8 +905,8 @@ func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabl
 	}
 }
 
-// pullTries and pullPause are how often and how far apart a pull whose registry did not answer is
-// made: three tries over four minutes outlast the outages seen (todo#437).
+// pullTries and pullPause are how often and how far apart a pull that failed on the network is made:
+// three tries over four minutes outlast the outages seen (todo#437).
 var (
 	pullTries = 3
 	pullPause = 2 * time.Minute
@@ -919,14 +922,16 @@ func pullOnce(ctx context.Context, r remote.Runner, log io.Writer, ref string, l
 	return err
 }
 
-// registryDown reports a pull that failed on the way to the registry, in docker's words, and was not
-// refused: the token turned down or the image not there are answers, and trying again changes neither.
+// registryDown reports a pull that failed on the network, in docker's words, and was not refused: the
+// token turned down or the image not there are answers, and trying again changes neither. A reset or
+// cut connection may be boks's own ssh to the server rather than the registry; trying that again is
+// as safe, so the words do not tell the two apart and the refusal names both.
 func registryDown(err error) bool {
 	if refusedToken(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	for _, s := range []string{"manifest unknown", "not found", "no such image"} {
+	for _, s := range []string{"manifest unknown", "not found"} {
 		if strings.Contains(msg, s) {
 			return false
 		}

@@ -44,6 +44,16 @@ func TestPullTriesAgainWhenTheRegistryDoesNotAnswer(t *testing.T) {
 		t.Errorf("%d pulls: %s", *pulls, log.String())
 	}
 
+	// An error over several lines, as the login's is, still makes one line of the log with its retry.
+	f, _ = pullsUntil(1, errors.New(handshake.Error()+"\nnothing was changed on this server"))
+	log.Reset()
+	if err := pull(context.Background(), f, &log, "ghcr.io/x/y:v2", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "TLS handshake timeout; nothing was changed on this server); trying again") {
+		t.Errorf("the retry is not on the line of its cause: %s", log.String())
+	}
+
 	f, pulls = pullsUntil(1, handshake)
 	if err := Run(context.Background(), f, io.Discard, parse(t, onePort), "v2", fixed); err != nil {
 		t.Fatalf("deploy after one pull lost: %v", err)
@@ -58,7 +68,7 @@ func TestPullTriesAgainWhenTheRegistryDoesNotAnswer(t *testing.T) {
 func TestPullRefusesWhatTryingAgainWouldNotChange(t *testing.T) {
 	f, pulls := pullsUntil(9, handshake)
 	err := pull(context.Background(), f, io.Discard, "ghcr.io/x/y:v2", true, nil)
-	if err == nil || *pulls != pullTries || !strings.Contains(err.Error(), "did not answer 3 times") || !strings.Contains(err.Error(), "TLS handshake timeout") {
+	if err == nil || *pulls != pullTries || !strings.Contains(err.Error(), "failed on the network 3 times") || !strings.Contains(err.Error(), "TLS handshake timeout") {
 		t.Errorf("%d pulls: %v", *pulls, err)
 	}
 	for _, msg := range []string{

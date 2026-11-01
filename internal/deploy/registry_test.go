@@ -113,7 +113,7 @@ func TestARefusedLoginChangesNothing(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "token") || !strings.Contains(err.Error(), "docker login to registry.depot.dev on this server failed") {
 		t.Errorf("want the failed login said as it is, got %v", err)
 	}
-	// It is tried again, as a pull the registry did not answer is (boks#150); a refused one is not.
+	// It is tried again, as a pull that failed on the network is (boks#150); a refused one is not.
 	if n, m := strings.Count(strings.Join(g.calls, "\n"), loginCall), strings.Count(strings.Join(f.calls, "\n"), loginCall); n != pullTries || m != 1 {
 		t.Errorf("logins: %d on the way to the registry, %d refused", n, m)
 	}
