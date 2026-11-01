@@ -10,7 +10,7 @@
 - [x] 4. `server apply`: приложения читаются до вопросов серверам, пишутся после boks и до политики; `server status` — строки расхождения (`cmd/boks/main.go`).
 - [x] 5. Тесты (`internal/config/apps_test.go`, `internal/deploy/apps_test.go` на настоящем sh, два теста `cmd/boks`) и мутации — ловятся.
 - [x] 6. `docs/architecture.md`.
-- [ ] 7. PR через `/review-loop --ship`, merge.
+- [x] 7. PR через `/review-loop --ship`, merge — #167, `79fcdca`.
 
 ## Проверка
 ```
