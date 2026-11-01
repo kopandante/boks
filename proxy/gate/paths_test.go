@@ -394,6 +394,9 @@ func TestGoogleLate(t *testing.T) {
 		{"Google's token from the future", g1, g2, -time.Hour, 401},
 		{"Google's expired token from a visitor", g1, visitor, time.Hour, 401},
 		{"a visitor's expired token from Google", visitor, g2, time.Hour, 401},
+		// Not Google's user-triggered fetchers (#138): Apps Script is its user's to program.
+		{"a user-triggered fetcher's expired token from it", "142.250.32.5", "142.250.32.5", time.Hour, 401},
+		{"Googlebot's expired token from a user-triggered fetcher", g1, "142.250.32.5", time.Hour, 401},
 		{"a visitor's expired token", visitor, visitor, time.Hour, 401},
 	}
 	for _, c := range cases {
