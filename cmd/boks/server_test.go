@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -191,6 +192,24 @@ func TestPolicyOfCarriesTheTrustedProxies(t *testing.T) {
 	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\n"))
 	if err != nil || policyOf(sc).TrustedProxies != nil {
 		t.Errorf("want none without the field: %v", err)
+	}
+}
+
+// The policy carries Cloudflare's ranges less the Worker's client address, cut there by apply: an older
+// boks assembling the config from the policy trusts the ranges as written in it, so it needs no pin.
+func TestPolicyOfLeavesTheWorkerOut(t *testing.T) {
+	sc, err := config.ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [\"2a06:98c0::/29\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := policyOf(sc).TrustedProxies
+	if len(got) != 99 {
+		t.Fatalf("want the range as 99 around the address, got %d", len(got))
+	}
+	for _, r := range got {
+		if netip.MustParsePrefix(r).Contains(config.WorkerClientIP) {
+			t.Errorf("%s holds the Worker's address", r)
+		}
 	}
 }
 

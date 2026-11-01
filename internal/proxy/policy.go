@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/remote"
 )
 
@@ -179,12 +180,18 @@ func (p Policy) keyed() bool {
 	return p.SpareBearer || slices.ContainsFunc(p.Allow, func(a BotAllow) bool { return a.Header != "" || len(a.Domains) > 0 })
 }
 
-// CheckCATerm refuses p when no certificate of the trusted proxies' CA is in force at now: applied, the
+// CheckCATerm refuses p holding Cloudflare's shared origin-pull CA (config.CheckOwnCA), and p when no certificate of the trusted proxies' CA is in force at now: applied, the
 // proxy would refuse the handshake of every connection of the proxies in front, and every site behind
 // them with it. One out of force beside one in force — a CA being changed — is taken: Caddy verifies a
 // client's certificate against any of the pool. Asked by apply and rollback alone, so status and a
 // rollback away from it still run.
 func CheckCATerm(p Policy, now time.Time) error {
+	// The shared CA first, on every certificate: one in force beside it would end the term's loop.
+	for i, der := range p.TrustedProxiesCA {
+		if err := config.CheckOwnCA(der); err != nil {
+			return fmt.Errorf("trusted_proxies_ca: certificate %d: %w", i+1, err)
+		}
+	}
 	var out []string
 	for i, der := range p.TrustedProxiesCA {
 		c, err := x509.ParseCertificate(der)
