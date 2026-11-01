@@ -1,6 +1,6 @@
 # Plan: отказ от общего CA Cloudflare и адрес Worker'а вне доверенных (после boks#134, #136)
 
-Base: main после #137 | Branch: fix/aop-shared-ca-worker
+Base: 99d0bc8 | Branch: fix/aop-shared-ca-worker
 
 Решения infra-pm 2026-11-01 по вопросам из отчёта #134:
 1. Адрес клиента Worker'а из чужой зоны (`2a06:98c0:3600::103`) исключить из `trusted_proxies`: для
@@ -29,6 +29,6 @@ Base: main после #137 | Branch: fix/aop-shared-ca-worker
 - [x] 0 worktree
 - [x] 1 план
 - [x] 2 реализация
-- [ ] 3 PR (после merge #137, перенос на свежий main)
+- [x] 3 PR
 - [ ] 4 review-loop green
 - [ ] 5 merge
