@@ -30,6 +30,6 @@ Base: c52f4f6 | Branch: feat/gate-range-sets
 - [x] 0 worktree
 - [x] 1 план
 - [x] 2 реализация
-- [ ] 3 PR
-- [ ] 4 review-loop green
-- [ ] 5 merge
+- [x] 3 PR (#141)
+- [x] 4 review-loop green
+- [x] 5 merge (99d0bc8)

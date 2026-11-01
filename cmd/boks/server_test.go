@@ -493,3 +493,74 @@ func TestServerApplyKeepsTheGate(t *testing.T) {
 		}
 	}
 }
+
+// rangedYML is a server.yml whose gate signature names the set jp, read from ranges/jp.txt beside it.
+const rangedYML = `servers: [a]
+revision: 5
+range_sets:
+  jp: ranges/jp.txt
+gate:
+  groups:
+    - name: shop
+      app: shop
+      mode: log
+      secret_env: SHOP_GATE_SECRET
+      signatures:
+        - {name: node-chrome-jp, mode: log, ranges: jp, headers: [{name: accept-encoding, pattern: "^br, gzip, deflate$"}]}
+`
+
+// The emergency path never waits on the set's file: with ranges/jp.txt gone, a rollback reads no file
+// of it and goes to the servers — the sets come from the revision in each one's history — and status
+// warns that apply would refuse the file without failing. Apply reads the file strictly: gone or empty,
+// it refuses before any server is asked.
+func TestRangeFileNeverBlocksTheRollback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte(rangedYML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hist := "sh -c if [ -f '.boks/_server/history/4.json' ]"
+	a := &recorder{server: server{policyRead: "present\n{\"revision\":5,\"floor\":5}", hist: "present\n{\"revision\":4}"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var errw strings.Builder
+	code := run([]string{"server", "rollback", path, "4"}, io.Discard, &errw)
+	if code != 0 || strings.Contains(errw.String(), "range_sets") {
+		t.Errorf("rollback with the file gone: %d %q", code, errw.String())
+	}
+	if !a.ran(hist) || !a.ran("ln -sn") {
+		t.Errorf("the rollback did not take revision 4 from the history: %v", a.calls)
+	}
+
+	a = &recorder{server: server{policyRead: "present\n{\"revision\":5,\"floor\":5}"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var out strings.Builder
+	errw.Reset()
+	if code := run([]string{"server", "status", path}, &out, &errw); code != 0 || !strings.Contains(out.String(), "! ") || !strings.Contains(out.String(), "range_sets.jp") || !strings.Contains(out.String(), "apply would refuse it") {
+		t.Errorf("status with the file gone: %d %q %q", code, out.String(), errw.String())
+	}
+
+	for _, body := range []*string{nil, new(string)} {
+		if body != nil {
+			if err := os.MkdirAll(filepath.Join(dir, "ranges"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "ranges", "jp.txt"), []byte("# APNIC JP\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		a = &recorder{server: server{policyRead: "present\n{\"revision\":4,\"floor\":4}"}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		t.Setenv("SHOP_GATE_SECRET", strings.Repeat("s", 32))
+		errw.Reset()
+		want := "range_sets.jp: open"
+		if body != nil {
+			want = "range_sets.jp: empty"
+		}
+		if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), want) {
+			t.Errorf("apply: %d %q, want %q", code, errw.String(), want)
+		}
+		if len(a.calls) > 0 {
+			t.Errorf("apply asked the server before refusing the file: %v", a.calls)
+		}
+	}
+}

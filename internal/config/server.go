@@ -59,6 +59,9 @@ type Server struct {
 	// into the policy, in the groups whose signatures name the set: a revision holds the list it was
 	// applied with, a rollback puts that list back, and an edit of the file changes nothing until applied.
 	RangeSets map[string]RangeSet `yaml:"range_sets"`
+
+	// setsUnread is a server.yml read by LoadServerForFleet: range_sets neither read nor checked.
+	setsUnread bool
 }
 
 // RangeSet is one of range_sets: Ranges as written, or read from File.
@@ -519,12 +522,20 @@ func (a BotAllow) validatePaths() error {
 var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 
 // LoadServer reads and checks a server.yml.
-func LoadServer(path string) (*Server, error) {
+func LoadServer(path string) (*Server, error) { return loadServer(path, true) }
+
+// LoadServerForFleet is LoadServer for what takes the list of servers alone — rollback, which takes
+// the rest from the revision in each server's history, and status: range_sets are neither read nor
+// checked, so a file of them missing or broken never stands in the way of going back. Gate signatures
+// naming a set are not checked against range_sets either; apply, by LoadServer, checks them all.
+func LoadServerForFleet(path string) (*Server, error) { return loadServer(path, false) }
+
+func loadServer(path string, sets bool) (*Server, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	s, err := parseServerIn(data, filepath.Dir(path))
+	s, err := parseServerIn(data, filepath.Dir(path), sets)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -532,11 +543,11 @@ func LoadServer(path string) (*Server, error) {
 }
 
 // ParseServer is LoadServer on bytes, its range_sets files read relative to the working directory.
-func ParseServer(data []byte) (*Server, error) { return parseServerIn(data, ".") }
+func ParseServer(data []byte) (*Server, error) { return parseServerIn(data, ".", true) }
 
 // parseServerIn is LoadServer on bytes, its range_sets files read relative to dir: strict about
 // unknown keys and about a second document, for the same reason as Parse.
-func parseServerIn(data []byte, dir string) (*Server, error) {
+func parseServerIn(data []byte, dir string, sets bool) (*Server, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var s Server
@@ -570,6 +581,9 @@ func parseServerIn(data []byte, dir string) (*Server, error) {
 	// The same for the gate: applied, an empty one would lift it from every group.
 	if s.Gate == nil && keys.Gate.Kind != 0 {
 		return nil, errors.New("gate: empty; remove the key for no gate")
+	}
+	if !sets {
+		s.RangeSets, s.setsUnread = nil, true
 	}
 	if err := s.readRangeSets(dir); err != nil {
 		return nil, err
@@ -606,8 +620,10 @@ func (s *Server) validate() error {
 		if err := s.Gate.validate(); err != nil {
 			return fmt.Errorf("gate: %w", err)
 		}
-		if err := s.Gate.withRangeSets(s.RangeSets); err != nil {
-			return fmt.Errorf("gate: %w", err)
+		if !s.setsUnread {
+			if err := s.Gate.withRangeSets(s.RangeSets); err != nil {
+				return fmt.Errorf("gate: %w", err)
+			}
 		}
 	}
 	// Trusting everyone hands every app the address a visitor writes into X-Forwarded-For.
