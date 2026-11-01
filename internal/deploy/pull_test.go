@@ -68,6 +68,7 @@ func TestPullRefusesWhatTryingAgainWouldNotChange(t *testing.T) {
 		"write /var/lib/docker/tmp: no space left on device",
 		// An answer that came over a slow link is still an answer.
 		"unauthorized: authentication required after i/o timeout",
+		"Error response from daemon: manifest for ghcr.io/x/y:v2 not found: manifest unknown after unexpected EOF",
 	} {
 		f, pulls := pullsUntil(9, errors.New(msg))
 		if err := pull(context.Background(), f, io.Discard, "ghcr.io/x/y:v2", true, nil); err == nil || *pulls != 1 {
