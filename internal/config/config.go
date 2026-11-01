@@ -350,8 +350,9 @@ type Config struct {
 }
 
 // Registry is a private registry reached over HTTPS with a token (E2). The token itself is never in
-// boks.yml and never kept on a server: boks reads it from the environment it runs in — the
-// operator's shell or CI — under the name TokenEnv, and hands it to `docker login` on stdin.
+// boks.yml: boks reads it from the environment it runs in — the operator's shell or CI — under the
+// name TokenEnv, and hands it to `docker login` on stdin. For an app of server.yml, `server apply`
+// keeps it on the server too, 0600, for the server's own boks to deploy with (#154, stage 2).
 type Registry struct {
 	Host     string `yaml:"host"`      // registry.depot.dev; the image must live on this host
 	User     string `yaml:"user"`      // DefaultRegistryUser when empty

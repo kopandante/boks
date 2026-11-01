@@ -883,3 +883,110 @@ func TestServerRollbackAsksEveryServersBoksFirst(t *testing.T) {
 		}
 	}
 }
+
+// apply writes the apps of server.yml after the server's boks and before its policy, on the servers
+// each one's boks.yml names (#154, stage 2).
+func TestApplyWritesTheAppsBetweenBoksAndPolicy(t *testing.T) {
+	build := []byte("a build")
+	s := sha256.Sum256(build)
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { return build, nil }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	shop := "app: shop\nimage: ghcr.io/x/shop:v1\nservers: [a]\nenv: {A: \"1\"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "shop.yml"), []byte(shop), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+
+		"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\napps: {shop: shop.yml}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol := "present\n{\"revision\":1,\"floor\":1}"
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	run([]string{"server", "apply", path}, io.Discard, io.Discard)
+	boks, app, env, policy := -1, -1, -1, -1
+	for i, in := range a.stdin {
+		switch {
+		case in == string(build) && boks < 0:
+			boks = i
+		case in == shop:
+			app = i
+		case in == "A=1\n":
+			env = i
+		case strings.Contains(in, `"action":"server apply"`) && policy < 0:
+			policy = i
+		}
+	}
+	if boks < 0 || env < boks || app < env || policy < app {
+		t.Errorf("boks at %d, env at %d, boks.yml at %d, the policy at %d", boks, env, app, policy)
+	}
+	for _, in := range b.stdin {
+		if in == shop {
+			t.Errorf("shop written on b, which its boks.yml does not name")
+		}
+	}
+}
+
+// An app that does not load refuses the apply before any server is asked.
+func TestApplyRefusesAnAppBeforeAnyServer(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shop.yml"), []byte("app: shop\nimage: ghcr.io/x/shop:v1\nservers: [a]\nregistry: {host: ghcr.io, token_env: NO_SUCH_TOKEN_X}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+
+		"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\napps: {shop: shop.yml}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &recorder{server: server{}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "apps: shop: registry.token_env: NO_SUCH_TOKEN_X") {
+		t.Fatalf("apply: %d %q", code, errw.String())
+	}
+	if len(a.calls) > 0 {
+		t.Errorf("a server was asked: %v", a.calls)
+	}
+}
+
+// status compares each server's apps with the apps server.yml puts on that server, from boks.yml alone:
+// no secret is read, so an app whose token is not set still compares (#154, stage 2).
+func TestServerStatusComparesEachServersApps(t *testing.T) {
+	dir := t.TempDir()
+	shop := "app: shop\nimage: ghcr.io/x/shop:v1\nservers: [a]\nregistry: {host: ghcr.io, token_env: NO_SUCH_TOKEN_X}\n"
+	if err := os.WriteFile(filepath.Join(dir, "shop.yml"), []byte(shop), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nboks:\n  commit: "+strings.Repeat("a", 40)+
+		"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\napps: {shop: shop.yml}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const kept = "sh -c for d in .boks/_server/apps/*/"
+	sum := sha256.Sum256([]byte(shop))
+	a := &recorder{server: server{kept: "shop\n", "sh -c sha256sum '.boks/_server/apps/shop/boks.yml'": hex.EncodeToString(sum[:]) + "\nenv\n"}}
+	b := &recorder{server: server{kept: "old\n"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var out, errw strings.Builder
+	if code := run([]string{"server", "status", path}, &out, &errw); code != 0 {
+		t.Fatalf("got %d: %s", code, errw.String())
+	}
+	sa, sb, _ := strings.Cut(out.String(), "== b\n")
+	if strings.Contains(sa, "app ") || !strings.Contains(sb, "app old: on the server, and server.yml does not name it") || strings.Contains(sb, "app shop") {
+		t.Errorf("want a in step and b holding only old:\n%s", out.String())
+	}
+	// A boks.yml that does not load is a line, and no app is compared against a list it cannot give.
+	if err := os.WriteFile(filepath.Join(dir, "shop.yml"), []byte("app: blog\nimage: x\nservers: [a]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := run([]string{"server", "status", path}, &out, &errw); code != 0 {
+		t.Fatalf("got %d: %s", code, errw.String())
+	}
+	if !strings.Contains(out.String(), "! apps: shop: ") || !strings.Contains(out.String(), "names the app blog") || strings.Contains(out.String(), "app old") {
+		t.Errorf("want the app's error, and no comparison:\n%s", out.String())
+	}
+}
