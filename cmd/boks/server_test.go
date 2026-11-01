@@ -948,3 +948,42 @@ func TestApplyRefusesAnAppBeforeAnyServer(t *testing.T) {
 		t.Errorf("a server was asked: %v", a.calls)
 	}
 }
+
+// status compares each server's apps with the apps server.yml puts on that server, from boks.yml alone:
+// no secret is read, so an app whose token is not set still compares (#154, stage 2).
+func TestServerStatusComparesEachServersApps(t *testing.T) {
+	dir := t.TempDir()
+	shop := "app: shop\nimage: ghcr.io/x/shop:v1\nservers: [a]\nregistry: {host: ghcr.io, token_env: NO_SUCH_TOKEN_X}\n"
+	if err := os.WriteFile(filepath.Join(dir, "shop.yml"), []byte(shop), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nboks:\n  commit: "+strings.Repeat("a", 40)+
+		"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\napps: {shop: shop.yml}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const kept = "sh -c for d in .boks/_server/apps/*/"
+	sum := sha256.Sum256([]byte(shop))
+	a := &recorder{server: server{kept: "shop\n", "sh -c sha256sum '.boks/_server/apps/shop/boks.yml'": hex.EncodeToString(sum[:]) + "\nenv\n"}}
+	b := &recorder{server: server{kept: "old\n"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var out, errw strings.Builder
+	if code := run([]string{"server", "status", path}, &out, &errw); code != 0 {
+		t.Fatalf("got %d: %s", code, errw.String())
+	}
+	sa, sb, _ := strings.Cut(out.String(), "== b\n")
+	if strings.Contains(sa, "app ") || !strings.Contains(sb, "app old: on the server, and server.yml does not name it") || strings.Contains(sb, "app shop") {
+		t.Errorf("want a in step and b holding only old:\n%s", out.String())
+	}
+	// A boks.yml that does not load is a line, and no app is compared against a list it cannot give.
+	if err := os.WriteFile(filepath.Join(dir, "shop.yml"), []byte("app: blog\nimage: x\nservers: [a]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := run([]string{"server", "status", path}, &out, &errw); code != 0 {
+		t.Fatalf("got %d: %s", code, errw.String())
+	}
+	if !strings.Contains(out.String(), "! apps: shop: ") || !strings.Contains(out.String(), "names the app blog") || strings.Contains(out.String(), "app old") {
+		t.Errorf("want the app's error, and no comparison:\n%s", out.String())
+	}
+}
