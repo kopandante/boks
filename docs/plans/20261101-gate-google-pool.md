@@ -6,6 +6,8 @@ Base: a8c7bc2 (перенос на main после #137 и PR про общий 
 сервисы, которые программирует сам пользователь Google; скрейпер оттуда получал токен и проход с любого
 адреса Google. Рендерер Googlebot ходит из common-crawlers (бывший googlebot.json). Решение cars-pm 01.11.
 
+Образ: `proxy/TAG` → `ban10-gate10` (CI собирает образ; `DefaultProxyImage` и серверы не трогаются).
+
 Не входит: request-gate в cars-cli (cars-gate), выкат образа (вместе с #137, по слову владельца),
 `isGoogle` для `fetch_meta`/`alpn` (там user-triggered fetchers остаются — Read Aloud).
 
