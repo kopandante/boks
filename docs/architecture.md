@@ -898,7 +898,7 @@ gate:
   запросу, который токен пропустил: `fp` — 403 `Fingerprint mismatch` (клиент 2.5 обновит токен), остальные —
   403 `Forbidden`, `gate_reason: check_<имя>`. Опубликованные диапазоны Googlebot и user-triggered fetchers
   Google (файлы в образе, `proxy/gate/google/`) проходят `fetch_meta` и `alpn` — user-triggered fetchers только
-  здесь (Read Aloud и т. п.), в сигнатурах, page_first и static_rhythm они как все (#151, образ gate12; до него — исключены везде); так же — роботы Яндекса: UA с
+  здесь (Read Aloud и т. п.), в сигнатурах, page_first и static_rhythm они как все (#151, образ gate12; до него — исключены везде). `fetch_meta` и `alpn` проходят и роботы Яндекса: UA с
   `Yandex` с адреса из анонсов AS13238 (`proxy/gate/yandex/as13238.txt`, RIPEstat; без DNS на запросе, образ
   gate4); `exempt_ranges` — все проверки.
   Поле обработчика, поэтому boks его не читает: нужен образ gate3, формат не меняется.
