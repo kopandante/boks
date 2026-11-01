@@ -826,8 +826,10 @@ gate:
   только если совпали и путь, и все заголовки. Маршрут гейта ловит хосты группы целиком, без условия на путь,
   поэтому сигнатуры видят и `/_next/`: `{name: static-as-document, path: '^/_next/', headers: [{name:
   sec-fetch-dest, pattern: '^document$'}]}` — файлы Next с заголовками навигации, как их тянет скрейпер
-  cars.dbauto.kr (браузер шлёт `script`, `style`, `font`, `image`; kopandante/todo#422). В `enforce` с
-  `signature_ban` такой запрос файла банит адрес.
+  cars.dbauto.kr (браузер, загружая страницу, шлёт `script`, `style`, `font`, `image`; kopandante/todo#422). Но файл,
+  открытый человеком напрямую (картинка `/_next/image` «в новой вкладке», ссылка на файл), браузер тоже запрашивает
+  как `document` (`Sec-Fetch-Mode: navigate`): в `enforce` с `signature_ban` такой запрос файла банит адрес, поэтому
+  до `enforce` сигнатуру сужают вторым заголовком или держат в `log`.
 - **Страница до API** (`page_first: {mode, window, warmup}`, kopandante/todo#419): запрос `/api/` с адреса, который
   не запрашивал страницу группы (GET документа или RSC-перехода Next, не `/_next/` и не ассет) за `window` (10m–168h),
   пишется в журнал `gate_behavior: no_page`; `enforce` (только в группе `enforce`) — 403 `Forbidden`, `gate_reason:
