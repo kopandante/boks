@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,6 +94,38 @@ func TestDeployHookDeploysFromTheServersFiles(t *testing.T) {
 	}
 	if !h.called || h.cfg.App != "shop" || h.tag != "v1.2.3_rc-4" || string(h.o.Env) != "A=1\n" || h.o.Login == nil || h.o.Login.Token != "t0ken" {
 		t.Errorf("%+v", h)
+	}
+}
+
+// A client gone mid-deploy does not cut the deploy short: the hook, its stdout a pipe no one reads any
+// more, prints on and the deploy runs to its end, where it unlocks; Go's SIGPIPE would end it on its
+// first line instead (#154, stage 3). The hook runs in a child process, as sshd starts it.
+func TestDeployHookOutlivesItsClient(t *testing.T) {
+	if done := os.Getenv("BOKS_TEST_HOOK_DONE"); done != "" {
+		var h hooked
+		hookHome(t, "v1", &h)
+		hookDeploy = func(_ context.Context, _ remote.Runner, out io.Writer, _ *config.Config, _ string, _ deploy.Options) error {
+			for i := range 3 {
+				fmt.Fprintf(out, "step %d\n", i)
+			}
+			return os.WriteFile(done, []byte("unlocked"), 0o600)
+		}
+		run([]string{"deploy-hook", "shop"}, os.Stdout, io.Discard)
+		return
+	}
+	done := filepath.Join(t.TempDir(), "done")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close() // the client is gone before the hook prints anything
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDeployHookOutlivesItsClient$")
+	cmd.Env = append(os.Environ(), "BOKS_TEST_HOOK_DONE="+done)
+	cmd.Stdout = w
+	runErr := cmd.Run()
+	w.Close()
+	if b, err := os.ReadFile(done); err != nil || string(b) != "unlocked" {
+		t.Errorf("the deploy did not run to its end: %v (hook: %v)", err, runErr)
 	}
 }
 

@@ -129,3 +129,45 @@ func TestPutDeployKeysRefuses(t *testing.T) {
 		t.Errorf("link: the file it names changed: %q", b)
 	}
 }
+
+// A deploy key one of the server's own lines already holds is refused: sshd would take that line, above
+// the block, and the key would keep its shell. A commented-out copy holds nothing and is kept.
+func TestPutDeployKeysRefusesAKeyTheServerHolds(t *testing.T) {
+	for _, body := range []string{edKey + " ci\n", `from="10.0.0.1",no-pty ` + edKey + "\n", "other\n" + keysBegin + "\n" + keysEnd + "\n" + edKey + "\n"} {
+		h := newHome(t)
+		writeKeys(t, h, body)
+		if err := PutDeployKeys(context.Background(), h, io.Discard, map[string]string{"shop": edKey}); err == nil || !strings.Contains(err.Error(), "the key of shop is already in") {
+			t.Errorf("%q: %v", body, err)
+		}
+		if keysFile(t, h) != body {
+			t.Errorf("%q: changed", body)
+		}
+	}
+	h := newHome(t)
+	writeKeys(t, h, "# "+edKey+" retired\n")
+	if err := PutDeployKeys(context.Background(), h, io.Discard, map[string]string{"shop": edKey}); err != nil {
+		t.Errorf("commented out: %v", err)
+	}
+}
+
+// An authorized_keys boks cannot read is refused, not taken for an empty one: written again, the server's
+// own keys would be gone.
+func TestPutDeployKeysRefusesAFileItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any file")
+	}
+	h := newHome(t)
+	writeKeys(t, h, "ssh-ed25519 AAAAown\n")
+	p := filepath.Join(h.dir, authorizedKeys)
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(p, 0o600) })
+	if err := PutDeployKeys(context.Background(), h, io.Discard, map[string]string{"shop": edKey}); err == nil {
+		t.Error("an unreadable file was written over")
+	}
+	os.Chmod(p, 0o600)
+	if keysFile(t, h) != "ssh-ed25519 AAAAown\n" {
+		t.Errorf("changed: %q", keysFile(t, h))
+	}
+}

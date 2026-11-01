@@ -42,4 +42,10 @@ func TestServerDeployKeys(t *testing.T) {
 			t.Errorf("%q: %v, want %q", doc, err, want)
 		}
 	}
+	// One key under two apps: sshd would run the first app's hook for both, so it is refused, whatever
+	// comment each copy carries.
+	two := "servers: [a]\n" + commitSum + "apps: {shop: shop.yml, blog: blog.yml}\n"
+	if _, err := ParseServer([]byte(two + "deploy_keys: {shop: \"" + edKey + " a\", blog: \"" + edKey + " b\"}\n")); err == nil || !strings.Contains(err.Error(), "blog and shop have the same key") {
+		t.Errorf("one key, two apps: %v", err)
+	}
 }

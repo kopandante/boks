@@ -9,12 +9,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kopandante/boks/internal/cert"
@@ -266,6 +268,10 @@ var (
 // and registry token are the ones `server apply` wrote under ~/.boks/_server/apps/<app>. What the
 // deploy prints goes back to the client, and its exit is the deploy's.
 func deployHook(ctx context.Context, app string, out io.Writer) error {
+	// A CI that goes away mid-deploy (a job cancelled) closes the pipe the hook prints into. Go would end
+	// the hook on its next line with SIGPIPE, the deploy cut short and its lock left behind, which the key
+	// cannot clear: with SIGPIPE taken, the line is lost and the deploy runs to its end and unlocks.
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
 	if !config.ValidAppName(app) {
 		return fmt.Errorf("deploy-hook: %q is not an app name", app)
 	}

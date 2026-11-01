@@ -13,11 +13,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -673,20 +675,28 @@ func (s *Server) validate() error {
 		return errors.New("apps: the server's own boks deploys them, so boks: is required")
 	}
 	for name, p := range s.Apps {
-		if !nameRe.MatchString(name) || name == "bin" {
+		if !ValidAppName(name) {
 			return fmt.Errorf("apps: %q must match %s and not be bin", name, nameRe)
 		}
 		if strings.TrimSpace(p) == "" {
 			return fmt.Errorf("apps: %s: the path of its boks.yml is required", name)
 		}
 	}
-	for app, key := range s.DeployKeys {
+	// One key, one app: sshd takes the first line of authorized_keys that holds the key, so a key under
+	// two apps would deploy the first of them whichever app's CI sent it.
+	keyOf := map[string]string{}
+	for _, app := range slices.Sorted(maps.Keys(s.DeployKeys)) {
 		if _, ok := s.Apps[app]; !ok {
 			return fmt.Errorf("deploy_keys: %s is not an app of apps:", app)
 		}
-		if _, err := DeployKey(key); err != nil {
+		k, err := DeployKey(s.DeployKeys[app])
+		if err != nil {
 			return fmt.Errorf("deploy_keys: %s: %w", app, err)
 		}
+		if other, ok := keyOf[k]; ok {
+			return fmt.Errorf("deploy_keys: %s and %s have the same key; each app needs a key of its own", other, app)
+		}
+		keyOf[k] = app
 	}
 	if s.Egress != nil {
 		if err := s.Egress.validate(); err != nil {

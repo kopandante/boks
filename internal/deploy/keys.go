@@ -32,8 +32,8 @@ func HookLine(app, key string) string {
 // keys is not touched. An authorized_keys that is a link, or a block with no end, is refused: rewritten,
 // the one would replace the file the link names with a copy, the other would take every line after it.
 func PutDeployKeys(ctx context.Context, r remote.Runner, log io.Writer, keys map[string]string) error {
-	out, err := r.Run(ctx, "sh", "-c", "if [ -L "+authorizedKeys+" ]; then echo link; elif [ -f "+authorizedKeys+" ]; then echo present; cat "+
-		authorizedKeys+"; echo .; else echo absent; fi")
+	out, err := r.Run(ctx, "sh", "-c", "if [ -L "+authorizedKeys+" ]; then echo link; elif [ -f "+authorizedKeys+" ]; then echo present && cat "+
+		authorizedKeys+" && echo .; else echo absent; fi")
 	if err != nil {
 		return fmt.Errorf("deploy keys: reading %s: %w", authorizedKeys, err)
 	}
@@ -41,7 +41,7 @@ func PutDeployKeys(ctx context.Context, r remote.Runner, log io.Writer, keys map
 	var have string
 	switch mark {
 	case "link":
-		return fmt.Errorf("deploy keys: %s is a link; boks writes its keys only into a file of its own; nothing was changed", authorizedKeys)
+		return fmt.Errorf("deploy keys: %s is a link; boks writes its keys only into a file of its own; the file was not changed", authorizedKeys)
 	case "present":
 		// The runner trims what a command prints: the dot keeps the file's last newlines.
 		have = strings.TrimSuffix(rest, ".")
@@ -55,6 +55,9 @@ func PutDeployKeys(ctx context.Context, r remote.Runner, log io.Writer, keys map
 	}
 	if !had && len(keys) == 0 {
 		return nil
+	}
+	if err := keysOutside(others, keys); err != nil {
+		return err
 	}
 	next := others
 	if len(keys) > 0 {
@@ -77,6 +80,26 @@ func PutDeployKeys(ctx context.Context, r remote.Runner, log io.Writer, keys map
 	return nil
 }
 
+// keysOutside refuses a deploy key that one of the server's own lines already holds: sshd takes the first
+// line with the key, and that one, above boks's block, would give the key the shell its own line does
+// rather than deploy-hook. Commented-out lines hold nothing.
+func keysOutside(others string, keys map[string]string) error {
+	for _, l := range strings.Split(others, "\n") {
+		f := strings.Fields(l)
+		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		for _, app := range slices.Sorted(maps.Keys(keys)) {
+			_, b64, _ := strings.Cut(keys[app], " ")
+			if slices.Contains(f, b64) {
+				return fmt.Errorf("deploy keys: the key of %s is already in %s on one of the server's own lines, outside boks's block, where it can do more than deploy; "+
+					"remove that line and apply again; the file was not changed", app, authorizedKeys)
+			}
+		}
+	}
+	return nil
+}
+
 // outsideBlock is authorized_keys without boks's block, and whether it had one.
 func outsideBlock(file string) (string, bool, error) {
 	lines := strings.SplitAfter(file, "\n")
@@ -86,13 +109,13 @@ func outsideBlock(file string) (string, bool, error) {
 		switch strings.TrimRight(l, "\r\n") {
 		case keysBegin:
 			if in || had {
-				return "", false, fmt.Errorf("deploy keys: %s holds boks's block twice; nothing was changed", authorizedKeys)
+				return "", false, fmt.Errorf("deploy keys: %s holds boks's block twice; the file was not changed", authorizedKeys)
 			}
 			in, had = true, true
 			continue
 		case keysEnd:
 			if !in {
-				return "", false, fmt.Errorf("deploy keys: %s has the end of boks's block without its beginning; nothing was changed", authorizedKeys)
+				return "", false, fmt.Errorf("deploy keys: %s has the end of boks's block without its beginning; the file was not changed", authorizedKeys)
 			}
 			in = false
 			continue
@@ -102,7 +125,7 @@ func outsideBlock(file string) (string, bool, error) {
 		}
 	}
 	if in {
-		return "", false, fmt.Errorf("deploy keys: %s has the beginning of boks's block without its end; nothing was changed", authorizedKeys)
+		return "", false, fmt.Errorf("deploy keys: %s has the beginning of boks's block without its end; the file was not changed", authorizedKeys)
 	}
 	return out.String(), had, nil
 }
