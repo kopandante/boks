@@ -486,7 +486,11 @@ func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload
 	if tok == "" {
 		return deny("no_token", accessDenied), nil
 	}
-	pl, reason := h.verify(tok, h.now())
+	now := h.now()
+	pl, reason := h.verify(tok, now)
+	if reason == "expired" && googleLate(pl, ip, now) {
+		reason = ""
+	}
 	if reason != "" {
 		return deny(reason, accessDenied), nil
 	}
@@ -511,6 +515,19 @@ func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload
 		return deny("ip_mismatch", addressMismatch), &pl
 	}
 	return allow("token"), &pl
+}
+
+// googleGrace is how long after its issue an expired token of a Googlebot address still passes from one:
+// Google's renderer calls the API with a token kept from an earlier crawl and asks for no new one on 401
+// (cars.dbauto.kr 30.10, todo#419), so the page it renders goes without the API's data.
+const googleGrace = 24 * time.Hour
+
+// googleLate says whether the expired token pl, issued at most googleGrace ago and not in the future,
+// is a Googlebot address's presented from a Googlebot address b (googlePool: not Google's
+// user-triggered fetchers, #138).
+func googleLate(pl payload, b string, now time.Time) bool {
+	age := float64(now.UnixMilli()) - pl.iat
+	return age >= 0 && age <= float64(googleGrace.Milliseconds()) && googlePool(pl.ip, b)
 }
 
 // googlePool says whether the token's address a and the request's b are both Google's common
