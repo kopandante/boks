@@ -36,7 +36,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
                    every app on the server (once per server)
   proxy upgrade    replace the running proxy with proxy_image (a boot leaves a running one alone);
-                   80 and 443 are down for the swap, and a failed one puts the old proxy back
+                   80 and 443 are down for the swap, and a failed one puts the old proxy back;
+                   an image older than the running one (ban/gate in the tag) needs --force
   unlock           clear a stale deploy lock, and the server's admission lock if this app or a
                    proxy boot left it
   cert issue       obtain the DNS-01 certificate now, install it, reload the routes
@@ -402,6 +403,12 @@ func certCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writ
 }
 
 func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Writer) error {
+	// --force has upgrade take an image older than the running one (proxy.Older), for upgrade alone.
+	force := false
+	if i := slices.Index(args, "--force"); i >= 0 && len(args) > 0 && args[0] == "upgrade" {
+		force = true
+		args = slices.Delete(slices.Clone(args), i, i+1)
+	}
 	if len(args) != 1 {
 		return fmt.Errorf("proxy needs one of: boot, list, migrate, upgrade")
 	}
@@ -422,7 +429,7 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 		})
 	case "upgrade":
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
-			return deploy.UpgradeProxy(ctx, r, out, cfg.ProxyImage, deploy.Options{Now: now})
+			return deploy.UpgradeProxy(ctx, r, out, cfg.ProxyImage, deploy.Options{Now: now, Force: force})
 		})
 	}
 	return fmt.Errorf("unknown proxy command %q", args[0])

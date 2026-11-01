@@ -81,7 +81,11 @@ func Boot(ctx context.Context, r remote.Runner, log io.Writer, image string) err
 		if current, err := Image(ctx, r); err != nil {
 			return err
 		} else if current != image {
-			fmt.Fprintf(log, "warning: the proxy runs %s, and the config names %s; `boks proxy upgrade` replaces it (80 and 443 are down meanwhile)\n", current, image)
+			if Older(image, current) {
+				fmt.Fprintf(log, "warning: the proxy runs %s, and the config names the older %s; `boks proxy upgrade` refuses to take it back without --force\n", current, image)
+			} else {
+				fmt.Fprintf(log, "warning: the proxy runs %s, and the config names %s; `boks proxy upgrade` replaces it (80 and 443 are down meanwhile)\n", current, image)
+			}
 		}
 		if err := reattach(ctx, r, log, fs); err != nil {
 			return err

@@ -166,7 +166,7 @@ func (s *swap) at(prefix string) int {
 func (s *swap) upgrade(t *testing.T) (string, error) {
 	t.Helper()
 	var log strings.Builder
-	err := Upgrade(context.Background(), s, &log, newImage, func(from string) error {
+	err := Upgrade(context.Background(), s, &log, newImage, false, func(from string) error {
 		s.calls = append(s.calls, "BEGIN "+from)
 		if err, ok := s.fail["BEGIN"]; ok {
 			return err
@@ -337,5 +337,72 @@ func TestBootNamesAnotherImage(t *testing.T) {
 	log.Reset()
 	if err := Boot(context.Background(), s, &log, newImage); err != nil || strings.Contains(log.String(), "warning") {
 		t.Errorf("the image the config names: want no warning, got %v %s", err, log.String())
+	}
+	// An older image the config names: the warning says so and that upgrade will not take it (boks#145).
+	const running, older = "boks-caddy:2.11.7-ban10-gate9-go1.27.3", "boks-caddy:2.11.7-ban9-gate4-go1.27.3"
+	s = newSwap(running)
+	log.Reset()
+	if err := Boot(context.Background(), s, &log, older); err != nil ||
+		!strings.Contains(log.String(), "the config names the older "+older+"; `boks proxy upgrade` refuses") {
+		t.Errorf("an older image: want it named older, got %v %s", err, log.String())
+	}
+}
+
+// The ban and gate of a boks-caddy tag, with or without a registry and digest; gate 0 for a ban without
+// one; no numbers for an image boks does not number.
+func TestImageLevel(t *testing.T) {
+	for _, c := range []struct {
+		image     string
+		ban, gate int
+		ok        bool
+	}{
+		{"ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban10-gate9-go1.27.3@sha256:30f5", 10, 9, true},
+		{"boks-caddy:2.11.7-fp0aab84d-ban9-gate4-go1.27.3", 9, 4, true},
+		{"boks-caddy:2.11.7-ban10-gate11-go1.27.3-1a2b3c4", 10, 11, true},
+		{"ghcr.io/kopandante/boks-caddy:2.11.7-ban8", 8, 0, true},
+		{"localhost:5000/boks-caddy:2.11.7-ban3-go1.26", 3, 0, true},
+		{"caddy:2.11.7-alpine", 0, 0, false},
+		{"ghcr.io/x/urban12:1", 0, 0, false},
+		{"", 0, 0, false},
+	} {
+		ban, gate, ok := imageLevel(c.image)
+		if ban != c.ban || gate != c.gate || ok != c.ok {
+			t.Errorf("%s: %d %d %v", c.image, ban, gate, ok)
+		}
+	}
+}
+
+// An upgrade to an image older than the running one by ban or gate is refused before anything is
+// pulled or stopped — the fleet's boks with an old default would take a newer proxy back; --force
+// takes it on purpose, and a newer image or one boks does not number goes as before (boks#145).
+func TestUpgradeRefusesAnOlderImage(t *testing.T) {
+	const running = "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban10-gate9-go1.27.3@sha256:aa"
+	older := "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban9-gate4-go1.27.3@sha256:bb"
+	for _, c := range []struct {
+		image   string
+		force   bool
+		refused bool
+	}{
+		{older, false, true},
+		{"ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban10-gate8-go1.27.3", false, true},
+		{"ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban11-gate4-go1.27.3", false, true},
+		{older, true, false},
+		{"ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban10-gate10-go1.27.3", false, false},
+		{"caddy:2.12.0-alpine", false, false},
+	} {
+		s := newSwap(running)
+		var log strings.Builder
+		err := Upgrade(context.Background(), s, &log, c.image, c.force, func(string) error { return nil })
+		if refused := err != nil && strings.Contains(err.Error(), "older than the running"); refused != c.refused {
+			t.Errorf("%s force=%v: %v", c.image, c.force, err)
+			continue
+		}
+		if c.refused {
+			if s.at("docker pull") >= 0 || s.at("docker stop") >= 0 || s.boxes[Container].image != running {
+				t.Errorf("%s: touched the proxy before refusing: %v", c.image, s.calls)
+			}
+		} else if err != nil || s.boxes[Container].image != c.image {
+			t.Errorf("%s force=%v: %v, runs %s", c.image, c.force, err, s.boxes[Container].image)
+		}
 	}
 }

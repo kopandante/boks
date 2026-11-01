@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/kopandante/boks/internal/remote"
@@ -24,10 +25,11 @@ func Image(ctx context.Context, r remote.Runner) (string, error) {
 // since a boot leaves a running proxy alone. It is a short outage on 80 and 443, open WebSockets
 // included: stop, swap, start. Everything that can refuse does so before the stop: a swap an earlier
 // run left cut, a deploy of some app in progress (its reload would meet no proxy), an image that does
-// not pull, a config the new Caddy refuses. Then begin is called with the image the proxy runs, and
-// an error from it stops the upgrade with nothing touched. After the stop, any failure puts the old
-// container back and starts it. The caller holds the server's admission lock.
-func Upgrade(ctx context.Context, r remote.Runner, log io.Writer, image string, begin func(from string) error) error {
+// not pull, a config the new Caddy refuses, an image older than the one running (unless force). Then
+// begin is called with the image the proxy runs, and an error from it stops the upgrade with nothing
+// touched. After the stop, any failure puts the old container back and starts it. The caller holds
+// the server's admission lock.
+func Upgrade(ctx context.Context, r remote.Runner, log io.Writer, image string, force bool, begin func(from string) error) error {
 	// First: a cut swap leaves the old proxy aside and, under the proxy's name, nothing, or a new one
 	// that may never have started — whose image is the one asked for.
 	if err := checkAside(ctx, r); err != nil {
@@ -46,6 +48,10 @@ func Upgrade(ctx context.Context, r remote.Runner, log io.Writer, image string, 
 	current, err := Image(ctx, r)
 	if err != nil {
 		return err
+	}
+	if Older(image, current) && !force {
+		return fmt.Errorf("%s is older than the running %s (ban and gate in the tag); upgrade does not take the proxy back, "+
+			"so name in proxy_image an image no older, or pass --force to go back on purpose; the proxy was not touched", image, current)
 	}
 	// The container the server's policy needs: an upgrade also creates again a proxy whose egress
 	// port or hosts file another path left out.
@@ -216,4 +222,34 @@ func exists(ctx context.Context, r remote.Runner, name string) (bool, error) {
 		return false, fmt.Errorf("looking for %s: %w", name, err)
 	}
 	return strings.TrimSpace(out) != "", nil
+}
+
+// levelRe finds the ban and the gate in a boks-caddy tag (proxy/TAG plus, off main, -<sha7>).
+var levelRe = regexp.MustCompile(`-ban(\d+)(?:-gate(\d+))?(?:-|$)`)
+
+// imageLevel reads the ban and gate of a boks-caddy tag (…-ban10-gate9-…): gate 0 for a ban without one,
+// as images before the gate were; ok is false for a tag without a ban — an image boks does not number.
+func imageLevel(image string) (ban, gate int, ok bool) {
+	ref, _, _ := strings.Cut(image, "@")
+	if i := strings.LastIndex(ref, "/"); i >= 0 {
+		ref = ref[i+1:]
+	}
+	_, tag, _ := strings.Cut(ref, ":")
+	m := levelRe.FindStringSubmatch(tag)
+	if m == nil {
+		return 0, 0, false
+	}
+	ban, _ = strconv.Atoi(m[1])
+	if m[2] != "" {
+		gate, _ = strconv.Atoi(m[2])
+	}
+	return ban, gate, true
+}
+
+// Older says whether image is older than current by the ban or the gate its tag carries: a handler
+// the policy writes for would be gone. Either tag without the numbers compares as not older.
+func Older(image, current string) bool {
+	b, g, ok := imageLevel(image)
+	cb, cg, cok := imageLevel(current)
+	return ok && cok && (b < cb || g < cg)
 }

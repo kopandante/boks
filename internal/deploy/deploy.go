@@ -39,7 +39,8 @@ type Options struct {
 	// container; zero means five minutes.
 	AdmitWait time.Duration
 	// Force lifts, for `boks server apply` and `rollback`, the refusal to leave a site whose own token
-	// check is gone without the proxy's (CheckGateTransition) — an emergency's override, nothing else.
+	// check is gone without the proxy's (CheckGateTransition) — an emergency's override; and, for
+	// `boks proxy upgrade`, the refusal to take an image older than the running one (proxy.Older).
 	Force bool
 }
 
