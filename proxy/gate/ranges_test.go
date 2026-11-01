@@ -42,6 +42,14 @@ func TestSignatureRanges(t *testing.T) {
 		if w.Code != c.want || fields(extra)["gate_reason"] != c.reason {
 			t.Errorf("%s: %d %v, want %d %s", c.name, w.Code, fields(extra), c.want, c.reason)
 		}
+		// Banned: the same address as a browser next is refused by the ban, not let by.
+		if c.want == 403 {
+			r, extra := withLog(browserClient(chromeUA, c.ip).request(h, "GET", "/api/auctions/heydealer/cars"))
+			r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+			if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "signature_ban" {
+				t.Errorf("%s, then as a browser: %d %v, want 403 signature_ban", c.name, w.Code, fields(extra))
+			}
+		}
 	}
 }
 

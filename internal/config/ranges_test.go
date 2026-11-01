@@ -69,8 +69,8 @@ func TestNoRangesKeepTheGateAsWritten(t *testing.T) {
 	}
 }
 
-// A set is read from a file beside server.yml, comments and blank lines left out; what it held is in the
-// gate, so an edit of the file after it was read changes nothing parsed.
+// A set is read from a file beside server.yml, comments and blank lines left out, into the group whose
+// signature names it (that a revision keeps its list is TestRangeSetRollsBackWithItsRevision's).
 func TestRangeSetFromAFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "ranges"), 0o755); err != nil {
@@ -89,13 +89,6 @@ func TestRangeSetFromAFile(t *testing.T) {
 	}
 	if got, _ := json.Marshal(groupSets(t, s)["dbauto"]); string(got) != `{"jp":["126.0.0.0/8","2400:4050::/32"]}` {
 		t.Errorf("from the file: %s", got)
-	}
-	before := string(s.Gate.JSON)
-	if err := os.WriteFile(filepath.Join(dir, "ranges", "jp.txt"), []byte("1.0.0.0/8\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if string(s.Gate.JSON) != before {
-		t.Error("the parsed gate followed the file")
 	}
 }
 
