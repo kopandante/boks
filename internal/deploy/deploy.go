@@ -887,7 +887,7 @@ func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabl
 	}
 	for try := 1; ; try++ {
 		err := pullOnce(ctx, r, log, ref, login)
-		if err == nil || !registryDown(err) {
+		if err == nil || !registryDown(err, ref) {
 			return err
 		}
 		if try == pullTries {
@@ -928,11 +928,18 @@ func pullOnce(ctx context.Context, r remote.Runner, log io.Writer, ref string, l
 // be boks's own ssh to the server rather than the registry; trying that again is as safe, so the words
 // do not tell the two apart and the refusal names both. The list is wide on purpose (boks#153): a try
 // more is bounded and harmless, a failure not caught is a deploy started again by hand.
-func registryDown(err error) bool {
+//
+// The error of a pull with the login names the image and its registry, and the tag and the port are
+// the user's own: they are taken out first, so an image tagged 503 is not the network.
+func registryDown(err error, ref string) bool {
 	if refusedToken(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	if ref = strings.ToLower(ref); ref != "" {
+		host, _, _ := strings.Cut(ref, "/")
+		msg = strings.ReplaceAll(strings.ReplaceAll(msg, ref, " "), host, " ")
+	}
 	for _, s := range []string{"manifest unknown", "not found", "no such host"} {
 		if strings.Contains(msg, s) {
 			return false

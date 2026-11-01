@@ -127,8 +127,27 @@ func TestRegistryDownWords(t *testing.T) {
 		`invalid reference format: registry.depot.dev:5030/p`:                  false,
 		`exec format error: GEOF`:                                              false,
 	} {
-		if got := registryDown(errors.New(msg)); got != want {
+		if got := registryDown(errors.New(msg), "registry.depot.dev/p/app:v2"); got != want {
 			t.Errorf("%q: %v, want %v", msg, got, want)
 		}
+	}
+}
+
+// The image is named in the error of a pull with the login, and its tag and the registry's port are
+// the user's: a 502, 503 or EOF there is not the network (boks#156).
+func TestRegistryDownNotTheRef(t *testing.T) {
+	for ref, msg := range map[string]string{
+		"registry.depot.dev/p/app:503":     "pull registry.depot.dev/p/app:503 from registry.depot.dev: sh: exit status 1: failed to register layer: no space left on device",
+		"registry.depot.dev/p/app:1.0.502": "pull registry.depot.dev/p/app:1.0.502 from registry.depot.dev: sh: exit status 1: toomanyrequests: retry later",
+		"reg.example:504/app:eof":          "pull reg.example:504/app:eof from reg.example:504: sh: exit status 1: no matching manifest for linux/arm64",
+	} {
+		if registryDown(errors.New(msg), ref) {
+			t.Errorf("%q: tried again for words of the image %s", msg, ref)
+		}
+	}
+	// The words of the network still count when the image is named beside them.
+	msg := "pull registry.depot.dev/p/app:503 from registry.depot.dev: sh: exit status 1: received unexpected HTTP status: 502 Bad Gateway"
+	if !registryDown(errors.New(msg), "registry.depot.dev/p/app:503") {
+		t.Errorf("%q: not tried again", msg)
 	}
 }
