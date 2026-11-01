@@ -1,0 +1,10 @@
+{
+  "delete": [
+    "Forwarded"
+  ],
+  "set": {
+    "X-Forwarded-For": [
+      "{http.vars.client_ip}"
+    ]
+  }
+}

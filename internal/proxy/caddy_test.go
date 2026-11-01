@@ -247,15 +247,16 @@ func TestConfigOwnsPort80BesideTLS(t *testing.T) {
 	}
 }
 
-// A policy without trusted proxies trusts no one (#48): Caddy is told of no trusted proxy, so it sets
-// X-Forwarded-For from the connection and drops the visitor's own — measured on boks-lab. The one
-// header every route touches is Forwarded, which it deletes: kamal-proxy did, and Caddy passes it on.
+// A policy without trusted proxies trusts no one (#48): Caddy is told of no trusted proxy, so the
+// client is the connection and the visitor's own X-Forwarded-For is dropped — measured on boks-lab.
+// Every route deletes Forwarded — kamal-proxy did, and Caddy passes it on — and sets X-Forwarded-For
+// to the client Caddy decided, nothing else (#136).
 func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"trusted_proxies", "client_ip_headers", "set", "add", "replace"} {
+	for _, key := range []string{"trusted_proxies", "client_ip_headers", "add", "replace"} {
 		if strings.Contains(string(b), `"`+key+`"`) {
 			t.Errorf("the config sets %s, which would let a visitor's forwarded headers through:\n%s", key, b)
 		}
@@ -265,6 +266,9 @@ func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 		h := dig(routes[0], "handle").([]any)[0]
 		if del, _ := dig(h, "headers", "request", "delete").([]any); len(del) != 1 || del[0] != "Forwarded" {
 			t.Errorf("%s: want Forwarded deleted from the request, got %v", srv, dig(h, "headers"))
+		}
+		if set, _ := json.Marshal(dig(h, "headers", "request", "set")); string(set) != `{"X-Forwarded-For":["{http.vars.client_ip}"]}` {
+			t.Errorf("%s: want X-Forwarded-For set to the client alone, got %s", srv, set)
 		}
 		if dig(decoded(t, b), "apps", "http", "servers", srv, "logs") == nil {
 			t.Errorf("%s: want access logs on, as kamal-proxy wrote them", srv)
@@ -877,11 +881,11 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 		// The response's changes in a headers handler applied as the response is written, so the 101 of
 		// a WebSocket handshake gets them too; reverse_proxy's own skip it.
 		`{"handler":"headers","response":{"deferred":true,"delete":["Set-Cookie"],"set":{"X-Content-Type-Options":["nosniff"]}}},`+
-		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Gateway":["images"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
+		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Forwarded-For":["{http.vars.client_ip}"],"X-Gateway":["images"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
 		`"upstreams":[{"dial":"gw:8080"}]}]` {
 		t.Errorf("unexpected rewrite and headers: %s", h)
 	}
-	if h := handle(1); h != `[{"handler":"subroute","routes":[`+unclean+`{"group":"path","handle":[{"handler":"rewrite","strip_path_prefix":"/old"}],"terminal":false}]},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"]}},`+
+	if h := handle(1); h != `[{"handler":"subroute","routes":[`+unclean+`{"group":"path","handle":[{"handler":"rewrite","strip_path_prefix":"/old"}],"terminal":false}]},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"],"set":{"X-Forwarded-For":["{http.vars.client_ip}"]}}},`+
 		`"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},"upstreams":[{"dial":"gw:8081"}]}]` {
 		t.Errorf("unexpected strip: %s", h)
 	}

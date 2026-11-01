@@ -54,7 +54,7 @@ func TestConfigDeniesBeforeTheAllowsAndTheGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(plain), "client_ip") || strings.Contains(string(plain), "deny_ranges") {
+	if strings.Contains(string(plain), `"client_ip"`) || strings.Contains(string(plain), "deny_ranges") {
 		t.Errorf("want no deny in a policy without one")
 	}
 }

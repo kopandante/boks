@@ -767,6 +767,17 @@ func routeHandle(r Route) []handler {
 		}
 	}
 	req.Delete = append([]string{"Forwarded"}, req.Delete...)
+	// X-Forwarded-For is the one address Caddy decided the client is, past the trusted proxies (#136).
+	// Behind them Caddy passes the chain as the visitor sent it with the proxy's address after it, and
+	// an app that takes the first entry — most do — takes what the visitor wrote. From anywhere else
+	// client_ip is the connection's address, which Caddy writes there itself. The header ops of the
+	// handler run after Caddy's own forwarded headers (reverseproxy.go: prepareRequest, then the
+	// loop's userOps), and an app's port may not set an X-Forwarded- header (config), so this is the
+	// value the app gets.
+	if req.Set == nil {
+		req.Set = map[string][]string{}
+	}
+	req.Set["X-Forwarded-For"] = []string{"{http.vars.client_ip}"}
 	rp := handler{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: r.Dial}}, StreamCloseDelay: streamCloseDelay,
 		Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
 		Headers:   &proxyHeaders{Request: req}}
