@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
@@ -530,4 +531,30 @@ func countHolding(ps []netip.Prefix, a netip.Addr) int {
 		}
 	}
 	return n
+}
+
+// workerGolden is the trusted ranges a proxy at 127.0.0.1 and Cloudflare's 2a06:98c0::/29 become, which
+// the live test of the Worker's address loads into Caddy (proxy/gate, TestWorkerIsTheClientThroughCaddy).
+const workerGolden = "../../proxy/gate/testdata/worker/trusted.json"
+
+func TestWorkerGolden(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [127.0.0.1, \"2a06:98c0::/29\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rs []string
+	for _, p := range s.TrustedPrefixes() {
+		rs = append(rs, p.String())
+	}
+	got, _ := json.Marshal(rs)
+	got = append(got, '\n')
+	if os.Getenv("BOKS_UPDATE") == "1" {
+		if err := os.WriteFile(workerGolden, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(workerGolden)
+	if err != nil || string(got) != string(want) {
+		t.Errorf("trusted ranges\n%s\nwant (%s, BOKS_UPDATE=1 to rewrite)\n%s %v", got, workerGolden, want, err)
+	}
 }
