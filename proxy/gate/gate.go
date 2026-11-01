@@ -513,7 +513,7 @@ func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload
 	return allow("token"), &pl
 }
 
-// googleGrace is how long past its lifetime a token of a Googlebot address still passes from one:
+// googleGrace is how long after its issue an expired token of a Googlebot address still passes from one:
 // Google's renderer calls the API with a token kept from an earlier crawl and asks for no new one on 401
 // (cars.dbauto.kr 30.10, todo#419), so the page it renders goes without the API's data.
 const googleGrace = 24 * time.Hour
