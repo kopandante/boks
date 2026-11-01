@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -260,6 +261,14 @@ func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 		if strings.Contains(string(b), `"`+key+`"`) {
 			t.Errorf("the config sets %s, which would let a visitor's forwarded headers through:\n%s", key, b)
 		}
+	}
+	// The one header set anywhere is the route's X-Forwarded-For: one per route, nothing else.
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, b); err != nil {
+		t.Fatal(err)
+	}
+	if all, xff := strings.Count(compact.String(), `"set"`), strings.Count(compact.String(), `"set":{"X-Forwarded-For":["{http.vars.client_ip}"]}`); all != 2 || xff != 2 {
+		t.Errorf("want the two routes' X-Forwarded-For the only sets, got %d sets, %d of them that one:\n%s", all, xff, b)
 	}
 	for _, srv := range []string{"http", "https"} {
 		routes, _ := dig(decoded(t, b), "apps", "http", "servers", srv, "routes").([]any)

@@ -30,6 +30,6 @@ Base: a8c7bc2 | Branch: fix/xff-client-ip
 - [x] 0 worktree
 - [x] 1 план
 - [x] 2 реализация
-- [ ] 3 PR
-- [ ] 4 review-loop green
+- [x] 3 PR
+- [x] 4 review-loop green
 - [ ] 5 merge
