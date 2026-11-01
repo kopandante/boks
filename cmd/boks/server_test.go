@@ -787,3 +787,32 @@ func TestApplyBoksRefusedOnAServerLeavesEveryPolicy(t *testing.T) {
 		}
 	}
 }
+
+// The server's boks answers proxy-config from the home alone: the routes on stdin, the policy on its
+// disk, no boks.yml and no ssh socket directory (#154).
+func TestProxyConfigFromTheHome(t *testing.T) {
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	if err := os.MkdirAll(filepath.Join(h, ".boks/_server"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h, ".boks/_server/policy.json"), []byte(`{"revision": 2, "floor": 0, "block": [{"name": "crawlers", "user_agent": "(?i)gptbot"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wasIn, wasRoot := stdin, socketRoot
+	stdin = strings.NewReader(`[{"app":"web","routes":[{"host":"a.example.com","dial":"web-v1-1:80","tls":true}]}]`)
+	socketRoot = filepath.Join(t.TempDir(), "missing", "x")
+	t.Cleanup(func() { stdin, socketRoot = wasIn, wasRoot })
+	var out, errw strings.Builder
+	if code := run([]string{"-f", filepath.Join(h, "no-boks.yml"), "proxy-config"}, &out, &errw); code != 0 || errw.String() != "" {
+		t.Fatalf("proxy-config: %d %q", code, errw.String())
+	}
+	want, err := proxy.Config(proxy.Policy{Revision: 2, Block: []proxy.BotBlock{{Name: "crawlers", UserAgent: "(?i)gptbot"}}},
+		[]proxy.Fragment{{App: "web", Routes: []proxy.Route{{Host: "a.example.com", Dial: "web-v1-1:80", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != string(want) {
+		t.Errorf("proxy-config printed a config other than Config's")
+	}
+}

@@ -301,6 +301,9 @@ ports:
 
 var fixed = Options{Env: []byte("SECRET=1\n"), Now: func() time.Time { return time.Unix(1700000000, 0) }}
 
+// ownBoks asks whether the server has a boks of its own, which would assemble the proxy's config (#154).
+const ownBoks = "sh -c [ -x .boks/bin/boks ] && echo yes; true"
+
 func TestRunHappyPath(t *testing.T) {
 	f := newFake()
 	f.out["docker ps -a --filter name=^boks-proxy$"] = caddyUp
@@ -334,6 +337,8 @@ func TestRunHappyPath(t *testing.T) {
 		inspectOf("demo-v1-1"),
 		// And runs what the fragments and the server's policy make: a cut run may have left the applied
 		// config behind them.
+		// The server has no boks of its own, so the config is assembled here.
+		ownBoks,
 		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		"sh -c if [ -f '.boks/_proxy/caddy.json' ]; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		admitGive("demo"),
@@ -367,6 +372,7 @@ func TestRunHappyPath(t *testing.T) {
 		fragsRead,
 		// The gate's host rule asked again under the lock, then the policy the config is assembled with.
 		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
+		ownBoks,
 		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		proxyProbe,
@@ -480,6 +486,7 @@ func TestRoutelessStopsTheOldCopyFirst(t *testing.T) {
 		// be the kamal-proxy whose routes to it this boks cannot drop.
 		proxyState + " --format {{.State}}\t{{.Label \"boks.proxy\"}}",
 		// A removal a cut run wrote to the fragments but never got into the proxy's config.
+		ownBoks,
 		"sh -c if [ -f '.boks/_server/policy.json' ]; then echo present; cat '.boks/_server/policy.json'; else echo absent; fi",
 		applied + "; then echo present; cat '.boks/_proxy/caddy.json'; else echo absent; fi",
 		"docker ps --filter label=boks.app=bot --format {{.Names}}",

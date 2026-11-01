@@ -34,6 +34,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   ps               containers and proxy routes of this app on every server
   releases         releases recorded on each server, newest last
   version          the commit this boks was built from
+  proxy-config     (the server's own boks) the proxy's config of the routes on stdin and the
+                   policy of this server; deploy, apply and proxy upgrade ask it for that config
   proxy boot       make sure the proxy (Caddy) is running (idempotent)
   proxy list       routes the proxy serves, for every app on each server
   proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
@@ -96,6 +98,15 @@ func run(args []string, out, errw io.Writer) int {
 	// Before the mux: a server's install checks what `version` prints, and the mux's warning would be part of it.
 	if fs.Arg(0) == "version" && fs.NArg() == 1 {
 		fmt.Fprintln(out, version())
+		return 0
+	}
+	// The server's boks assembling the proxy's config for whichever boks runs a deploy or an apply
+	// there (#154): no boks.yml, no ssh — the server is the machine it runs on.
+	if fs.Arg(0) == proxy.AssembleCommand && fs.NArg() == 1 {
+		if err := assembleHere(context.Background(), out); err != nil {
+			fmt.Fprintln(errw, "error:", err)
+			return 1
+		}
 		return 0
 	}
 	if m, err := remote.NewMux(socketRoot); err != nil {
@@ -214,8 +225,28 @@ var (
 	now        = time.Now
 	lookupEnv  = os.LookupEnv
 	sshMux     *remote.Mux
-	socketRoot = "/tmp"
+	socketRoot           = "/tmp"
+	stdin      io.Reader = os.Stdin
 )
+
+// assembleHere prints the config of the routes on stdin and the policy of this machine, the server
+// whose boks this is, read from the home as ssh would reach it.
+func assembleHere(ctx context.Context, out io.Writer) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	in, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
+	}
+	body, err := proxy.ServerConfig(ctx, remote.Local{Dir: home}, in)
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(body)
+	return err
+}
 
 // sameRollback asks every server, before any of them changes, where a rollback would take it, and
 // refuses unless that is one release everywhere. A rollback refused halfway through the list would
