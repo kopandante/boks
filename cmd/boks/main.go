@@ -497,7 +497,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 	// The server's boks is checked on every server with the rest, before any is changed: a sum missing for
 	// one server's architecture, or a build that does not fetch, would otherwise stop the run halfway down
 	// the list. The build is fetched once for all.
-	fetch := deploy.Remember(fetchBoks)
+	fetch := deploy.Remember(fetchBoks, out)
 	checkBoks := func(ctx context.Context, r remote.Runner) error {
 		if sc.Boks == nil {
 			return nil
@@ -559,16 +559,17 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		}); err != nil {
 			return err
 		}
-		if err := on(func(ctx context.Context, r remote.Runner) error {
-			// The server's boks first: the policy is the same either way, and a build that does not check on
-			// the server refuses before the policy changes.
-			if sc.Boks != nil {
-				if err := deploy.InstallBoks(ctx, r, out, sc.Boks, fetch); err != nil {
-					return err
-				}
+		// The servers' boks first, on every server before the policy on any: the policy is the same either
+		// way, and a build one server refuses (a write, its sum or its version there) leaves every server
+		// on the policy it had.
+		if sc.Boks != nil {
+			if err := on(func(ctx context.Context, r remote.Runner) error {
+				return deploy.InstallBoks(ctx, r, out, sc.Boks, fetch)
+			}); err != nil {
+				return err
 			}
-			return deploy.ApplyServer(ctx, r, out, next, o)
-		}); err != nil {
+		}
+		if err := on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) }); err != nil {
 			return err
 		}
 		// After the policy is on every server: a firewall one server refuses to change leaves no server

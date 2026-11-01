@@ -11,7 +11,8 @@ name: boks binary
 on:
   push:
     branches: [main]
-    paths: ["**.go", go.mod, go.sum, .github/workflows/boks-binary.yml]
+    # boks's own code: proxy/gate and proxy/ban are modules of their own, built into the proxy's image.
+    paths: ["cmd/**", "internal/**", go.mod, go.sum, .github/workflows/boks-binary.yml]
   workflow_dispatch:
 
 permissions:
@@ -22,6 +23,8 @@ concurrency:
 
 jobs:
   build:
+    # main alone: a release is a build of reviewed code, and workflow_dispatch can name any branch.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

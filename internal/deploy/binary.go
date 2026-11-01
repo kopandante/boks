@@ -54,14 +54,15 @@ func RunningBoks(ctx context.Context, r remote.Runner) (string, error) {
 // Fetch gets the bytes at a URL.
 type Fetch func(ctx context.Context, url string) ([]byte, error)
 
-// Remember is fetch that gets each URL once in a run: the build is checked on every server before any
-// changes, and then installed on each, without being fetched again.
-func Remember(fetch Fetch) Fetch {
+// Remember is fetch that gets each URL once in a run, and says so in log: the build is checked on every
+// server before any changes, and then installed on each, without being fetched again.
+func Remember(fetch Fetch, log io.Writer) Fetch {
 	got := map[string][]byte{}
 	return func(ctx context.Context, url string) ([]byte, error) {
 		if b, ok := got[url]; ok {
 			return b, nil
 		}
+		fmt.Fprintf(log, "boks: fetching %s\n", url)
 		b, err := fetch(ctx, url)
 		if err == nil {
 			got[url] = b
@@ -96,9 +97,8 @@ func planBoks(ctx context.Context, r remote.Runner, b *config.ServerBoks) (boksP
 }
 
 // fetchChecked is the build of p fetched and checked against the sum server.yml writes.
-func fetchChecked(ctx context.Context, b *config.ServerBoks, p boksPlan, log io.Writer, fetch Fetch) ([]byte, error) {
+func fetchChecked(ctx context.Context, b *config.ServerBoks, p boksPlan, fetch Fetch) ([]byte, error) {
 	url := BoksURL(b.Commit, p.arch)
-	fmt.Fprintf(log, "boks: fetching %s\n", url)
 	body, err := fetch(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("boks: fetch %s: %w; nothing was changed", url, err)
@@ -117,7 +117,7 @@ func CheckBoks(ctx context.Context, r remote.Runner, log io.Writer, b *config.Se
 	if err != nil || p.already {
 		return err
 	}
-	_, err = fetchChecked(ctx, b, p, log, fetch)
+	_, err = fetchChecked(ctx, b, p, fetch)
 	return err
 }
 
@@ -135,21 +135,30 @@ func InstallBoks(ctx context.Context, r remote.Runner, log io.Writer, b *config.
 		fmt.Fprintf(log, "boks: runs %s already\n", short(b.Commit))
 		return nil
 	}
-	body, err := fetchChecked(ctx, b, p, log, fetch)
+	body, err := fetchChecked(ctx, b, p, fetch)
 	if err != nil {
 		return err
 	}
-	if err := remote.UploadAtomic(ctx, r, body, p.name); err != nil {
+	// Written beside the build it may replace — the link may name a build of the same commit whose file
+	// is not of the sum — and put in its place only once checked, so a refusal removes the new file alone.
+	next := p.name + ".new"
+	if err := remote.UploadAtomic(ctx, r, body, next); err != nil {
 		return fmt.Errorf("boks: %w; the boks that ran is left", err)
 	}
-	q, prev := remote.Quote(p.name), "$(readlink "+binLink+" 2>/dev/null)"
-	script := "chmod 700 " + q + " && " +
-		"[ \"$(sha256sum " + q + " | cut -d' ' -f1)\" = " + remote.Quote(p.want) + " ] || { rm -f " + q + "; echo 'boks: the build written differs from the one fetched' >&2; exit 1; }\n" +
-		"v=$(" + q + " version 2>&1) && [ \"$v\" = " + remote.Quote(b.Commit) + " ] || { rm -f " + q + "; echo \"boks: the build says it is $v, not " + b.Commit + "\" >&2; exit 1; }\n" +
-		"prev=" + prev + "\n" +
-		"mkdir -p .boks/bin && ln -sfn " + remote.Quote(p.rel) + " " + binLink + ".new && mv -f " + binLink + ".new " + binLink + " || { echo 'boks: the link was not switched' >&2; exit 1; }\n" +
-		// Kept: the new build and the one it replaced, to go back to by hand.
-		"for f in " + binDir + "/boks-*; do case \"../_server/bin/${f##*/}\" in " + remote.Quote(p.rel) + "|\"$prev\") ;; *) rm -f \"$f\";; esac; done; true"
+	q, n, prev := remote.Quote(p.name), remote.Quote(next), "$(readlink "+binLink+" 2>/dev/null)"
+	script :=
+		// One install at a time: another one's cleanup would otherwise remove this build between its
+		// check and the link. A file it removed fails the check below. flock is there on every server
+		// install prepared; a home without it (a test's) goes unlocked.
+		"if command -v flock >/dev/null; then exec 9>" + binDir + "/.lock && flock -w 300 9 || { echo 'boks: another install holds the lock' >&2; exit 1; }; fi\n" +
+			"chmod 700 " + n + " && " +
+			"[ \"$(sha256sum " + n + " | cut -d' ' -f1)\" = " + remote.Quote(p.want) + " ] || { rm -f " + n + "; echo 'boks: the build written differs from the one fetched' >&2; exit 1; }\n" +
+			"v=$(" + n + " version 2>&1) && [ \"$v\" = " + remote.Quote(b.Commit) + " ] || { rm -f " + n + "; echo \"boks: the build says it is $v, not " + b.Commit + "\" >&2; exit 1; }\n" +
+			"mv -f " + n + " " + q + " || { rm -f " + n + "; exit 1; }\n" +
+			"prev=" + prev + "\n" +
+			"mkdir -p .boks/bin && ln -sfn " + remote.Quote(p.rel) + " " + binLink + ".new && mv -f " + binLink + ".new " + binLink + " || { echo 'boks: the link was not switched' >&2; exit 1; }\n" +
+			// Kept: the new build and the one it replaced, to go back to by hand.
+			"for f in " + binDir + "/boks-*; do case \"../_server/bin/${f##*/}\" in " + remote.Quote(p.rel) + "|\"$prev\") ;; *) rm -f \"$f\";; esac; done; true"
 	if _, err := r.Run(ctx, "sh", "-c", script); err != nil {
 		return fmt.Errorf("boks: %w; the boks that ran is left", err)
 	}

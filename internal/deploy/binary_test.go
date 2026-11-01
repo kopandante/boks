@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -242,7 +243,7 @@ func TestCheckBoks(t *testing.T) {
 		t.Error("a check wrote to the server")
 	}
 	fetched = nil
-	fetch := Remember(served(a, &fetched))
+	fetch := Remember(served(a, &fetched), io.Discard)
 	if err := CheckBoks(ctx, h, &strings.Builder{}, ok, fetch); err != nil {
 		t.Fatal(err)
 	}
@@ -254,5 +255,55 @@ func TestCheckBoks(t *testing.T) {
 	}
 	if len(fetched) != 1 {
 		t.Errorf("fetched %v", fetched)
+	}
+}
+
+// The link names a build of the commit whose file is not of the sum: the install writes the new bytes
+// beside it, and a refusal removes those alone — the boks that ran is still there, named (#159).
+func TestInstallBoksOverItsOwnCommitRefused(t *testing.T) {
+	h := newHome(t)
+	ctx := context.Background()
+	var fetched []string
+	a := build(commitA)
+	ok := &config.ServerBoks{Commit: commitA, SHA256: map[string]string{"amd64": sum(a)}}
+	if err := InstallBoks(ctx, h, &strings.Builder{}, ok, served(a, &fetched)); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(h.dir, binDir, "boks-"+commitA)
+	if err := os.WriteFile(file, append(build(commitA), '#'), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallBoks(ctx, corrupting{h}, &strings.Builder{}, ok, served(a, &fetched)); err == nil || !strings.Contains(err.Error(), "differs") {
+		t.Errorf("err %v", err)
+	}
+	if got := h.link(t); got != "../_server/bin/boks-"+commitA {
+		t.Errorf("the link names %q", got)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Errorf("the build the link names is gone: %v", err)
+	}
+	if err := InstallBoks(ctx, h, &strings.Builder{}, ok, served(a, &fetched)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(file); string(got) != string(a) {
+		t.Errorf("the build is %q", got)
+	}
+}
+
+// Another install holding the lock refuses this one before anything is checked or switched.
+func TestInstallBoksWaitsForTheLock(t *testing.T) {
+	h := newHome(t)
+	shim := strings.SplitN(h.path, string(os.PathListSeparator), 2)[0]
+	if err := os.WriteFile(filepath.Join(shim, "flock"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var fetched []string
+	a := build(commitA)
+	err := InstallBoks(context.Background(), h, &strings.Builder{}, &config.ServerBoks{Commit: commitA, SHA256: map[string]string{"amd64": sum(a)}}, served(a, &fetched))
+	if err == nil || !strings.Contains(err.Error(), "another install holds the lock") {
+		t.Errorf("err %v", err)
+	}
+	if got := h.link(t); got != "" {
+		t.Errorf("the link names %q", got)
 	}
 }

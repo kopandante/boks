@@ -757,3 +757,33 @@ func TestApplyWritesBoksBeforeThePolicy(t *testing.T) {
 		t.Errorf("boks written at %d, the policy at %d", boks, policy)
 	}
 }
+
+// A build one server refuses there — its sum or its version, which only the server can check — leaves
+// every server on the policy it had: apply brings boks to all of them before the policy to any (#159).
+func TestApplyBoksRefusedOnAServerLeavesEveryPolicy(t *testing.T) {
+	build := []byte("a build")
+	s := sha256.Sum256(build)
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { return build, nil }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol := "present\n{\"revision\":1,\"floor\":1}"
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64", "fail": "version 2>&1"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: boks:") {
+		t.Errorf("apply: %d %q", code, errw.String())
+	}
+	for name, r := range map[string]*recorder{"a": a, "b": b} {
+		for _, in := range r.stdin {
+			if strings.Contains(in, `"action":"server apply"`) {
+				t.Errorf("%s's policy was changed", name)
+			}
+		}
+	}
+}
