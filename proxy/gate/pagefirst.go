@@ -101,29 +101,25 @@ func (h *Handler) logFull() {
 	}
 }
 
-// pageless is page_first's verdict on an API request of ip, and whether it has one: refused in
-// enforce, past the warmup, when the address asked for no page within the window.
-func (h *Handler) pageless(r *http.Request, p, ip string) (decision, bool) {
+// pageless is page_first's verdict on an API request of ip: whether the address asked for no page
+// within the window, and whether it is refused for it — in enforce, past the warmup.
+func (h *Handler) pageless(r *http.Request, ip string) (flagged, refused bool) {
 	pf := h.PageFirst
 	if !pf.on() || h.keyed(r) {
-		return decision{}, false
+		return false, false
 	}
 	a, err := netip.ParseAddr(ip)
 	if err != nil || h.spared(r, a) {
-		return decision{}, false
+		return false, false
 	}
 	ans := h.pageStore().ask(h.Name, a, h.now(), time.Duration(pf.Window), pf.warmup())
 	if ans.firstFull {
 		h.logFull()
 	}
 	if ans.seen || ans.unkept {
-		return decision{}, false
+		return false, false
 	}
-	setField(r, zap.String("gate_behavior", "no_page"))
-	if pf.Mode != "enforce" || ans.warming {
-		return decision{}, false
-	}
-	return deny("no_page", forbidden), true
+	return true, pf.Mode == "enforce" && !ans.warming
 }
 
 func (h *Handler) pageStore() *pageStore {

@@ -33,11 +33,15 @@ import (
 
 // Signature is one shape of headers, off — the default — log or enforce.
 type Signature struct {
-	Name    string          `json:"name"`
-	Mode    string          `json:"mode,omitempty"`
+	Name string `json:"name"`
+	Mode string `json:"mode,omitempty"`
+	// Path, when set, is the RE2 pattern the request's path matches too: the path as sent, which the gate
+	// has refused unless clean by then.
+	Path    string          `json:"path,omitempty"`
 	Headers []HeaderPattern `json:"headers"`
 
 	compiled []*regexp.Regexp
+	path     *regexp.Regexp
 }
 
 // HeaderPattern is a header's name and the RE2 pattern its first value matches, "" when absent.
@@ -61,6 +65,14 @@ var signatureName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // compile compiles the patterns of s.
 func (s *Signature) compile() error {
+	s.path = nil
+	if s.Path != "" {
+		re, err := regexp.Compile(s.Path)
+		if err != nil {
+			return fmt.Errorf("signatures[%s]: path: %w", s.Name, err)
+		}
+		s.path = re
+	}
 	s.compiled = s.compiled[:0]
 	for _, hp := range s.Headers {
 		re, err := regexp.Compile(hp.Pattern)
@@ -98,8 +110,11 @@ func (s *Signature) validate(groupMode string) error {
 	return fmt.Errorf("signatures[%s]: every pattern matches an absent header, so it would match a request with none of them", s.Name)
 }
 
-// matches says whether every header of s matches its pattern.
+// matches says whether the path of r matches s's, when it has one, and every header its pattern.
 func (s *Signature) matches(r *http.Request) bool {
+	if s.path != nil && !s.path.MatchString(r.URL.Path) {
+		return false
+	}
 	for i, hp := range s.Headers {
 		if !s.compiled[i].MatchString(r.Header.Get(hp.Name)) {
 			return false
