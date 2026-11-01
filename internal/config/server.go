@@ -33,9 +33,10 @@ type Server struct {
 	// them through it to leave from this server's address, as it did through a tinyproxy beside boks.
 	Egress *Egress `yaml:"egress"`
 	// TrustedProxies are the addresses or CIDR ranges of a proxy standing in front of boks — a CDN, a
-	// load balancer, another server's proxy on the way in: a request from one of them keeps the
-	// X-Forwarded-For it brings, with the proxy's address added after it. Without any, boks trusts no
-	// one, and every app sees the address of the connection (#48).
+	// load balancer, another server's proxy on the way in: the client of a request from one of them is
+	// read from the X-Forwarded-For it brings, from the right, the first address outside them, and the
+	// app gets that one address as X-Forwarded-For (#136). Without any, boks trusts no one, and every
+	// app sees the address of the connection (#48).
 	TrustedProxies []string `yaml:"trusted_proxies"`
 	// TrustedProxiesCA, when given, is the PEM of the CA certificates a trusted proxy's client
 	// certificate must chain to — Cloudflare's Authenticated Origin Pulls. A TLS connection from a
