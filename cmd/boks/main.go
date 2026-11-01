@@ -34,6 +34,9 @@ const usage = `usage: boks [-f boks.yml] <command>
   ps               containers and proxy routes of this app on every server
   releases         releases recorded on each server, newest last
   version          the commit this boks was built from
+  proxy-config     (the server's own boks) the proxy's config of the routes on stdin and the
+                   policy of this server; deploy, apply and proxy upgrade ask it for that config;
+                   with check, whether it reads the policy on stdin, which apply asks first
   proxy boot       make sure the proxy (Caddy) is running (idempotent)
   proxy list       routes the proxy serves, for every app on each server
   proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
@@ -96,6 +99,15 @@ func run(args []string, out, errw io.Writer) int {
 	// Before the mux: a server's install checks what `version` prints, and the mux's warning would be part of it.
 	if fs.Arg(0) == "version" && fs.NArg() == 1 {
 		fmt.Fprintln(out, version())
+		return 0
+	}
+	// The server's boks assembling the proxy's config for whichever boks runs a deploy or an apply
+	// there (#154): no boks.yml, no ssh — the server is the machine it runs on.
+	if fs.Arg(0) == proxy.AssembleCommand && (fs.NArg() == 1 || fs.NArg() == 2 && fs.Arg(1) == proxy.CheckArg) {
+		if err := assembleHere(context.Background(), out, fs.NArg() == 2); err != nil {
+			fmt.Fprintln(errw, "error:", err)
+			return 1
+		}
 		return 0
 	}
 	if m, err := remote.NewMux(socketRoot); err != nil {
@@ -214,8 +226,32 @@ var (
 	now        = time.Now
 	lookupEnv  = os.LookupEnv
 	sshMux     *remote.Mux
-	socketRoot = "/tmp"
+	socketRoot           = "/tmp"
+	stdin      io.Reader = os.Stdin
 )
+
+// assembleHere prints the config of the routes on stdin and the policy of this machine, the server
+// whose boks this is, read from the home as ssh would reach it. With check, stdin is a policy, and the
+// answer is whether this boks reads it (proxy.CheckServerBoks).
+func assembleHere(ctx context.Context, out io.Writer, check bool) error {
+	in, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
+	}
+	if check {
+		return proxy.CheckPolicy(in)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	body, err := proxy.ServerConfig(ctx, remote.Local{Dir: home}, in)
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(body)
+	return err
+}
 
 // sameRollback asks every server, before any of them changes, where a rollback would take it, and
 // refuses unless that is one release everywhere. A rollback refused halfway through the list would
@@ -568,6 +604,12 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			}); err != nil {
 				return err
 			}
+		}
+		// Every server's own boks — the one just installed, or whichever a server kept — is asked whether
+		// it reads next before any policy changes: one refusing halfway down the list would leave the
+		// fleet on two policies. ApplyServer asks again, under the lock, of the policy as it writes it.
+		if err := askAll(func(ctx context.Context, r remote.Runner) error { return proxy.CheckServerBoks(ctx, r, next) }); err != nil {
+			return err
 		}
 		if err := on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) }); err != nil {
 			return err

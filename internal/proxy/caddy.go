@@ -988,11 +988,7 @@ func Validate(ctx context.Context, r remote.Runner, app string, routes []Route) 
 	if err != nil {
 		return err
 	}
-	pol, err := appliedPolicy(ctx, r)
-	if err != nil {
-		return err
-	}
-	body, err := Config(pol, withRoutes(fs, app, routes))
+	body, err := assemble(ctx, r, withRoutes(fs, app, routes))
 	if err != nil {
 		return err
 	}
@@ -1013,11 +1009,7 @@ func checkPath() string { return path.Join(Dir, "caddy.check.json") }
 // Lags says whether an applied config is there and differs from the one the fragments fs assemble:
 // a run was cut after writing its fragment, and the proxy has not caught up.
 func Lags(ctx context.Context, r remote.Runner, fs []Fragment) (bool, error) {
-	pol, err := appliedPolicy(ctx, r)
-	if err != nil {
-		return false, err
-	}
-	body, err := Config(pol, fs)
+	body, err := assemble(ctx, r, fs)
 	if err != nil {
 		return false, err
 	}
@@ -1040,11 +1032,7 @@ func converge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment
 // asking Caddy which config it runs — right when the question is which routes run, wrong when it is
 // whether Caddy read certificate files again under unchanged paths (Reload), which no config shows.
 func reconverge(ctx context.Context, r remote.Runner, log io.Writer, fs []Fragment, force, confirm bool, what string) (bool, error) {
-	pol, err := appliedPolicy(ctx, r)
-	if err != nil {
-		return false, err
-	}
-	body, err := Config(pol, fs)
+	body, err := assemble(ctx, r, fs)
 	if err != nil {
 		return false, err
 	}

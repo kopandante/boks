@@ -162,7 +162,11 @@ func CheckServerRollback(ctx context.Context, r remote.Runner, rev int, force bo
 	if err := proxy.CheckGate(ctx, r, p); err != nil {
 		return err
 	}
-	return proxy.CheckEgress(ctx, r, p)
+	if err := proxy.CheckEgress(ctx, r, p); err != nil {
+		return err
+	}
+	// The server's own boks reads the revision, so that no server refuses it halfway down the list.
+	return proxy.CheckServerBoks(ctx, r, p)
 }
 
 func policyOfRevision(ctx context.Context, r remote.Runner, rev int) (proxy.Policy, error) {
@@ -214,6 +218,11 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	}
 	next, err := decide(cur)
 	if err != nil {
+		return err
+	}
+	// The server's own boks reads next before anything changes: refused only by the load in SetPolicy,
+	// it would leave the proxy Reshape made for next serving the policy put back.
+	if err := proxy.CheckServerBoks(ctx, r, next); err != nil {
 		return err
 	}
 	op, err := beginServer(ctx, r, log, o, action, strconv.Itoa(cur.Revision), strconv.Itoa(next.Revision))

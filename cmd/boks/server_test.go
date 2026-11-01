@@ -787,3 +787,96 @@ func TestApplyBoksRefusedOnAServerLeavesEveryPolicy(t *testing.T) {
 		}
 	}
 }
+
+// The server's boks answers proxy-config from the home alone: the routes on stdin, the policy on its
+// disk, no boks.yml and no ssh socket directory (#154).
+func TestProxyConfigFromTheHome(t *testing.T) {
+	h := t.TempDir()
+	t.Setenv("HOME", h)
+	if err := os.MkdirAll(filepath.Join(h, ".boks/_server"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h, ".boks/_server/policy.json"), []byte(`{"revision": 2, "floor": 0, "block": [{"name": "crawlers", "user_agent": "(?i)gptbot"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wasIn, wasRoot := stdin, socketRoot
+	stdin = strings.NewReader(`[{"app":"web","routes":[{"host":"a.example.com","dial":"web-v1-1:80","tls":true}]}]`)
+	socketRoot = filepath.Join(t.TempDir(), "missing", "x")
+	t.Cleanup(func() { stdin, socketRoot = wasIn, wasRoot })
+	var out, errw strings.Builder
+	if code := run([]string{"-f", filepath.Join(h, "no-boks.yml"), "proxy-config"}, &out, &errw); code != 0 || errw.String() != "" {
+		t.Fatalf("proxy-config: %d %q", code, errw.String())
+	}
+	want, err := proxy.Config(proxy.Policy{Revision: 2, Block: []proxy.BotBlock{{Name: "crawlers", UserAgent: "(?i)gptbot"}}},
+		[]proxy.Fragment{{App: "web", Routes: []proxy.Route{{Host: "a.example.com", Dial: "web-v1-1:80", TLS: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != string(want) {
+		t.Errorf("proxy-config printed a config other than Config's")
+	}
+}
+
+// With check, the server's boks reads the policy on stdin and says only whether it knows every field.
+func TestProxyConfigCheck(t *testing.T) {
+	wasIn := stdin
+	t.Cleanup(func() { stdin = wasIn })
+	for _, c := range []struct {
+		in   string
+		code int
+	}{
+		{`{"revision": 2, "floor": 2, "block": [{"name": "crawlers", "user_agent": "(?i)gptbot"}]}`, 0},
+		{`{"revision": 2, "floor": 2, "newer_filter": true}`, 1},
+	} {
+		stdin = strings.NewReader(c.in)
+		var out, errw strings.Builder
+		code := run([]string{"-f", filepath.Join(t.TempDir(), "no-boks.yml"), "proxy-config", "check"}, &out, &errw)
+		if code != c.code || out.String() != "" || (c.code == 1) != strings.Contains(errw.String(), "newer_filter") {
+			t.Errorf("%s: %d %q %q", c.in, code, out.String(), errw.String())
+		}
+	}
+}
+
+// A server whose own boks does not read the policy refuses the apply before any server changes: asked
+// only by each server's apply in turn, a would take the policy and b refuse it, the fleet on two (#154).
+func TestServerApplyAsksEveryServersBoksFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 4\nbots:\n  block:\n    - {name: crawlers, user_agent: gptbot}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol := "present\n{\"revision\":3,\"floor\":3}"
+	a := &recorder{server: server{policyRead: pol}}
+	b := &recorder{server: server{policyRead: pol, "sh -c [ -x .boks/bin/boks ]": "yes", "fail": "proxy-config check"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: the server's boks does not read this policy") {
+		t.Fatalf("apply: %d %q", code, errw.String())
+	}
+	for _, in := range a.stdin {
+		if strings.Contains(in, `"action":"server apply"`) || strings.Contains(in, "crawlers") {
+			t.Errorf("a was changed before b's boks was asked: %v", a.calls)
+		}
+	}
+}
+
+// A rollback asks every server's boks too, before any server changes.
+func TestServerRollbackAsksEveryServersBoksFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hist := "sh -c if [ -f '.boks/_server/history/4.json' ]"
+	pol := "present\n{\"revision\":5,\"floor\":5}"
+	a := &recorder{server: server{policyRead: pol, hist: "present\n{\"revision\":4}"}}
+	b := &recorder{server: server{policyRead: pol, hist: "present\n{\"revision\":4}", "sh -c [ -x .boks/bin/boks ]": "yes", "fail": "proxy-config check"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "rollback", path, "4"}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: the server's boks does not read this policy") {
+		t.Fatalf("rollback: %d %q", code, errw.String())
+	}
+	for _, in := range a.stdin {
+		if strings.Contains(in, `"action":"server rollback"`) {
+			t.Errorf("a was changed before b's boks was asked: %v", a.calls)
+		}
+	}
+}
