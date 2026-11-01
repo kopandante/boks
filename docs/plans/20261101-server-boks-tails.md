@@ -6,7 +6,9 @@
 ## Шаги
 - [x] 1. `boks proxy-config check` отвечает конфигом кандидата: политика байтами `SetPolicy`, секреты
   (пароль egress, секреты гейта), маршруты (`CandidateConfig`). `assembleOf` — конфиг для проверок
-  `SetPolicy`, `CheckGate`, `Reshape`/`validate` и `CheckServerBoks`. Пустой ответ (сборка 1b) — отказ. (#164 п.1)
+  `SetPolicy`, `Reshape`/`validate` и `CheckServerBoks`. `CheckGate` собирает у вызывающего: `apply` зовёт его
+  до установки сборки из `server.yml`, и спросить пришлось бы заменяемую. Пустой ответ — отказ; сборка 1b
+  отказывает сама, на незнакомом поле `policy`. (#164 п.1)
 - [x] 2. Ссылка `~/.boks/bin/boks`, которая есть и не запускается, — ошибка, а не «своего boks нет». (#164 п.3)
 - [x] 3. `remote.Local` с `WaitDelay`, как SSH. (#164 п.5)
 - [x] 4. Тесты и мутации (`internal/proxy/assemble_test.go`, `TestProxyConfigCheck`, ожидания выката и apply).

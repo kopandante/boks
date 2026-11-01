@@ -196,7 +196,7 @@ func TestCheckServerBoks(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "the policy and the proxy were not changed") {
 		t.Fatalf("err = %v, want the server's refusal", err)
 	}
-	// A build that answers with nothing — the stage-1b one, which only read the policy — does not pass.
+	// A build that answers with nothing does not pass: the check would otherwise have validated no config.
 	o = &owned{fake: &fake{}}
 	if err := CheckServerBoks(context.Background(), o, p); err == nil || !strings.Contains(err.Error(), "no config") {
 		t.Errorf("err = %v, want an empty answer refused", err)

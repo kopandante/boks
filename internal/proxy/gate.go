@@ -444,7 +444,11 @@ func CheckGate(ctx context.Context, r remote.Runner, p Policy) error {
 	if err := loadSecrets(ctx, r, &p); err != nil {
 		return err
 	}
-	if _, err := assembleOf(ctx, r, p, fs); err != nil {
+	// Assembled here, not by the server's boks: apply checks the gate before it installs the build
+	// server.yml pins, and the build it would ask then is the one being replaced — one older than the
+	// policy would refuse the very apply that brings a newer one. The server's boks is asked for this
+	// policy's config by CheckServerBoks, after the install, and by SetPolicy under the lock.
+	if _, err := Config(p, fs); err != nil {
 		return err
 	}
 	hs, err := gateHandlers(p)
