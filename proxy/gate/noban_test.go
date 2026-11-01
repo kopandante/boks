@@ -50,8 +50,11 @@ func TestNoBanRefusesWithoutBan(t *testing.T) {
 	if h.banStore().banned(h.Name, netip.MustParseAddr(office), now) {
 		t.Error("the office is banned")
 	}
-	// The rhythm neither marks it nor refuses it.
+	// The rhythm neither times it nor refuses it.
 	files(t, h, &now, officeChrome, 6, time.Second)
+	if h.rhythmStore().marked(h.Name, netip.MustParseAddr(office), now) {
+		t.Error("the office's serial files are marked")
+	}
 	if code, _ := apiOf(t, h, officeChrome, "/api/x"); code != 200 {
 		t.Errorf("the office's API after serial files: %d", code)
 	}

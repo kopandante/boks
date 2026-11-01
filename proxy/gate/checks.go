@@ -17,7 +17,8 @@ package gate
 //
 // Googlebot and Google's user-triggered fetchers (Read Aloud) send neither Fetch Metadata nor h2: their
 // published ranges (google.go) pass fetch_meta and alpn. So do Yandex's robots: a User-Agent that names
-// Yandex from Yandex's AS (yandex.go). The group's exempt_ranges pass every check.
+// Yandex from Yandex's AS (yandex.go). The group's exempt_ranges pass every check; so do its
+// no_ban_ranges, which the signatures still refuse (signature.go).
 
 import (
 	"errors"
@@ -142,7 +143,7 @@ func (h *Handler) shadow(r *http.Request, p, ip string, pl *payload) []check {
 	if err != nil {
 		return failed
 	}
-	if inRanges(h.checksExempt, a) || inRanges(h.checksNoBan, a) {
+	if inRanges(h.checksExempt, a) || h.noBan(a) {
 		return nil
 	}
 	if isGoogle(a) || isYandex(a, r.UserAgent()) {

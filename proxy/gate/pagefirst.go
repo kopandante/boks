@@ -12,7 +12,7 @@ package gate
 // restart forgets them, and every visitor in the middle of a visit would then be an address without a
 // page; so would every visitor of a group whose page_first a reload turns on. So for warmup after
 // page_first goes on for a group in the process nothing is refused, and an address without a page is
-// written and kept as if it had one: the visit goes on. Google's and Yandex's crawlers, the checks' exempt_ranges, the partner's Bearer,
+// written and kept as if it had one: the visit goes on. Google's and Yandex's crawlers, the checks' exempt_ranges and no_ban_ranges, the partner's Bearer,
 // the health probe and the exemptions — servers' calls that ask for no page — are never asked; the
 // token's issue, exempt as it is, is: a scraper asks for it, a browser after its page.
 //
