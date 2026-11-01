@@ -137,6 +137,12 @@ type Fragment struct {
 // the proxies' addresses again — a Worker of anyone's Cloudflare account picking the address a ban
 // judges — without a word. Like 8 to 10, it is written only in the marker, by `boks server apply` of a
 // policy that has one: a server without stays open to the boks of format 10, and of 9 below it.
+//
+// Format 12 is the origin pull again, now with the app's X-Forwarded-For the one client Caddy decided
+// ({http.vars.client_ip}, #136). A boks of format 11 (a8c7bc2) would assemble the config of a policy
+// with the CA without it, handing the app the chain the visitor wrote before the proxy's entries, and
+// the next deploy from it would do so without a word. Format 11 is still read: a8c7bc2 wrote it, and no
+// server ever took it. A policy without the CA keeps its marker, so its window of older boks stays.
 const FragmentFormat = 7
 
 // GateFormat is the format of a server whose policy has a gate.
@@ -150,8 +156,8 @@ const DenyFormat = 9
 const KeyFormat = 10
 
 // OriginPullFormat is the format of a server whose policy has the trusted proxies' CA, and the newest
-// this boks reads.
-const OriginPullFormat = 11
+// this boks reads; 11, the CA's first, is read too.
+const OriginPullFormat = 12
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -663,12 +669,13 @@ func egressServer(e Egress) (*server, error) {
 	}, nil
 }
 
-// trustProxies has s keep the X-Forwarded-For of a request whose connection comes from ranges: Caddy's
-// reverse_proxy then passes what the proxy sent with the proxy's address after it, and keeps its
-// X-Forwarded-Proto and -Host (2.11.7, reverseproxy.go, addForwardedHeaders). A connection from
-// anywhere else still has the header replaced by its own address. Strict, Caddy's own idea of the
-// client — its logs — is read from the right, the first address outside ranges: from the left it
-// would be whatever the visitor wrote before the proxy added to it.
+// trustProxies has s read the client of a request whose connection comes from ranges from its
+// X-Forwarded-For, and keep the proxy's X-Forwarded-Proto and -Host (2.11.7, reverseproxy.go,
+// addForwardedHeaders). Strict, Caddy's idea of the client — client_ip, its logs, the ban and the gate —
+// is read from the right, the first address outside ranges: from the left it would be whatever the
+// visitor wrote before the proxy added to it. The chain itself goes no further: every route hands the
+// app that one address as X-Forwarded-For (routeHandle, #136). A connection from anywhere else is its
+// own client.
 func trustProxies(s *server, ranges []string) {
 	s.TrustedProxies = &ipSource{Source: "static", Ranges: ranges}
 	s.ClientIPHeaders = []string{"X-Forwarded-For"}
@@ -767,6 +774,17 @@ func routeHandle(r Route) []handler {
 		}
 	}
 	req.Delete = append([]string{"Forwarded"}, req.Delete...)
+	// X-Forwarded-For is the one address Caddy decided the client is, past the trusted proxies (#136).
+	// Behind them Caddy passes the chain as the visitor sent it with the proxy's address after it, and
+	// an app that takes the first entry — most do — takes what the visitor wrote. From anywhere else
+	// client_ip is the connection's address, which Caddy writes there itself. The header ops of the
+	// handler run after Caddy's own forwarded headers (reverseproxy.go: prepareRequest, then the
+	// loop's userOps), and an app's port may not set an X-Forwarded- header (config), so this is the
+	// value the app gets.
+	if req.Set == nil {
+		req.Set = map[string][]string{}
+	}
+	req.Set["X-Forwarded-For"] = []string{"{http.vars.client_ip}"}
 	rp := handler{Handler: "reverse_proxy", Upstreams: []upstream{{Dial: r.Dial}}, StreamCloseDelay: streamCloseDelay,
 		Transport: &transport{Protocol: "http", ResponseHeaderTimeout: responseHeaderTimeout},
 		Headers:   &proxyHeaders{Request: req}}

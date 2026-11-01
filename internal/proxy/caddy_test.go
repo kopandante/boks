@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -247,18 +248,27 @@ func TestConfigOwnsPort80BesideTLS(t *testing.T) {
 	}
 }
 
-// A policy without trusted proxies trusts no one (#48): Caddy is told of no trusted proxy, so it sets
-// X-Forwarded-For from the connection and drops the visitor's own — measured on boks-lab. The one
-// header every route touches is Forwarded, which it deletes: kamal-proxy did, and Caddy passes it on.
+// A policy without trusted proxies trusts no one (#48): Caddy is told of no trusted proxy, so the
+// client is the connection and the visitor's own X-Forwarded-For is dropped — measured on boks-lab.
+// Every route deletes Forwarded — kamal-proxy did, and Caddy passes it on — and sets X-Forwarded-For
+// to the client Caddy decided, nothing else (#136).
 func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 	b, err := Config(Policy{}, []Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"trusted_proxies", "client_ip_headers", "set", "add", "replace"} {
+	for _, key := range []string{"trusted_proxies", "client_ip_headers", "add", "replace"} {
 		if strings.Contains(string(b), `"`+key+`"`) {
 			t.Errorf("the config sets %s, which would let a visitor's forwarded headers through:\n%s", key, b)
 		}
+	}
+	// The one header set anywhere is the route's X-Forwarded-For: one per route, nothing else.
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, b); err != nil {
+		t.Fatal(err)
+	}
+	if all, xff := strings.Count(compact.String(), `"set"`), strings.Count(compact.String(), `"set":{"X-Forwarded-For":["{http.vars.client_ip}"]}`); all != 2 || xff != 2 {
+		t.Errorf("want the two routes' X-Forwarded-For the only sets, got %d sets, %d of them that one:\n%s", all, xff, b)
 	}
 	for _, srv := range []string{"http", "https"} {
 		routes, _ := dig(decoded(t, b), "apps", "http", "servers", srv, "routes").([]any)
@@ -266,15 +276,18 @@ func TestConfigTrustsNoForwardedHeaders(t *testing.T) {
 		if del, _ := dig(h, "headers", "request", "delete").([]any); len(del) != 1 || del[0] != "Forwarded" {
 			t.Errorf("%s: want Forwarded deleted from the request, got %v", srv, dig(h, "headers"))
 		}
+		if set, _ := json.Marshal(dig(h, "headers", "request", "set")); string(set) != `{"X-Forwarded-For":["{http.vars.client_ip}"]}` {
+			t.Errorf("%s: want X-Forwarded-For set to the client alone, got %s", srv, set)
+		}
 		if dig(decoded(t, b), "apps", "http", "servers", srv, "logs") == nil {
 			t.Errorf("%s: want access logs on, as kamal-proxy wrote them", srv)
 		}
 	}
 }
 
-// A proxy in front of boks is trusted on the apps' servers, 80 and 443 alike: Caddy keeps the
-// X-Forwarded-For it brings and reads the client from the right. The egress server trusts no one, and
-// Forwarded is still deleted.
+// A proxy in front of boks is trusted on the apps' servers, 80 and 443 alike: Caddy reads the client
+// from the right of the X-Forwarded-For it brings, and the route hands the app that one address (#136).
+// The egress server trusts no one, and Forwarded is still deleted.
 func TestConfigTrustsTheProxiesInFront(t *testing.T) {
 	p := Policy{Revision: 1, TrustedProxies: []string{"87.228.113.239/32", "10.1.0.0/16"}, Egress: encar}
 	b, err := Config(p, []Fragment{{App: "a", Routes: []Route{{Host: "a.example.com", Dial: "a:1", TLS: true}, {Host: "p.example.com", Dial: "a:2"}}}})
@@ -877,11 +890,11 @@ func TestConfigRewritesPathsAndHeaders(t *testing.T) {
 		// The response's changes in a headers handler applied as the response is written, so the 101 of
 		// a WebSocket handshake gets them too; reverse_proxy's own skip it.
 		`{"handler":"headers","response":{"deferred":true,"delete":["Set-Cookie"],"set":{"X-Content-Type-Options":["nosniff"]}}},`+
-		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Gateway":["images"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
+		`{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded","Cookie"],"set":{"X-Forwarded-For":["{http.vars.client_ip}"],"X-Gateway":["images"]}}},"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},`+
 		`"upstreams":[{"dial":"gw:8080"}]}]` {
 		t.Errorf("unexpected rewrite and headers: %s", h)
 	}
-	if h := handle(1); h != `[{"handler":"subroute","routes":[`+unclean+`{"group":"path","handle":[{"handler":"rewrite","strip_path_prefix":"/old"}],"terminal":false}]},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"]}},`+
+	if h := handle(1); h != `[{"handler":"subroute","routes":[`+unclean+`{"group":"path","handle":[{"handler":"rewrite","strip_path_prefix":"/old"}],"terminal":false}]},{"handler":"reverse_proxy","headers":{"request":{"delete":["Forwarded"],"set":{"X-Forwarded-For":["{http.vars.client_ip}"]}}},`+
 		`"stream_close_delay":"24h","transport":{"protocol":"http","response_header_timeout":"30s"},"upstreams":[{"dial":"gw:8081"}]}]` {
 		t.Errorf("unexpected strip: %s", h)
 	}
@@ -979,16 +992,20 @@ func TestFragmentsCarryTheirFormat(t *testing.T) {
 	if err != nil || len(fs) != 2 || fs[0].App != "demo" || !reflect.DeepEqual(fs[0].Routes, routed) || fs[1].App != "old" {
 		t.Fatalf("want both fragments, with and without a format: %+v %v", fs, err)
 	}
-	// The gate's, the deny's, the keys' and the origin pull's formats, which only the marker holds, are ones this boks reads; the next is not.
-	for _, f := range []int{GateFormat, DenyFormat, KeyFormat, OriginPullFormat} {
+	// The gate's, the deny's, the keys' and the origin pull's formats — 11, the CA's first, and 12 — which
+	// only the marker holds, are ones this boks reads; 13 is not.
+	if OriginPullFormat != 12 {
+		t.Fatalf("OriginPullFormat is %d; this test names 11 and 12 as read and 13 as newer", OriginPullFormat)
+	}
+	for _, f := range []int{GateFormat, DenyFormat, KeyFormat, 11, 12} {
 		d.files[Dir+"/routes/_server.json"] = fmt.Sprintf("%d\n", f)
 		if _, err := Fragments(context.Background(), d); err != nil {
 			t.Errorf("want format %d read: %v", f, err)
 		}
 	}
-	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", OriginPullFormat+1)
+	d.files[Dir+"/routes/new.json"] = "13\n{\"app\": \"new\", \"routes\": []}\n"
 	if _, err := Fragments(context.Background(), d); err == nil || !strings.Contains(err.Error(), "newer than this boks") {
-		t.Errorf("want a newer format refused, got %v", err)
+		t.Errorf("want format 13 refused, got %v", err)
 	}
 }
 

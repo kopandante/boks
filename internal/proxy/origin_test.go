@@ -135,10 +135,11 @@ func TestNoCAWritesNoConnectionPolicies(t *testing.T) {
 	}
 }
 
-// The CA needs format 11, above a key: a boks of format 10 would read the policy without it and trust
-// the headers of every connection from the proxies' addresses again. Without it the marker stays what
-// the rest of the policy asks, so a server stays open to older boks.
-func TestOriginPullMarksFormat11(t *testing.T) {
+// The CA needs format 12, above a key: a boks of format 10 would read the policy without it and trust
+// the headers of every connection from the proxies' addresses again, and one of format 11 would hand the
+// app the visitor's X-Forwarded-For chain (#136). Without it the marker stays what the rest of the
+// policy asks, so a server stays open to older boks.
+func TestOriginPullMarksFormat12(t *testing.T) {
 	keyed := spared()
 	keyed.TrustedProxies, keyed.TrustedProxiesCA = []string{"127.0.0.1/32"}, testCA(t)
 	for _, c := range []struct {
@@ -157,8 +158,8 @@ func TestOriginPullMarksFormat11(t *testing.T) {
 	if err := SetPolicy(context.Background(), d, io.Discard, pulled(t)); err != nil {
 		t.Fatal(err)
 	}
-	if marker := d.files[Dir+"/routes/_server.json"]; marker != "11\n" {
-		t.Errorf("want the marker at 11: %q", marker)
+	if marker := d.files[Dir+"/routes/_server.json"]; marker != "12\n" {
+		t.Errorf("want the marker at 12: %q", marker)
 	}
 	if !strings.Contains(d.files[policyPath()], `"trusted_proxies_ca"`) {
 		t.Errorf("want the CA in the policy: %s", d.files[policyPath()])

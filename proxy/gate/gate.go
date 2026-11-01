@@ -217,10 +217,9 @@ func deny(reason string, r *refusal) decision {
 
 // ServeHTTP decides, writes the verdict into the access log, and in enforce answers a refused request
 // and the token's issue itself and fixes the token's cookie of the app's response. In log and enforce
-// the app gets X-Forwarded-For with the address Caddy decided alone: its getClientIp takes the first
-// one, which a visitor behind a trusted proxy could otherwise write, and the token is bound to Caddy's.
-// reverse_proxy adds a trusted peer's address after it, or replaces it with the connection's — the
-// same address — when the peer is not trusted.
+// the request's X-Forwarded-For is the address Caddy decided alone, the one the token is bound to. The
+// app gets that address whatever the mode: boks's route sets X-Forwarded-For to client_ip in
+// reverse_proxy, after Caddy's own forwarded headers (#136).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	if h.Mode == "off" {
 		return next.ServeHTTP(w, r)
