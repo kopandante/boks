@@ -9,10 +9,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kopandante/boks/internal/cert"
@@ -34,6 +38,9 @@ const usage = `usage: boks [-f boks.yml] <command>
   ps               containers and proxy routes of this app on every server
   releases         releases recorded on each server, newest last
   version          the commit this boks was built from
+  deploy-hook <app>
+                   (the server's own boks, as the forced command of the app's deploy key) deploy
+                   the app on this server with the tag the client sent: ssh <server> <tag>
   proxy-config     (the server's own boks) the proxy's config of the routes on stdin and the
                    policy of this server; deploy, apply and proxy upgrade ask it for that config;
                    with check, the config of a policy not applied yet, sent with its secrets
@@ -106,6 +113,15 @@ func run(args []string, out, errw io.Writer) int {
 	// there (#154): no boks.yml, no ssh — the server is the machine it runs on.
 	if fs.Arg(0) == proxy.AssembleCommand && (fs.NArg() == 1 || fs.NArg() == 2 && fs.Arg(1) == proxy.CheckArg) {
 		if err := assembleHere(context.Background(), out, fs.NArg() == 2); err != nil {
+			fmt.Fprintln(errw, "error:", err)
+			return 1
+		}
+		return 0
+	}
+	// The forced command of an app's deploy key (#154, stage 3): the tag from the client, the rest from
+	// the server's own files; no boks.yml beside it and no ssh.
+	if fs.Arg(0) == "deploy-hook" && fs.NArg() == 2 {
+		if err := deployHook(context.Background(), fs.Arg(1), out); err != nil {
 			fmt.Fprintln(errw, "error:", err)
 			return 1
 		}
@@ -230,6 +246,72 @@ var (
 	socketRoot           = "/tmp"
 	stdin      io.Reader = os.Stdin
 )
+
+// hookTag is the one thing a site's CI says to deploy-hook: the image's tag, as docker takes it.
+var hookTag = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+
+// local is the runner deploy-hook reaches its own server with; hookDeploy is the deploy it runs there.
+var (
+	local      = func(home string) remote.Runner { return remote.Local{Dir: home} }
+	hookDeploy = func(ctx context.Context, r remote.Runner, out io.Writer, cfg *config.Config, tag string, o deploy.Options) error {
+		if err := deploy.Run(ctx, r, out, cfg, tag, o); err != nil {
+			return err
+		}
+		return deploy.CheckHairpin(ctx, r, out, cfg)
+	}
+)
+
+// deployHook deploys app on this server with the tag its deploy key's client sent: the key's forced
+// command, `.boks/bin/boks deploy-hook <app>`, which authorized_keys binds it to. The app is the
+// key's, not the client's to name; the client sends the tag alone, in SSH_ORIGINAL_COMMAND, and
+// anything that is not one tag is refused before docker is asked anything. The config, environment
+// and registry token are the ones `server apply` wrote under ~/.boks/_server/apps/<app>. What the
+// deploy prints goes back to the client, and its exit is the deploy's.
+func deployHook(ctx context.Context, app string, out io.Writer) error {
+	// A CI that goes away mid-deploy (a job cancelled) closes the pipe the hook prints into. Go would end
+	// the hook on its next line with SIGPIPE, the deploy cut short and its lock left behind, which the key
+	// cannot clear: with SIGPIPE taken, the line is lost and the deploy runs to its end and unlocks.
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+	if !config.ValidAppName(app) {
+		return fmt.Errorf("deploy-hook: %q is not an app name", app)
+	}
+	tag, _ := lookupEnv("SSH_ORIGINAL_COMMAND")
+	if !hookTag.MatchString(tag) {
+		return fmt.Errorf("deploy-hook: send the image's tag alone, as `ssh <server> <tag>` (%s); got %q", hookTag, tag)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".boks", "_server", "apps", app)
+	cfg, err := config.Load(filepath.Join(dir, "boks.yml"))
+	if err != nil {
+		return fmt.Errorf("deploy-hook: %s is not kept on this server (`boks server apply` writes it): %w", app, err)
+	}
+	if cfg.App != app {
+		return fmt.Errorf("deploy-hook: the boks.yml of %s names the app %s", app, cfg.App)
+	}
+	if len(cfg.Files) > 0 || cfg.Cert != nil {
+		return fmt.Errorf("deploy-hook: files and cert are not kept on the server yet")
+	}
+	env, err := os.ReadFile(filepath.Join(dir, "env"))
+	if err != nil {
+		return fmt.Errorf("deploy-hook: the environment of %s: %w", app, err)
+	}
+	// The registry's token is the file apply wrote; nothing of the hook's own environment is taken.
+	token := func(string) (string, bool) {
+		if cfg.Registry == nil {
+			return "", false
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "registry.token"))
+		return string(b), err == nil
+	}
+	login, err := deploy.NewLogin(cfg, token)
+	if err != nil {
+		return err
+	}
+	return hookDeploy(ctx, local(home), out, cfg, tag, deploy.Options{Env: env, Login: login, Stamp: now()})
+}
 
 // assembleHere prints the config of the routes on stdin and the policy of this machine, the server
 // whose boks this is, read from the home as ssh would reach it. With check, stdin is a policy not
@@ -623,7 +705,19 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		if sc.Boks != nil {
 			for _, s := range sc.Servers {
 				fmt.Fprintf(out, "== %s\n", s)
-				if err := deploy.PutApps(ctx, connect(s), out, config.AppsOn(apps, s), o); err != nil {
+				on := config.AppsOn(apps, s)
+				if err := deploy.PutApps(ctx, connect(s), out, on, o); err != nil {
+					return fmt.Errorf("%s: %w", s, err)
+				}
+				// The deploy keys after the apps they deploy: a key that worked before its app's files
+				// were there would only be refused.
+				keys := map[string]string{}
+				for _, a := range on {
+					if k, ok := sc.DeployKeys[a.Name]; ok {
+						keys[a.Name], _ = config.DeployKey(k)
+					}
+				}
+				if err := deploy.PutDeployKeys(ctx, connect(s), out, keys); err != nil {
 					return fmt.Errorf("%s: %w", s, err)
 				}
 			}
