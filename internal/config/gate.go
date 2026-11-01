@@ -8,6 +8,7 @@ package config
 // revision of the policy, never a new boks.
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -60,9 +61,58 @@ const (
 // gateWritten are the keys of a group boks writes itself into the handler, which server.yml must not:
 // a secret in the file would be in the repository and the policy's history.
 var gateWritten = map[string]string{
-	"secrets": "the secret never goes in server.yml; secret_env names the variable it comes from",
-	"hosts":   "boks writes it from the app's routes",
-	"handler": "boks writes it",
+	"secrets":    "the secret never goes in server.yml; secret_env names the variable it comes from",
+	"hosts":      "boks writes it from the app's routes",
+	"handler":    "boks writes it",
+	"range_sets": "boks writes the sets the group's signatures name, from the server's range_sets",
+}
+
+// withRangeSets writes into each group of g's JSON the sets its signatures' ranges name, from sets: the
+// handler finds them there, and the policy's revision holds them. A group naming no set keeps its bytes.
+// A name no set has is refused here, not at the proxy's reload.
+func (g *Gate) withRangeSets(sets map[string]RangeSet) error {
+	dec := json.NewDecoder(bytes.NewReader(g.JSON))
+	dec.UseNumber()
+	var top map[string]any
+	if err := dec.Decode(&top); err != nil {
+		return err
+	}
+	groups, _ := top["groups"].([]any)
+	changed := false
+	for i, gr := range groups {
+		m := gr.(map[string]any)
+		named := map[string][]string{}
+		sigs, _ := m["signatures"].([]any)
+		for j, sig := range sigs {
+			sm, _ := sig.(map[string]any)
+			v, set := sm["ranges"]
+			if !set {
+				continue
+			}
+			name, ok := v.(string)
+			if !ok {
+				return fmt.Errorf("groups[%d].signatures[%d]: ranges: the name of a set of range_sets", i, j)
+			}
+			rs, ok := sets[name]
+			if !ok {
+				return fmt.Errorf("groups[%d].signatures[%d]: ranges: no set %q in range_sets", i, j, name)
+			}
+			named[name] = rs.RangePrefixes()
+		}
+		if len(named) > 0 {
+			m["range_sets"] = named
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	b, err := json.Marshal(top)
+	if err != nil {
+		return err
+	}
+	g.JSON = b
+	return nil
 }
 
 // gateKey is a key as the handler's fields are written. ASCII only: Go's JSON decoder folds case by

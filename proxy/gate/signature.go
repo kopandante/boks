@@ -39,9 +39,13 @@ type Signature struct {
 	// other rules and Caddy's path matcher see it, so that dot segments do not take a file past it.
 	Path    string          `json:"path,omitempty"`
 	Headers []HeaderPattern `json:"headers"`
+	// Ranges, when set, names the group's range set the client's address must be in too (#140): the
+	// address as the ban and the token judge it, past the trusted proxies.
+	Ranges string `json:"ranges,omitempty"`
 
 	compiled []*regexp.Regexp
 	path     *regexp.Regexp
+	ranges   []netip.Prefix
 }
 
 // HeaderPattern is a header's name and the RE2 pattern its first value matches, "" when absent.
@@ -63,8 +67,16 @@ const (
 
 var signatureName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
-// compile compiles the patterns of s.
-func (s *Signature) compile() error {
+// compile compiles the patterns of s and finds its range set among sets.
+func (s *Signature) compile(sets map[string][]netip.Prefix) error {
+	s.ranges = nil
+	if s.Ranges != "" {
+		rs, ok := sets[s.Ranges]
+		if !ok || len(rs) == 0 {
+			return fmt.Errorf("signatures[%s]: ranges: the group has no range set %q", s.Name, s.Ranges)
+		}
+		s.ranges = rs
+	}
 	s.path = nil
 	if s.Path != "" {
 		re, err := regexp.Compile(s.Path)
@@ -110,8 +122,10 @@ func (s *Signature) validate(groupMode string) error {
 	return fmt.Errorf("signatures[%s]: every pattern matches an absent header, so it would match a request with none of them", s.Name)
 }
 
-// matches says whether the cleaned path p of r matches s's, when it has one, and every header its pattern.
-func (s *Signature) matches(r *http.Request, p string) bool {
+// matches says whether the cleaned path p of r matches s's, when it has one, every header its pattern,
+// and the client's address a its range set, when it has one. The set last: thousands of ranges are
+// walked only for a request whose headers already match.
+func (s *Signature) matches(r *http.Request, p string, a netip.Addr) bool {
 	if s.path != nil && !s.path.MatchString(p) {
 		return false
 	}
@@ -120,7 +134,7 @@ func (s *Signature) matches(r *http.Request, p string) bool {
 			return false
 		}
 	}
-	return true
+	return s.ranges == nil || inRanges(s.ranges, a)
 }
 
 func (s *Signature) on() bool { return s.Mode == "log" || s.Mode == "enforce" }
@@ -166,7 +180,7 @@ func (h *Handler) signed(r *http.Request, p, ip string) (decision, bool) {
 	if h.SignatureBan != 0 && h.enforces() && h.banStore().banned(h.Name, a, now) {
 		return deny("signature_ban", forbidden), true
 	}
-	s := h.matching(r, p)
+	s := h.matching(r, p, a)
 	if s == nil {
 		return decision{}, false
 	}
@@ -180,11 +194,11 @@ func (h *Handler) signed(r *http.Request, p, ip string) (decision, bool) {
 
 // matching is the signature on that matches r — the first enforced one, the first in log when no
 // enforced one does — nil when none does: a signature in log never shadows an enforced one after it.
-func (h *Handler) matching(r *http.Request, p string) *Signature {
+func (h *Handler) matching(r *http.Request, p string, a netip.Addr) *Signature {
 	var logged *Signature
 	for i := range h.Signatures {
 		s := &h.Signatures[i]
-		if !s.on() || (logged != nil && s.Mode != "enforce") || !s.matches(r, p) {
+		if !s.on() || (logged != nil && s.Mode != "enforce") || !s.matches(r, p, a) {
 			continue
 		}
 		if s.Mode == "enforce" {

@@ -74,21 +74,26 @@ func (c *Checks) validate(groupMode string) error {
 }
 
 func parseRanges(ss []string) ([]netip.Prefix, error) {
+	return parseRangesOf("checks.exempt_ranges", ss)
+}
+
+// parseRangesOf is parseRanges for the field named field, which its errors name.
+func parseRangesOf(field string, ss []string) ([]netip.Prefix, error) {
 	var out []netip.Prefix
 	for _, s := range ss {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
 			a, aerr := netip.ParseAddr(s)
 			if aerr != nil {
-				return nil, fmt.Errorf("checks.exempt_ranges: %q is neither an address nor a CIDR range", s)
+				return nil, fmt.Errorf("%s: %q is neither an address nor a CIDR range", field, s)
 			}
 			p = netip.PrefixFrom(a, a.BitLen())
 		}
 		if p.Bits() == 0 {
-			return nil, fmt.Errorf("checks.exempt_ranges: %q holds every address", s)
+			return nil, fmt.Errorf("%s: %q holds every address", field, s)
 		}
 		if p.Addr().Is4In6() {
-			return nil, errors.New("checks.exempt_ranges: " + s + ": an IPv4 address goes as IPv4")
+			return nil, errors.New(field + ": " + s + ": an IPv4 address goes as IPv4")
 		}
 		out = append(out, p.Masked())
 	}

@@ -77,6 +77,10 @@ type Handler struct {
 	// set, is how long an address an enforced one matched is refused by the group (signature.go).
 	Signatures   []Signature    `json:"signatures,omitempty"`
 	SignatureBan caddy.Duration `json:"signature_ban,omitempty"`
+	// RangeSets are named sets of addresses — a country's, by its registry's delegations — a signature's
+	// Ranges names (#140). boks writes into a group the sets its signatures name, from server.yml's
+	// range_sets, so a revision of the policy holds the list it was applied with.
+	RangeSets map[string][]string `json:"range_sets,omitempty"`
 	// PageFirst, when on, refuses the API to an address that asked for no page of the group within its
 	// window (pagefirst.go).
 	PageFirst *PageFirst `json:"page_first,omitempty"`
@@ -123,8 +127,14 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 			return err
 		}
 	}
+	sets := map[string][]netip.Prefix{}
+	for name, rs := range h.RangeSets {
+		if sets[name], err = parseRangesOf("range_sets."+name, rs); err != nil {
+			return err
+		}
+	}
 	for i := range h.Signatures {
-		if err := h.Signatures[i].compile(); err != nil {
+		if err := h.Signatures[i].compile(sets); err != nil {
 			return err
 		}
 	}
