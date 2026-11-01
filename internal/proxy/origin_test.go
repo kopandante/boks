@@ -3,9 +3,15 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"math/big"
 	"os"
 	"strings"
 	"testing"
@@ -188,5 +194,30 @@ func TestCheckCATerm(t *testing.T) {
 	}
 	if err := CheckCATerm(Policy{}, time.Now()); err != nil {
 		t.Errorf("want a policy without a CA taken: %v", err)
+	}
+	// A CA being changed: the one out of force beside one in force is taken, as Caddy takes either.
+	future := time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC)
+	p.TrustedProxiesCA = append(p.TrustedProxiesCA, testCA(t)[0])
+	if err := CheckCATerm(p, future); err == nil {
+		t.Errorf("want two out of force refused")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "expired CA"},
+		NotBefore: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), NotAfter: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	expired, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.TrustedProxiesCA = [][]byte{expired, testCA(t)[0]}
+	if err := CheckCATerm(p, time.Now()); err != nil {
+		t.Errorf("want the expired one beside one in force taken: %v", err)
+	}
+	p.TrustedProxiesCA = [][]byte{expired}
+	if err := CheckCATerm(p, time.Now()); err == nil || !strings.Contains(err.Error(), "certificate 1 (CN=expired CA) is valid from 2000-01-01 to 2001-01-01 only") {
+		t.Errorf("want the expired one alone refused, got %v", err)
 	}
 }

@@ -178,21 +178,27 @@ func (p Policy) keyed() bool {
 	return p.SpareBearer || slices.ContainsFunc(p.Allow, func(a BotAllow) bool { return a.Header != "" || len(a.Domains) > 0 })
 }
 
-// CheckCATerm refuses p when a certificate of the trusted proxies' CA is out of force at now: applied, the
+// CheckCATerm refuses p when no certificate of the trusted proxies' CA is in force at now: applied, the
 // proxy would refuse the handshake of every connection of the proxies in front, and every site behind
-// them with it. Asked by apply and rollback alone, so status and a rollback away from it still run.
+// them with it. One out of force beside one in force — a CA being changed — is taken: Caddy verifies a
+// client's certificate against any of the pool. Asked by apply and rollback alone, so status and a
+// rollback away from it still run.
 func CheckCATerm(p Policy, now time.Time) error {
+	var out []string
 	for i, der := range p.TrustedProxiesCA {
 		c, err := x509.ParseCertificate(der)
 		if err != nil {
 			return fmt.Errorf("trusted_proxies_ca: certificate %d: %w", i+1, err)
 		}
-		if now.After(c.NotAfter) || now.Before(c.NotBefore) {
-			return fmt.Errorf("trusted_proxies_ca: certificate %d (%s) is valid from %s to %s only; "+
-				"the proxies in front would be refused at the handshake", i+1, c.Subject, c.NotBefore.Format(time.DateOnly), c.NotAfter.Format(time.DateOnly))
+		if !now.After(c.NotAfter) && !now.Before(c.NotBefore) {
+			return nil
 		}
+		out = append(out, fmt.Sprintf("certificate %d (%s) is valid from %s to %s only", i+1, c.Subject, c.NotBefore.Format(time.DateOnly), c.NotAfter.Format(time.DateOnly)))
 	}
-	return nil
+	if len(out) == 0 {
+		return nil
+	}
+	return fmt.Errorf("trusted_proxies_ca: %s; the proxies in front would be refused at the handshake", strings.Join(out, ", "))
 }
 
 // policyFormat is the format a policy needs boks to know: the origin pull's with a CA of the trusted
