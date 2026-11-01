@@ -511,8 +511,8 @@ gate:
 
 // The emergency path never waits on the set's file: with ranges/jp.txt gone, a rollback reads no file
 // of it and goes to the servers — the sets come from the revision in each one's history — and status
-// warns that apply would refuse the file without failing. Apply reads the file strictly: gone or empty,
-// it refuses before any server is asked.
+// warns that apply would refuse the file without failing. Apply and install read the file strictly: gone
+// or empty, they refuse before any server is asked.
 func TestRangeFileNeverBlocksTheRollback(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.yml")
@@ -556,11 +556,14 @@ func TestRangeFileNeverBlocksTheRollback(t *testing.T) {
 		if body != nil {
 			want = "range_sets.jp: empty"
 		}
-		if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), want) {
-			t.Errorf("apply: %d %q, want %q", code, errw.String(), want)
-		}
-		if len(a.calls) > 0 {
-			t.Errorf("apply asked the server before refusing the file: %v", a.calls)
+		for _, cmd := range []string{"apply", "install"} {
+			errw.Reset()
+			if code := run([]string{"server", cmd, path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), want) {
+				t.Errorf("%s: %d %q, want %q", cmd, code, errw.String(), want)
+			}
+			if len(a.calls) > 0 {
+				t.Errorf("%s asked the server before refusing the file: %v", cmd, a.calls)
+			}
 		}
 	}
 }

@@ -525,7 +525,8 @@ var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-
 func LoadServer(path string) (*Server, error) { return loadServer(path, true) }
 
 // LoadServerForFleet is LoadServer for what takes the list of servers alone — rollback, which takes
-// the rest from the revision in each server's history, and status: range_sets are neither read nor
+// the rest from the revision in each server's history, and status (which reads server.yml once more by
+// LoadServer only to warn what apply would refuse): range_sets are neither read nor
 // checked, so a file of them missing or broken never stands in the way of going back. Gate signatures
 // naming a set are not checked against range_sets either; apply, by LoadServer, checks them all.
 func LoadServerForFleet(path string) (*Server, error) { return loadServer(path, false) }
