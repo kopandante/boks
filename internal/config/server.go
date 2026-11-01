@@ -59,10 +59,44 @@ type Server struct {
 	// into the policy, in the groups whose signatures name the set: a revision holds the list it was
 	// applied with, a rollback puts that list back, and an edit of the file changes nothing until applied.
 	RangeSets map[string]RangeSet `yaml:"range_sets"`
+	// Boks, when given, is the one boks of the server (#154): the linux build of Commit from boks's CI,
+	// its sha256 for each architecture written here, so the version and the bytes pass review as the
+	// proxy's image does. `server install` and `server apply` bring it to the server and check it there.
+	Boks *ServerBoks `yaml:"boks"`
 
 	// setsUnread is a server.yml read by LoadServerForFleet: range_sets kept as written, no file of them
 	// read, none checked.
 	setsUnread bool
+}
+
+// ServerBoks is the boks a server runs: the linux build of Commit, by architecture (amd64, arm64) the
+// sha256 of its file.
+type ServerBoks struct {
+	Commit string            `yaml:"commit"`
+	SHA256 map[string]string `yaml:"sha256"`
+}
+
+var (
+	commitRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+func (b *ServerBoks) validate() error {
+	if !commitRe.MatchString(b.Commit) {
+		return fmt.Errorf("commit: %q is not a commit of boks, 40 hex digits", b.Commit)
+	}
+	if len(b.SHA256) == 0 {
+		return errors.New("sha256: required, the sha256 of the build for each architecture of the servers (amd64, arm64)")
+	}
+	for arch, sum := range b.SHA256 {
+		if arch != "amd64" && arch != "arm64" {
+			return fmt.Errorf("sha256.%s: boks is built for amd64 and arm64", arch)
+		}
+		if !sha256Re.MatchString(sum) {
+			return fmt.Errorf("sha256.%s: %q is not a sha256, 64 hex digits", arch, sum)
+		}
+	}
+	return nil
 }
 
 // RangeSet is one of range_sets: Ranges as written, or read from File.
@@ -618,6 +652,11 @@ func (s *Server) validate() error {
 	// policy needs its revision, and `boks server apply` asks for one either way.
 	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0 || s.TrustedProxiesCA != "" || len(s.RangeSets) > 0 || s.Ban != nil || s.Gate != nil) {
 		return errors.New("revision: required, a whole number from 1 that grows by one with every edit")
+	}
+	if s.Boks != nil {
+		if err := s.Boks.validate(); err != nil {
+			return fmt.Errorf("boks: %w", err)
+		}
 	}
 	if s.Egress != nil {
 		if err := s.Egress.validate(); err != nil {

@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +33,7 @@ const usage = `usage: boks [-f boks.yml] <command>
                    The ids are what "boks releases" prints. Then asks each TLS host as deploy does
   ps               containers and proxy routes of this app on every server
   releases         releases recorded on each server, newest last
+  version          the commit this boks was built from
   proxy boot       make sure the proxy (Caddy) is running (idempotent)
   proxy list       routes the proxy serves, for every app on each server
   proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
@@ -55,6 +58,10 @@ const usage = `usage: boks [-f boks.yml] <command>
                    proxy on its own addresses, and keeps that through nftables.service reloads and
                    reboots. --force lets a gate group whose site no longer checks the token itself
                    leave enforce — an emergency's override
+                   With boks: in server.yml, install and apply also bring each server its one
+                   boks — the linux build of that commit from boks's CI, checked against the
+                   sha256 server.yml writes on every server before any is changed; apply brings
+                   it before the policy
   server rollback <server.yml> <revision> [--force]
                    put back the policy of an earlier revision on those servers; --force as above
   server status <server.yml>
@@ -85,6 +92,11 @@ func run(args []string, out, errw io.Writer) int {
 	if fs.NArg() == 0 {
 		fmt.Fprint(errw, usage)
 		return 2
+	}
+	// Before the mux: a server's install checks what `version` prints, and the mux's warning would be part of it.
+	if fs.Arg(0) == "version" && fs.NArg() == 1 {
+		fmt.Fprintln(out, version())
+		return 0
 	}
 	if m, err := remote.NewMux(socketRoot); err != nil {
 		fmt.Fprintf(errw, "warning: %v; every remote call opens its own connection\n", err)
@@ -482,11 +494,23 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 	}
 	o := deploy.Options{Now: now, Force: force}
+	// The server's boks is checked on every server with the rest, before any is changed: a sum missing for
+	// one server's architecture, or a build that does not fetch, would otherwise stop the run halfway down
+	// the list. The build is fetched once for all.
+	fetch := deploy.Remember(fetchBoks, out)
+	checkBoks := func(ctx context.Context, r remote.Runner) error {
+		if sc.Boks == nil {
+			return nil
+		}
+		return deploy.CheckBoks(ctx, r, out, sc.Boks, fetch)
+	}
 	switch {
 	case args[0] == "install" && len(args) == 2:
 		if err := askAll(func(ctx context.Context, r remote.Runner) error {
-			_, err := deploy.CheckInstall(ctx, r)
-			return err
+			if _, err := deploy.CheckInstall(ctx, r); err != nil {
+				return err
+			}
+			return checkBoks(ctx, r)
 		}); err != nil {
 			return err
 		}
@@ -494,6 +518,11 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			fmt.Fprintf(out, "== %s\n", s)
 			if err := installOn(ctx, s, out, o); err != nil {
 				return fmt.Errorf("%s: %w", s, err)
+			}
+			if sc.Boks != nil {
+				if err := deploy.InstallBoks(ctx, connect(s), out, sc.Boks, fetch); err != nil {
+					return fmt.Errorf("%s: %w", s, err)
+				}
 			}
 		}
 		return nil
@@ -522,8 +551,23 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			}
 			next.GateSecrets = secrets
 		}
-		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next, force) }); err != nil {
+		if err := askAll(func(ctx context.Context, r remote.Runner) error {
+			if err := deploy.CheckApply(ctx, r, next, force); err != nil {
+				return err
+			}
+			return checkBoks(ctx, r)
+		}); err != nil {
 			return err
+		}
+		// The servers' boks first, on every server before the policy on any: the policy is the same either
+		// way, and a build one server refuses (a write, its sum or its version there) leaves every server
+		// on the policy it had.
+		if sc.Boks != nil {
+			if err := on(func(ctx context.Context, r remote.Runner) error {
+				return deploy.InstallBoks(ctx, r, out, sc.Boks, fetch)
+			}); err != nil {
+				return err
+			}
 		}
 		if err := on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) }); err != nil {
 			return err
@@ -547,6 +591,14 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			p, open, drift, err := deploy.ServerStatus(ctx, r)
 			if err != nil {
 				return err
+			}
+			switch running, err := deploy.RunningBoks(ctx, r); {
+			case err != nil:
+				return err
+			case sc.Boks != nil && running != sc.Boks.Commit:
+				fmt.Fprintf(out, "  ! boks %s, and server.yml names %s; `boks server apply` brings it\n", orNone(running), sc.Boks.Commit)
+			case running != "":
+				fmt.Fprintf(out, "  boks %s\n", running)
 			}
 			if p.Revision == 0 {
 				fmt.Fprintln(out, "  no policy applied")
@@ -647,3 +699,60 @@ func policyOf(sc *config.Server) proxy.Policy {
 	}
 	return p
 }
+
+// commit is boks's own commit, set by its CI's build (-ldflags "-X main.commit=<sha>"); a build without it
+// says what Go recorded of the checkout, if anything.
+var commit string
+
+func version() string {
+	if commit != "" {
+		return commit
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			if s.Key == "vcs.revision" {
+				return s.Value
+			}
+		}
+		if bi.Main.Version != "" {
+			return bi.Main.Version
+		}
+	}
+	return "unknown"
+}
+
+func orNone(commit string) string {
+	if commit == "" {
+		return "none"
+	}
+	return commit
+}
+
+// fetchURL gets a build of boks: a release asset, which GitHub sends on from its own storage. A build is
+// some megabytes; more than maxBuild is no build of boks.
+func fetchURL(ctx context.Context, url string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s", resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBuild+1))
+	if err == nil && len(body) > maxBuild {
+		err = fmt.Errorf("more than %d bytes", maxBuild)
+	}
+	return body, err
+}
+
+const maxBuild = 200 << 20
+
+// fetchBoks is how install and apply fetch the server's boks; a test answers in its place.
+var fetchBoks deploy.Fetch = fetchURL

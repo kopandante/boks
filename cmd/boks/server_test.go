@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/netip"
 	"os"
@@ -614,5 +618,172 @@ func TestRollbackToAnOldRevisionLeavesTheWorkerOut(t *testing.T) {
 	}
 	if !slices.Contains(p.TrustedProxies, "2a06:98c0:3600::102/128") {
 		t.Errorf("the rollback dropped the neighbours of the address: %v", p.TrustedProxies)
+	}
+}
+
+// `boks version` says the commit boks's CI built it from; status names the server's boks, and the one
+// server.yml names when they differ (#154).
+func TestServerBoksInStatusAndVersion(t *testing.T) {
+	was := commit
+	commit = strings.Repeat("c", 40)
+	t.Cleanup(func() { commit = was })
+	var out strings.Builder
+	if code := run([]string{"version"}, &out, io.Discard); code != 0 || strings.TrimSpace(out.String()) != commit {
+		t.Errorf("version: %d %q", code, out.String())
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	named := strings.Repeat("a", 40)
+	if err := os.WriteFile(path, []byte("servers: [a]\nboks:\n  commit: "+named+"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := "sh -c readlink .boks/bin/boks 2>/dev/null; true"
+	for running, want := range map[string]string{
+		"../_server/bin/boks-" + named:                   "  boks " + named + "\n",
+		"../_server/bin/boks-" + strings.Repeat("d", 40): "! boks " + strings.Repeat("d", 40) + ", and server.yml names " + named,
+		"": "! boks none, and server.yml names " + named,
+	} {
+		a := &recorder{server: server{link: running}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		out.Reset()
+		var errw strings.Builder
+		if code := run([]string{"server", "status", path}, &out, &errw); code != 0 || !strings.Contains(out.String(), want) {
+			t.Errorf("%q: %d %q %q", running, code, out.String(), errw.String())
+		}
+	}
+}
+
+// apply brings the server's boks before the policy: a build that does not fetch refuses with the policy
+// as it was (#154).
+func TestApplyBringsTheServersBoksFirst(t *testing.T) {
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { return nil, errors.New("404 Not Found") }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &recorder{server: server{policyRead: "present\n{\"revision\":1,\"floor\":1}", "uname -m": "x86_64"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "404 Not Found; nothing was changed") {
+		t.Errorf("apply: %d %q", code, errw.String())
+	}
+	for _, in := range a.stdin {
+		if strings.Contains(in, `"revision"`) {
+			t.Errorf("the policy was written: %s", in)
+		}
+	}
+}
+
+// The server's boks is checked on every server before any is changed: a second server whose architecture
+// server.yml writes no sum for refuses the run with the first one's boks and policy as they were, and the
+// build is fetched once (#159).
+func TestApplyChecksBoksOnEveryServerFirst(t *testing.T) {
+	build := []byte("a build")
+	s := sha256.Sum256(build)
+	var fetched int
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { fetched++; return build, nil }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b, c]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol := "present\n{\"revision\":1,\"floor\":1}"
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	c := &recorder{server: server{policyRead: pol, "uname -m": "aarch64"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b, "c": c}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "c: boks: server.yml writes no sha256 for arm64") {
+		t.Errorf("apply: %d %q", code, errw.String())
+	}
+	for name, r := range map[string]*recorder{"a": a, "b": b} {
+		for _, in := range r.stdin {
+			if strings.Contains(in, `"revision"`) || in == string(build) {
+				t.Errorf("%s was changed: %.80s", name, in)
+			}
+		}
+	}
+	if fetched != 1 {
+		t.Errorf("fetched %d times", fetched)
+	}
+}
+
+// `boks version` prints the commit and nothing else, even where the ssh socket directory cannot be made:
+// a server's install compares all it prints (#159).
+func TestVersionAloneWithoutSocketDir(t *testing.T) {
+	was, wasRoot := commit, socketRoot
+	commit, socketRoot = strings.Repeat("c", 40), filepath.Join(t.TempDir(), "missing", "x")
+	t.Cleanup(func() { commit, socketRoot = was, wasRoot })
+	var out, errw strings.Builder
+	if code := run([]string{"version"}, &out, &errw); code != 0 || out.String() != commit+"\n" || errw.String() != "" {
+		t.Errorf("version: %d %q %q", code, out.String(), errw.String())
+	}
+}
+
+// apply writes the server's boks before its policy (#154, #159).
+func TestApplyWritesBoksBeforeThePolicy(t *testing.T) {
+	build := []byte("a build")
+	s := sha256.Sum256(build)
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { return build, nil }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &recorder{server: server{policyRead: "present\n{\"revision\":1,\"floor\":1}", "uname -m": "x86_64"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	// The fake answers no firewall, so the run ends in an error after the policy; what is checked is the
+	// order of what was written up to there.
+	run([]string{"server", "apply", path}, io.Discard, io.Discard)
+	boks, policy := -1, -1
+	for i, in := range a.stdin {
+		if in == string(build) && boks < 0 {
+			boks = i
+		}
+		// The journal's entry of the apply is the first thing it writes.
+		if strings.Contains(in, `"action":"server apply"`) && policy < 0 {
+			policy = i
+		}
+	}
+	if boks < 0 || policy < 0 || boks > policy {
+		t.Errorf("boks written at %d, the policy at %d", boks, policy)
+	}
+}
+
+// A build one server refuses there — its sum or its version, which only the server can check — leaves
+// every server on the policy it had: apply brings boks to all of them before the policy to any (#159).
+func TestApplyBoksRefusedOnAServerLeavesEveryPolicy(t *testing.T) {
+	build := []byte("a build")
+	s := sha256.Sum256(build)
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { return build, nil }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol := "present\n{\"revision\":1,\"floor\":1}"
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64", "fail": "version 2>&1"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: boks:") {
+		t.Errorf("apply: %d %q", code, errw.String())
+	}
+	for name, r := range map[string]*recorder{"a": a, "b": b} {
+		for _, in := range r.stdin {
+			if strings.Contains(in, `"action":"server apply"`) {
+				t.Errorf("%s's policy was changed", name)
+			}
+		}
 	}
 }
