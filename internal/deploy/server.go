@@ -162,7 +162,11 @@ func CheckServerRollback(ctx context.Context, r remote.Runner, rev int, force bo
 	if err := proxy.CheckGate(ctx, r, p); err != nil {
 		return err
 	}
-	return proxy.CheckEgress(ctx, r, p)
+	if err := proxy.CheckEgress(ctx, r, p); err != nil {
+		return err
+	}
+	// The server's own boks reads the revision, so that no server refuses it halfway down the list.
+	return proxy.CheckServerBoks(ctx, r, p)
 }
 
 func policyOfRevision(ctx context.Context, r remote.Runner, rev int) (proxy.Policy, error) {

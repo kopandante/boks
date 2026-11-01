@@ -15,7 +15,8 @@
 - [x] 5. `docs/architecture.md`.
 - [x] 6. Ревью: `server apply`/`rollback` спрашивают серверный boks о новой политике до `Reshape`
   (`proxy.CheckServerBoks`, `boks proxy-config check`) — иначе отказ строгого чтения приходил после
-  пересоздания прокси под новую форму (`TestApplyServerAsksTheServersBoksBeforeTheSwap`).
+  пересоздания прокси под новую форму (`TestApplyServerAsksTheServersBoksBeforeTheSwap`); и всех серверов
+  списка до изменений любого (`TestServerApplyAsksEveryServersBoksFirst`, `…RollbackAsks…`).
 - [ ] 7. PR через `/review-loop --ship`, merge.
 
 ## Проверка

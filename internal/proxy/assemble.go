@@ -50,8 +50,8 @@ func assemble(ctx context.Context, r remote.Runner, fs []Fragment) ([]byte, erro
 	}
 	out, err := r.Pipe(ctx, in, ServerBoks, AssembleCommand)
 	if err != nil {
-		return nil, fmt.Errorf("the server's boks did not assemble the proxy's config (a build older than %s needs `boks server apply` "+
-			"with a newer boks: commit): %w", AssembleCommand, err)
+		return nil, fmt.Errorf("the server's boks did not assemble the proxy's config: %w (if it is a build older than %s, "+
+			"`boks server apply` with a newer boks: commit replaces it)", err, AssembleCommand)
 	}
 	// The runner trims what a command prints; Config ends in one newline.
 	return []byte(out + "\n"), nil

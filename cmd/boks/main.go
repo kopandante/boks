@@ -605,6 +605,12 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 				return err
 			}
 		}
+		// Every server's own boks — the one just installed, or whichever a server kept — is asked whether
+		// it reads next before any policy changes: one refusing halfway down the list would leave the
+		// fleet on two policies. ApplyServer asks again, under the lock, of the policy as it writes it.
+		if err := askAll(func(ctx context.Context, r remote.Runner) error { return proxy.CheckServerBoks(ctx, r, next) }); err != nil {
+			return err
+		}
 		if err := on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) }); err != nil {
 			return err
 		}

@@ -836,3 +836,47 @@ func TestProxyConfigCheck(t *testing.T) {
 		}
 	}
 }
+
+// A server whose own boks does not read the policy refuses the apply before any server changes: asked
+// only by each server's apply in turn, a would take the policy and b refuse it, the fleet on two (#154).
+func TestServerApplyAsksEveryServersBoksFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 4\nbots:\n  block:\n    - {name: crawlers, user_agent: gptbot}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol := "present\n{\"revision\":3,\"floor\":3}"
+	a := &recorder{server: server{policyRead: pol}}
+	b := &recorder{server: server{policyRead: pol, "sh -c [ -x .boks/bin/boks ]": "yes", "fail": "proxy-config check"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: the server's boks does not read this policy") {
+		t.Fatalf("apply: %d %q", code, errw.String())
+	}
+	for _, in := range a.stdin {
+		if strings.Contains(in, `"action":"server apply"`) || strings.Contains(in, "crawlers") {
+			t.Errorf("a was changed before b's boks was asked: %v", a.calls)
+		}
+	}
+}
+
+// A rollback asks every server's boks too, before any server changes.
+func TestServerRollbackAsksEveryServersBoksFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hist := "sh -c if [ -f '.boks/_server/history/4.json' ]"
+	pol := "present\n{\"revision\":5,\"floor\":5}"
+	a := &recorder{server: server{policyRead: pol, hist: "present\n{\"revision\":4}"}}
+	b := &recorder{server: server{policyRead: pol, hist: "present\n{\"revision\":4}", "sh -c [ -x .boks/bin/boks ]": "yes", "fail": "proxy-config check"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "rollback", path, "4"}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: the server's boks does not read this policy") {
+		t.Fatalf("rollback: %d %q", code, errw.String())
+	}
+	for _, in := range a.stdin {
+		if strings.Contains(in, `"action":"server rollback"`) {
+			t.Errorf("a was changed before b's boks was asked: %v", a.calls)
+		}
+	}
+}
