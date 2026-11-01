@@ -13,12 +13,15 @@ package gate
 // a user points them at a page, as Google's user-triggered fetchers (#155): they are checked as browsers.
 //
 // The bounds of the lookup (yandexStore): an address's answer is kept a day when it is Yandex's and an
-// hour when it is not, for at most yandexEntries addresses; one lookup at a time per address, the rest
-// wait for it; at most yandexTimeout for both lookups. A resolver that fails — an error or a timeout, not
-// an answer that the name is not Yandex's — keeps the verdict the gate had before the lookup, AS13238 and
-// the robot's name, for a minute, and writes gate_yandex_dns: unavailable into the request's log entry:
-// the Russian sites live off Yandex's search, and a resolver that is down must not refuse its robot. A
-// name that does not exist (NXDOMAIN) is an answer. A new list of prefixes is a new image.
+// hour when it is not or the resolver failed, so an address asks DNS at most once an hour, never once a
+// request; at most yandexEntries addresses; one lookup at a time per address, the rest wait for it; one
+// deadline of yandexTimeout (400 ms) for both lookups together, which the request waits no longer than
+// even when the resolver ignores it. A resolver that fails — an error or a timeout, not an answer that
+// the name is not Yandex's — leaves the address unconfirmed: it keeps the verdict the gate had before the
+// lookup, AS13238 and the robot's name, so it is spared and banned by no signature, and writes
+// gate_yandex_dns: unavailable into the request's log entry: the Russian sites live off Yandex's search,
+// and a resolver that is down must not refuse its robot. A name that does not exist (NXDOMAIN) is an
+// answer. A new list of prefixes is a new image.
 
 import (
 	"context"
@@ -72,10 +75,10 @@ var yandexRobots = []string{"YandexBot/", "YandexMobileBot/", "YandexImages/", "
 var yandexDomains = []string{".yandex.ru", ".yandex.net", ".yandex.com"}
 
 const (
-	yandexConfirmed = 24 * time.Hour // how long an address confirmed Yandex's is kept
-	yandexRefused   = time.Hour      // how long an address refused is kept
-	yandexFailed    = time.Minute    // how long a failed resolver's verdict is kept
-	yandexTimeout   = 1500 * time.Millisecond
+	yandexConfirmed = 24 * time.Hour         // how long an address confirmed Yandex's is kept
+	yandexRefused   = time.Hour              // how long an address refused is kept
+	yandexFailed    = time.Hour              // how long a failed resolver's verdict is kept
+	yandexTimeout   = 400 * time.Millisecond // both lookups of an address together
 	yandexEntries   = 4096
 )
 
@@ -190,8 +193,21 @@ func (s *yandexStore) ask(a netip.Addr, now time.Time) yandexVerdict {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), yandexTimeout)
 	defer cancel()
-	c.v = lookupYandex(ctx, s.dns, a)
+	c.v = lookupWithin(ctx, s.dns, a)
 	return c.v
+}
+
+// lookupWithin is lookupYandex's verdict, or unknown once ctx is done though the resolver has not
+// returned: the request waits for the deadline, not for the resolver.
+func lookupWithin(ctx context.Context, dns resolver, a netip.Addr) yandexVerdict {
+	out := make(chan yandexVerdict, 1)
+	go func() { out <- lookupYandex(ctx, dns, a) }()
+	select {
+	case v := <-out:
+		return v
+	case <-ctx.Done():
+		return yandexUnknown
+	}
 }
 
 // keep stores e for a; a full store drops the answers past their time first, then any one.

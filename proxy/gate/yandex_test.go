@@ -190,8 +190,8 @@ func TestYandexRobotSignature(t *testing.T) {
 	}
 }
 
-// An answer is kept a day when it confirms, an hour when it refuses, a minute when the resolver failed:
-// within it the address asks no DNS, past it asks again.
+// An answer is kept a day when it confirms, an hour when it refuses or the resolver failed: within it
+// the address asks DNS once however many requests it sends, past it once more.
 func TestYandexCache(t *testing.T) {
 	a := netip.MustParseAddr("213.180.203.222")
 	for _, c := range []struct {
@@ -202,36 +202,160 @@ func TestYandexCache(t *testing.T) {
 	}{
 		{"confirmed", static(map[string][]string{"spider.yandex.com.": {a.String()}}, nil), yandexYes, 24 * time.Hour},
 		{"refused", static(nil, notFound), yandexNo, time.Hour},
-		{"failed", static(nil, timeout), yandexUnknown, time.Minute},
+		{"failed", static(nil, timeout), yandexUnknown, time.Hour},
 	} {
 		s := newYandexStore(c.dns)
 		t0 := time.Now()
-		for i, at := range []time.Time{t0, t0.Add(c.ttl - time.Second)} {
+		for i, at := range []time.Time{t0, t0.Add(time.Second), t0.Add(time.Minute), t0.Add(30 * time.Minute), t0.Add(c.ttl - time.Second)} {
 			if v := s.ask(a, at); v != c.want || c.dns.ptrs.Load() != 1 {
 				t.Errorf("%s, ask %d: %v after %d lookups", c.name, i, v, c.dns.ptrs.Load())
 			}
 		}
-		if v := s.ask(a, t0.Add(c.ttl)); v != c.want || c.dns.ptrs.Load() != 2 {
-			t.Errorf("%s, past its time: %v after %d lookups", c.name, v, c.dns.ptrs.Load())
+		for i, at := range []time.Time{t0.Add(c.ttl), t0.Add(c.ttl + time.Minute)} {
+			if v := s.ask(a, at); v != c.want || c.dns.ptrs.Load() != 2 {
+				t.Errorf("%s, past its time, ask %d: %v after %d lookups", c.name, i, v, c.dns.ptrs.Load())
+			}
 		}
 	}
 }
 
-// Two requests of a robot through the handler ask DNS once.
+// Requests of a robot through the handler ask DNS once an hour at most, whatever DNS answered: once
+// for every request within the hour, once more past it.
 func TestYandexCacheThroughHandler(t *testing.T) {
 	const ip = "213.180.203.222"
-	dns := static(map[string][]string{"spider.yandex.com.": {ip}}, nil)
-	h := enforcing(t, &Handler{Checks: allLog, yandex: newYandexStore(dns)}, time.Now())
-	h.Mode = "log"
-	for range 2 {
-		r, extra := withLog(client{ua: yandexUA, fpHeader: true, tokenFP: true, ip: ip}.request(h, "GET", "/api/encar/catalog"))
-		serve(t, h, r)
-		if got, _ := fields(extra)["gate_shadow"].(string); got != "" {
-			t.Errorf("gate_shadow %q", got)
+	for _, c := range []struct {
+		name   string
+		dns    *fakeDNS
+		shadow string
+	}{
+		{"confirmed", static(map[string][]string{"spider.yandex.com.": {ip}}, nil), ""},
+		{"refused", static(nil, notFound), "fetch_meta,alpn"},
+		{"failed", static(nil, timeout), ""},
+	} {
+		now := time.Now()
+		h := enforcing(t, &Handler{Checks: allLog, yandex: newYandexStore(c.dns)}, now)
+		h.Mode = "log"
+		h.now = func() time.Time { return now }
+		start := now
+		for i, at := range []time.Duration{0, time.Second, 10 * time.Minute, time.Hour - time.Second, time.Hour} {
+			now = start.Add(at)
+			r, extra := withLog(client{ua: yandexUA, fpHeader: true, tokenFP: true, ip: ip}.request(h, "GET", "/api/encar/catalog"))
+			serve(t, h, r)
+			if got, _ := fields(extra)["gate_shadow"].(string); got != c.shadow {
+				t.Errorf("%s, request %d: gate_shadow %q", c.name, i, got)
+			}
+			want := int32(1)
+			if at >= time.Hour && c.name != "confirmed" {
+				want = 2
+			}
+			if n := c.dns.ptrs.Load(); n != want {
+				t.Errorf("%s, request %d at %v: %d lookups, want %d", c.name, i, at, n, want)
+			}
 		}
 	}
-	if dns.ptrs.Load() != 1 || dns.fwds.Load() != 1 {
-		t.Errorf("%d reverse and %d forward lookups", dns.ptrs.Load(), dns.fwds.Load())
+}
+
+// blocking is a DNS whose every question hangs, its deadline or not, until release closes or for two
+// seconds, which a gate that waits for the resolver would show.
+func blocking(release chan struct{}) *fakeDNS {
+	hang := func() {
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return &fakeDNS{
+		ptr: func(netip.Addr) ([]string, error) { hang(); return nil, timeout },
+		fwd: func(string) ([]netip.Addr, error) { hang(); return nil, timeout },
+	}
+}
+
+// A resolver that does not answer keeps the request no longer than yandexTimeout, for the reverse and
+// the forward lookup together, and the verdict is the failed resolver's.
+func TestYandexDeadline(t *testing.T) {
+	a := netip.MustParseAddr("213.180.203.222")
+	release := make(chan struct{})
+	defer close(release)
+	slowFwd := &fakeDNS{
+		ptr: func(netip.Addr) ([]string, error) {
+			time.Sleep(300 * time.Millisecond)
+			return []string{"spider.yandex.com."}, nil
+		},
+		fwd: blocking(release).fwd,
+	}
+	for _, c := range []struct {
+		name string
+		dns  *fakeDNS
+	}{
+		{"the reverse lookup hangs", blocking(release)},
+		{"each lookup in time, both together not", slowFwd},
+	} {
+		s := newYandexStore(c.dns)
+		t0 := time.Now()
+		v := s.ask(a, t0)
+		if took := time.Since(t0); v != yandexUnknown || took > yandexTimeout+150*time.Millisecond || took < yandexTimeout-50*time.Millisecond {
+			t.Errorf("%s: %v in %v", c.name, v, took)
+		}
+	}
+	if yandexTimeout > 400*time.Millisecond {
+		t.Errorf("the deadline is %v", yandexTimeout)
+	}
+	// Through the handler: the robot is answered within the deadline, spared, and the log says why.
+	h := enforcing(t, &Handler{Checks: allLog, yandex: newYandexStore(blocking(release))}, time.Now())
+	h.Mode = "log"
+	r, extra := withLog(client{ua: yandexUA, fpHeader: true, tokenFP: true, ip: a.String()}.request(h, "GET", "/api/encar/catalog"))
+	t0 := time.Now()
+	w := serve(t, h, r)
+	if took := time.Since(t0); w.Code != 200 || took > yandexTimeout+150*time.Millisecond || fields(extra)["gate_yandex_dns"] != "unavailable" || fields(extra)["gate_shadow"] != nil {
+		t.Errorf("%d in %v, %v", w.Code, took, fields(extra))
+	}
+}
+
+// A resolver that fails or does not answer leaves the robot unconfirmed, as it was before DNS was
+// asked: spared, a signature that matches it neither refuses nor bans it, page_first and static_rhythm
+// do not refuse it. Refused by DNS, it is refused and banned as anyone.
+func TestYandexResolverDownSpares(t *testing.T) {
+	const ip = "213.180.203.222"
+	release := make(chan struct{})
+	defer close(release)
+	robot := browserClient(yandexBotUA, ip)
+	for _, c := range []struct {
+		name  string
+		dns   func() *fakeDNS
+		spare bool
+	}{
+		{"the resolver errs", func() *fakeDNS { return static(nil, errors.New("connection refused")) }, true},
+		{"the resolver times out", func() *fakeDNS { return static(nil, timeout) }, true},
+		{"the resolver hangs", func() *fakeDNS { return blocking(release) }, true},
+		{"refused by DNS", func() *fakeDNS { return static(nil, notFound) }, false},
+	} {
+		code := func(spared int) int {
+			if c.spare {
+				return spared
+			}
+			return 403
+		}
+		now := time.Now()
+		sig := signing(t, &now, scraperSig)
+		sig.yandex = newYandexStore(c.dns())
+		r := robot.request(sig, "GET", "/api/auctions/heydealer/cars")
+		r.Header.Set("Accept-Encoding", scraperAE)
+		if w := serve(t, sig, r); w.Code != code(200) || sig.bans.banned(sig.Name, netip.MustParseAddr(ip), now) == c.spare {
+			t.Errorf("%s, a signature: %d, banned %v", c.name, w.Code, sig.bans.banned(sig.Name, netip.MustParseAddr(ip), now))
+		}
+
+		pf := pageFirsting(t, &now, "enforce")
+		pf.yandex = newYandexStore(c.dns())
+		if w := serve(t, pf, robot.request(pf, "GET", "/api/x")); w.Code != code(200) {
+			t.Errorf("%s, page_first: %d", c.name, w.Code)
+		}
+
+		rh := rhythming(t, &now, "enforce")
+		rh.yandex = newYandexStore(c.dns())
+		files(t, rh, &now, robot, 6, time.Second)
+		if got, _ := apiOf(t, rh, robot, "/api/x"); got != code(200) {
+			t.Errorf("%s, static_rhythm: %d", c.name, got)
+		}
 	}
 }
 
