@@ -22,5 +22,5 @@ Base: 879488d | Branch: feat/gate-no-ban-ranges
 - [x] 1 план (issue #160)
 - [x] 2 реализация
 - [x] 3 PR (#161)
-- [ ] 4 review-loop green
+- [x] 4 review-loop green (агентами, codex в лимите; внешний /code-review high)
 - [ ] 5 merge
