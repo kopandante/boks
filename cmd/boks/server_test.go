@@ -817,21 +817,24 @@ func TestProxyConfigFromTheHome(t *testing.T) {
 	}
 }
 
-// With check, the server's boks reads the policy on stdin and says only whether it knows every field.
+// With check, the server's boks reads a policy not applied yet, with its routes, on stdin, and answers
+// with its config; a field it does not know is refused.
 func TestProxyConfigCheck(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	wasIn := stdin
 	t.Cleanup(func() { stdin = wasIn })
+	routes := `[{"app":"web","routes":[{"host":"a.example.com","dial":"web-v1-1:80","tls":true}]}]`
 	for _, c := range []struct {
 		in   string
 		code int
 	}{
-		{`{"revision": 2, "floor": 2, "block": [{"name": "crawlers", "user_agent": "(?i)gptbot"}]}`, 0},
-		{`{"revision": 2, "floor": 2, "newer_filter": true}`, 1},
+		{`{"policy": {"revision": 2, "floor": 2, "block": [{"name": "crawlers", "user_agent": "(?i)gptbot"}]}, "fragments": ` + routes + `}`, 0},
+		{`{"policy": {"revision": 2, "floor": 2, "newer_filter": true}, "fragments": ` + routes + `}`, 1},
 	} {
 		stdin = strings.NewReader(c.in)
 		var out, errw strings.Builder
 		code := run([]string{"-f", filepath.Join(t.TempDir(), "no-boks.yml"), "proxy-config", "check"}, &out, &errw)
-		if code != c.code || out.String() != "" || (c.code == 1) != strings.Contains(errw.String(), "newer_filter") {
+		if code != c.code || (code == 0) != strings.Contains(out.String(), "a.example.com") || (c.code == 1) != strings.Contains(errw.String(), "newer_filter") {
 			t.Errorf("%s: %d %q %q", c.in, code, out.String(), errw.String())
 		}
 	}
@@ -846,10 +849,10 @@ func TestServerApplyAsksEveryServersBoksFirst(t *testing.T) {
 	}
 	pol := "present\n{\"revision\":3,\"floor\":3}"
 	a := &recorder{server: server{policyRead: pol}}
-	b := &recorder{server: server{policyRead: pol, "sh -c [ -x .boks/bin/boks ]": "yes", "fail": "proxy-config check"}}
+	b := &recorder{server: server{policyRead: pol, "sh -c if [ -x .boks/bin/boks ]": "yes", "fail": "proxy-config check"}}
 	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
 	var errw strings.Builder
-	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: the server's boks does not read this policy") {
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: the server's boks did not assemble the config of this policy") {
 		t.Fatalf("apply: %d %q", code, errw.String())
 	}
 	for _, in := range a.stdin {
@@ -868,10 +871,10 @@ func TestServerRollbackAsksEveryServersBoksFirst(t *testing.T) {
 	hist := "sh -c if [ -f '.boks/_server/history/4.json' ]"
 	pol := "present\n{\"revision\":5,\"floor\":5}"
 	a := &recorder{server: server{policyRead: pol, hist: "present\n{\"revision\":4}"}}
-	b := &recorder{server: server{policyRead: pol, hist: "present\n{\"revision\":4}", "sh -c [ -x .boks/bin/boks ]": "yes", "fail": "proxy-config check"}}
+	b := &recorder{server: server{policyRead: pol, hist: "present\n{\"revision\":4}", "sh -c if [ -x .boks/bin/boks ]": "yes", "fail": "proxy-config check"}}
 	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
 	var errw strings.Builder
-	if code := run([]string{"server", "rollback", path, "4"}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: the server's boks does not read this policy") {
+	if code := run([]string{"server", "rollback", path, "4"}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "b: the server's boks did not assemble the config of this policy") {
 		t.Fatalf("rollback: %d %q", code, errw.String())
 	}
 	for _, in := range a.stdin {
