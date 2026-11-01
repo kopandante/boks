@@ -38,6 +38,12 @@ type Checks struct {
 	// ExemptRanges are the addresses — one address or a CIDR range — no check is asked of: our own
 	// probes, a client's office whose proxy drops h2.
 	ExemptRanges []string `json:"exempt_ranges,omitempty"`
+	// NoBanRanges are addresses refused, never banned (#160; the owner, 01.11: «блокируем, но не баним»):
+	// a client's office whose browsers fail the checks as ExemptRanges' do — Chrome behind a proxy that
+	// drops h2 — but whose scraper must still be stopped. No check, page_first or static_rhythm is asked of
+	// them; an enforced signature that matches refuses the request and writes it, and bans no one: a
+	// match would otherwise lock the whole office out for the signature_ban.
+	NoBanRanges []string `json:"no_ban_ranges,omitempty"`
 }
 
 // check is one check of a request: its name, as gate_shadow and gate_reason write it, and how it
@@ -69,8 +75,23 @@ func (c *Checks) validate(groupMode string) error {
 			return fmt.Errorf("checks.%s %q must be off, log or enforce", k.name, m)
 		}
 	}
-	_, err := parseRanges(c.ExemptRanges)
-	return err
+	exempt, err := parseRanges(c.ExemptRanges)
+	if err != nil {
+		return err
+	}
+	noBan, err := parseRangesOf("checks.no_ban_ranges", c.NoBanRanges)
+	if err != nil {
+		return err
+	}
+	// An address in both is asked nothing and refused by signatures at once: the lists say opposite things.
+	for _, p := range exempt {
+		for _, q := range noBan {
+			if p.Overlaps(q) {
+				return fmt.Errorf("checks: %s of exempt_ranges and %s of no_ban_ranges overlap; an address is in one", p, q)
+			}
+		}
+	}
+	return nil
 }
 
 func parseRanges(ss []string) ([]netip.Prefix, error) {
@@ -121,7 +142,7 @@ func (h *Handler) shadow(r *http.Request, p, ip string, pl *payload) []check {
 	if err != nil {
 		return failed
 	}
-	if inRanges(h.checksExempt, a) {
+	if inRanges(h.checksExempt, a) || inRanges(h.checksNoBan, a) {
 		return nil
 	}
 	if isGoogle(a) || isYandex(a, r.UserAgent()) {

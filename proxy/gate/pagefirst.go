@@ -109,7 +109,7 @@ func (h *Handler) pageless(r *http.Request, ip string) (flagged, refused bool) {
 		return false, false
 	}
 	a, err := netip.ParseAddr(ip)
-	if err != nil || h.spared(r, a) {
+	if err != nil || h.spared(r, a) || h.noBan(a) {
 		return false, false
 	}
 	ans := h.pageStore().ask(h.Name, a, h.now(), time.Duration(pf.Window), pf.warmup())

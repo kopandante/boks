@@ -114,7 +114,7 @@ func (h *Handler) sawFile(r *http.Request, p, ip string) {
 		return
 	}
 	a, err := netip.ParseAddr(ip)
-	if err != nil || h.spared(r, a) {
+	if err != nil || h.spared(r, a) || h.noBan(a) {
 		return
 	}
 	if h.rhythmStore().saw(h.Name, a, h.now(), sr.files(), sr.minGap(), time.Duration(sr.Window)) && h.logger != nil {
@@ -132,7 +132,7 @@ func (h *Handler) serial(r *http.Request, ip string) (marked, refused bool) {
 	}
 	// spared covers the partner's Bearer.
 	a, err := netip.ParseAddr(ip)
-	if err != nil || h.spared(r, a) || !h.rhythmStore().marked(h.Name, a, h.now()) {
+	if err != nil || h.spared(r, a) || h.noBan(a) || !h.rhythmStore().marked(h.Name, a, h.now()) {
 		return false, false
 	}
 	return true, sr.Mode == "enforce"

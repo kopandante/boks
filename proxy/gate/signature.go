@@ -176,8 +176,8 @@ func (h *Handler) signed(r *http.Request, p, ip string) (decision, bool) {
 	if err != nil || h.spared(r, a) {
 		return decision{}, false
 	}
-	now := h.now()
-	if h.SignatureBan != 0 && h.enforces() && h.banStore().banned(h.Name, a, now) {
+	now, noBan := h.now(), h.noBan(a)
+	if h.SignatureBan != 0 && !noBan && h.enforces() && h.banStore().banned(h.Name, a, now) {
 		return deny("signature_ban", forbidden), true
 	}
 	s := h.matching(r, p, a)
@@ -188,9 +188,15 @@ func (h *Handler) signed(r *http.Request, p, ip string) (decision, bool) {
 	if s.Mode != "enforce" {
 		return decision{}, false
 	}
-	h.banAddr(r, a, s, now)
+	if !noBan {
+		h.banAddr(r, a, s, now)
+	}
 	return deny("signature", forbidden), true
 }
+
+// noBan says whether a is in checks.no_ban_ranges: refused by an enforced signature, banned by none, asked
+// no check, page_first or static_rhythm (#160).
+func (h *Handler) noBan(a netip.Addr) bool { return inRanges(h.checksNoBan, a) }
 
 // matching is the signature on that matches r — the first enforced one, the first in log when no
 // enforced one does — nil when none does: a signature in log never shadows an enforced one after it.

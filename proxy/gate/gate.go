@@ -90,6 +90,7 @@ type Handler struct {
 
 	exempt       []exemptRule
 	checksExempt []netip.Prefix
+	checksNoBan  []netip.Prefix
 	bearer       *bearer
 	bans         *banStore    // the tests' own; sharedBans when nil
 	pages        *pageStore   // the tests' own; sharedPages when nil
@@ -124,6 +125,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	if h.Checks != nil {
 		if h.checksExempt, err = parseRanges(h.Checks.ExemptRanges); err != nil {
+			return err
+		}
+		if h.checksNoBan, err = parseRangesOf("checks.no_ban_ranges", h.Checks.NoBanRanges); err != nil {
 			return err
 		}
 	}
