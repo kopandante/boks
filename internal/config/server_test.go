@@ -1,8 +1,14 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"reflect"
 	"strings"
@@ -406,14 +412,13 @@ func TestParseServerTrustedProxiesCA(t *testing.T) {
 	}
 }
 
-// A CA without proxies to ask, a key, anything but certificates, and a certificate out of force are
-// refused: applied, the last would refuse every connection of the proxies in front.
+// A CA without proxies to ask, a key, anything but certificates, and an empty one are refused.
 func TestParseServerTrustedProxiesCARejects(t *testing.T) {
 	trusted := "servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n"
 	for _, c := range []struct{ doc, want string }{
 		{"servers: [a]\n" + caPEM(t, "ca.pem"), "revision"},
 		{"servers: [a]\nrevision: 1\n" + caPEM(t, "ca.pem"), "trusted_proxies_ca: no trusted_proxies to ask a certificate of"},
-		{trusted + caPEM(t, "client.key"), "trusted_proxies_ca: a EC PRIVATE KEY block; only certificates go here"},
+		{trusted + caPEM(t, "client.key"), "trusted_proxies_ca: a EC PRIVATE KEY block; only CERTIFICATE blocks go here"},
 		{trusted + "trusted_proxies_ca: cloudflare\n", "trusted_proxies_ca: want one or more PEM certificates"},
 		// The key left with its certificate taken out would trust the proxies by address again.
 		{trusted + "trusted_proxies_ca:\n", "trusted_proxies_ca: empty"},
@@ -431,17 +436,27 @@ func TestParseServerTrustedProxiesCARejects(t *testing.T) {
 			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc)[:40], c.want, err)
 		}
 	}
-	b, err := os.ReadFile("../../proxy/gate/testdata/originpull/ca.pem")
+	// The term is apply's and rollback's to judge (proxy.CheckCATerm): an expired CA is still read, so
+	// status and a rollback away from it run.
+	doc := trusted + "trusted_proxies_ca: |\n  " + strings.ReplaceAll(strings.TrimSpace(expiredCAPEM(t)), "\n", "\n  ") + "\n"
+	if sc, err := ParseServer([]byte(doc)); err != nil || len(sc.TrustedProxiesCerts()) != 1 {
+		t.Errorf("want an expired CA read: %v", err)
+	}
+}
+
+// expiredCAPEM is a CA certificate that ran out in 2001, as PEM.
+func expiredCAPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, now := range []time.Time{time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)} {
-		if _, err := parseCAs(string(b), now); err == nil || !strings.Contains(err.Error(), "is valid from") {
-			t.Errorf("at %s: want the certificate refused out of force, got %v", now.Format(time.DateOnly), err)
-		}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "expired CA"},
+		NotBefore: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), NotAfter: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The policy's read does not judge the term again: validated, the CA is never dropped from it.
-	if certs, err := parseCAs(string(b), time.Time{}); err != nil || len(certs) != 1 {
-		t.Errorf("without a time: want the certificate, got %d %v", len(certs), err)
-	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }

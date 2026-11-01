@@ -2,12 +2,19 @@ package deploy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
 	"io"
+	"math/big"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
@@ -212,6 +219,28 @@ func TestCheckServerRollback(t *testing.T) {
 	f.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(old)
 	if err := CheckServerRollback(context.Background(), f, 3, false); err != nil {
 		t.Errorf("want revision 3 taken: %v", err)
+	}
+}
+
+// A rollback to a revision whose trusted proxies' CA has run out is refused before any server changes:
+// the proxies in front would be refused at the handshake.
+func TestCheckServerRollbackRefusesAnExpiredCA(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "expired CA"},
+		NotBefore: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), NotAfter: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := serverFake(t, proxy.Policy{Revision: 5, Floor: 5})
+	old, _ := json.Marshal(proxy.Policy{Revision: 3, TrustedProxies: []string{"173.245.48.0/20"}, TrustedProxiesCA: [][]byte{der}})
+	f.out["sh -c if [ -f '.boks/_server/history/3.json' ]"] = "present\n" + string(old)
+	if err := CheckServerRollback(context.Background(), f, 3, false); err == nil || !strings.Contains(err.Error(), "revision 3: trusted_proxies_ca: certificate 1 (CN=expired CA) is valid from") {
+		t.Errorf("want the rollback refused, got %v", err)
 	}
 }
 

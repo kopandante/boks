@@ -483,6 +483,9 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("%s: revision: required for apply, a whole number from 1", args[1])
 		}
 		next := policyOf(sc)
+		if err := proxy.CheckCATerm(next, now()); err != nil {
+			return fmt.Errorf("%s: %w", args[1], err)
+		}
 		// The egress login's password comes from the environment, before any server is asked: a missing
 		// one would stop the run halfway down the list.
 		if sc.Egress != nil {

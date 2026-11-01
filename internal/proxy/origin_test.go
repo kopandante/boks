@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // originDir holds the certificates the live test of the origin pull runs with (proxy/gate,
@@ -170,5 +171,22 @@ func TestTrustedString(t *testing.T) {
 	p.TrustedProxiesCA = nil
 	if got := TrustedString(p); got != "X-Forwarded-For trusted from 127.0.0.1/32" {
 		t.Errorf("without: %q", got)
+	}
+}
+
+// Apply and rollback refuse a CA out of force — the proxies in front would be refused at the handshake —
+// and take one in force, or none.
+func TestCheckCATerm(t *testing.T) {
+	p := pulled(t)
+	for _, now := range []time.Time{time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)} {
+		if err := CheckCATerm(p, now); err == nil || !strings.Contains(err.Error(), "trusted_proxies_ca: certificate 1 (CN=boks test origin-pull CA) is valid from") {
+			t.Errorf("at %s: want the CA refused out of force, got %v", now.Format(time.DateOnly), err)
+		}
+	}
+	if err := CheckCATerm(p, time.Now()); err != nil {
+		t.Errorf("want the CA in force taken: %v", err)
+	}
+	if err := CheckCATerm(Policy{}, time.Now()); err != nil {
+		t.Errorf("want a policy without a CA taken: %v", err)
 	}
 }

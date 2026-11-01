@@ -15,7 +15,8 @@ Base: 5777849 | Branch: feat/aop-origin-pull
 
 ## Acceptance Criteria
 - AC1: `trusted_proxies_ca` в server.yml — PEM из одного или нескольких CERTIFICATE; ключ, мусор,
-  сертификат вне срока действия и поле без `trusted_proxies` — отказ; в политике — DER.
+  пустое поле и поле без `trusted_proxies` — отказ; сертификат вне срока действия — отказ apply и
+  rollback (status работает); в политике — DER.
 - AC2: с CA сервер :443 получает `tls_connection_policies`: адреса `trusted_proxies` — `require_and_verify`
   по inline-пулу CA, остальные — пустая политика; `strict_sni_host: false`; доверие заголовкам на :443.
 - AC3: живой Caddy: адрес прокси с сертификатом CA → приложение видит адрес из заголовка; без сертификата

@@ -216,6 +216,31 @@ func TestPolicyOfCarriesTheTrustedProxiesCA(t *testing.T) {
 	}
 }
 
+// Apply refuses a CA out of force before any server is asked: the proxies in front would be refused at
+// the handshake on every server of the file.
+func TestServerApplyRefusesACAOutOfForce(t *testing.T) {
+	pemBytes, err := os.ReadFile("../../proxy/gate/testdata/originpull/ca.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "server.yml")
+	doc := "servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\ntrusted_proxies_ca: |\n  " +
+		strings.ReplaceAll(strings.TrimSpace(string(pemBytes)), "\n", "\n  ") + "\n"
+	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var seq []string
+	a := &recorder{seq: &seq, name: "a"}
+	fleet(t, map[string]*recorder{"a": a}, func() time.Time { return time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC) })
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "trusted_proxies_ca: certificate 1 (CN=boks test origin-pull CA) is valid from") {
+		t.Errorf("want the apply refused, got %d: %s", code, errw.String())
+	}
+	if len(a.calls) > 0 {
+		t.Errorf("want no server asked: %v", a.calls)
+	}
+}
+
 // The firewall step runs after the policy is on every server, and on every server whatever fails: a's
 // firewall cannot be read, b's is still changed, and the error names a.
 func TestServerApplyKeepsTheHairpinOnEveryServer(t *testing.T) {

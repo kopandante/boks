@@ -160,18 +160,18 @@ func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
 func (s *Server) TrustedPrefixes() []netip.Prefix { return prefixes(s.TrustedProxies) }
 
 // TrustedProxiesCerts are TrustedProxiesCA as DER certificates, in the order written; none without it.
-// A validated server.yml parses; its term is not judged again here, so a certificate running out between
-// the check and this read cannot drop the CA from the policy without a word.
+// A validated server.yml parses.
 func (s *Server) TrustedProxiesCerts() [][]byte {
-	certs, _ := parseCAs(s.TrustedProxiesCA, time.Time{})
+	certs, _ := parseCAs(s.TrustedProxiesCA)
 	return certs
 }
 
-// parseCAs reads the certificates of pem: CERTIFICATE blocks and nothing else, at least one, each one
-// a certificate valid at now (unless now is zero). An expired one would refuse every connection of the
-// proxies in front. Text around or between the blocks is refused, and so is a block pem.Decode would
-// skip as broken: whatever else was pasted there — a key, half a certificate — is not a CA.
-func parseCAs(data string, now time.Time) ([][]byte, error) {
+// parseCAs reads the certificates of pem: CERTIFICATE blocks and nothing else, at least one. Text around
+// or between the blocks is refused, and so is a block pem.Decode would skip as broken: whatever else was
+// pasted there — a key, half a certificate — is not a CA. Their term is judged by apply and rollback
+// (proxy.CheckCATerm), not here: an expired CA must not lock every `boks server` command — status, the
+// rollback to a revision without it — out of the server it took down.
+func parseCAs(data string) ([][]byte, error) {
 	junk := errors.New("want one or more PEM certificates (-----BEGIN CERTIFICATE-----) and nothing else")
 	var certs [][]byte
 	rest := bytes.TrimSpace([]byte(data))
@@ -185,14 +185,10 @@ func parseCAs(data string, now time.Time) ([][]byte, error) {
 		}
 		rest = bytes.TrimSpace(next)
 		if b.Type != "CERTIFICATE" {
-			return nil, fmt.Errorf("a %s block; only certificates go here — never a key", b.Type)
+			return nil, fmt.Errorf("a %s block; only CERTIFICATE blocks go here — never a key", b.Type)
 		}
-		c, err := x509.ParseCertificate(b.Bytes)
-		if err != nil {
+		if _, err := x509.ParseCertificate(b.Bytes); err != nil {
 			return nil, fmt.Errorf("certificate %d: %w", len(certs)+1, err)
-		}
-		if !now.IsZero() && (now.After(c.NotAfter) || now.Before(c.NotBefore)) {
-			return nil, fmt.Errorf("certificate %d (%s) is valid from %s to %s only", len(certs)+1, c.Subject, c.NotBefore.Format(time.DateOnly), c.NotAfter.Format(time.DateOnly))
 		}
 		certs = append(certs, b.Bytes)
 	}
@@ -487,8 +483,7 @@ func (s *Server) validate() error {
 	return nil
 }
 
-// validateCA checks the trusted proxies' CA: certificates alone, in force, beside the proxies they
-// are asked of.
+// validateCA checks the trusted proxies' CA: certificates alone, beside the proxies they are asked of.
 func (s *Server) validateCA() error {
 	if s.TrustedProxiesCA == "" {
 		return nil
@@ -496,7 +491,7 @@ func (s *Server) validateCA() error {
 	if len(s.TrustedProxies) == 0 {
 		return errors.New("no trusted_proxies to ask a certificate of")
 	}
-	_, err := parseCAs(s.TrustedProxiesCA, time.Now())
+	_, err := parseCAs(s.TrustedProxiesCA)
 	return err
 }
 

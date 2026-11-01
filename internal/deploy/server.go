@@ -149,6 +149,9 @@ func CheckServerRollback(ctx context.Context, r remote.Runner, rev int, force bo
 		return err
 	}
 	p.Revision = rev
+	if err := proxy.CheckCATerm(p, time.Now()); err != nil {
+		return fmt.Errorf("revision %d: %w", rev, err)
+	}
 	if err := CheckGateTransition(cur, p, force); err != nil {
 		return err
 	}
