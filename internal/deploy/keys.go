@@ -17,8 +17,9 @@ const authorizedKeys = ".ssh/authorized_keys"
 // The block of authorized_keys boks keeps: the deploy keys of server.yml (#154, stage 3), each bound to
 // `boks deploy-hook <app>`. Every line outside it is the server's own, and kept byte for byte.
 const (
-	keysBegin = "# boks deploy-hook keys: begin (written by boks server apply from server.yml; edit that, not these lines)"
-	keysEnd   = "# boks deploy-hook keys: end"
+	keysMark  = "# boks deploy-hook keys: "
+	keysBegin = keysMark + "begin (written by boks server apply from server.yml; edit that, not these lines)"
+	keysEnd   = keysMark + "end"
 )
 
 // HookLine is the authorized_keys line of app's deploy key: the key runs `boks deploy-hook <app>` and
@@ -28,10 +29,21 @@ func HookLine(app, key string) string {
 }
 
 // PutDeployKeys makes keys — by app, each as config.DeployKey writes it — the deploy keys authorized_keys
-// holds: boks's block written again, every other line left as it is. A file without the block and no
-// keys is not touched. An authorized_keys that is a link, or a block with no end, is refused: rewritten,
-// the one would replace the file the link names with a copy, the other would take every line after it.
+// holds: boks's block written again, every other line left as it is. Without keys, a file with no line of
+// boks's block is not touched — nor read, so a server that keeps no deploy keys applies whatever its
+// authorized_keys is, a link or a file its user cannot read. An authorized_keys that is a link, or a block
+// with no end, is refused: rewritten, the one would replace the file the link names with a copy, the other
+// would take every line after it.
 func PutDeployKeys(ctx context.Context, r remote.Runner, log io.Writer, keys map[string]string) error {
+	if len(keys) == 0 {
+		out, err := r.Run(ctx, "sh", "-c", "grep -qF "+remote.Quote(keysMark)+" "+authorizedKeys+" 2>/dev/null && echo block; true")
+		if err != nil {
+			return fmt.Errorf("deploy keys: reading %s: %w", authorizedKeys, err)
+		}
+		if out != "block" {
+			return nil
+		}
+	}
 	out, err := r.Run(ctx, "sh", "-c", "if [ -L "+authorizedKeys+" ]; then echo link; elif [ -f "+authorizedKeys+" ]; then echo present && cat "+
 		authorizedKeys+" && echo .; else echo absent; fi")
 	if err != nil {

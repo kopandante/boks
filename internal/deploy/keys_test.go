@@ -171,3 +171,40 @@ func TestPutDeployKeysRefusesAFileItCannotRead(t *testing.T) {
 		t.Errorf("changed: %q", keysFile(t, h))
 	}
 }
+
+// A server without deploy keys applies whatever its authorized_keys is — a link, a file its user cannot
+// read — as before deploy keys were: without a line of boks's block there is nothing to take out.
+func TestPutDeployKeysWithoutKeysLeavesAnyFile(t *testing.T) {
+	h := newHome(t)
+	writeKeys(t, h, "own\n")
+	real := filepath.Join(h.dir, ".ssh/real")
+	if err := os.Rename(filepath.Join(h.dir, authorizedKeys), real); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(h.dir, authorizedKeys)); err != nil {
+		t.Fatal(err)
+	}
+	if err := PutDeployKeys(context.Background(), h, io.Discard, nil); err != nil {
+		t.Errorf("link: %v", err)
+	}
+	// A link that holds boks's block is still refused: taking the block out would write over the link.
+	if err := os.WriteFile(real, []byte("own\n"+keysBegin+"\n"+keysEnd+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PutDeployKeys(context.Background(), h, io.Discard, nil); err == nil || !strings.Contains(err.Error(), "is a link") {
+		t.Errorf("link with the block: %v", err)
+	}
+	if os.Geteuid() == 0 {
+		return
+	}
+	u := newHome(t)
+	writeKeys(t, u, "own\n")
+	p := filepath.Join(u.dir, authorizedKeys)
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(p, 0o600) })
+	if err := PutDeployKeys(context.Background(), u, io.Discard, nil); err != nil {
+		t.Errorf("unreadable: %v", err)
+	}
+}
