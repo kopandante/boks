@@ -416,6 +416,11 @@ func TestParseServerTrustedProxiesCARejects(t *testing.T) {
 		{trusted + caPEM(t, "client.key"), "trusted_proxies_ca: a EC PRIVATE KEY block; only certificates go here"},
 		{trusted + "trusted_proxies_ca: cloudflare\n", "trusted_proxies_ca: want one or more PEM certificates"},
 		{trusted + caPEM(t, "ca.pem") + "  trailing\n", "want one or more PEM certificates"},
+		{trusted + strings.Replace(caPEM(t, "ca.pem"), "|\n  ", "|\n  subject=CN boks\n  ", 1), "want one or more PEM certificates"},
+		{trusted + caPEM(t, "ca.pem") + "  between\n  " + strings.TrimPrefix(caPEM(t, "other-ca.pem"), "trusted_proxies_ca: |\n  "), "want one or more PEM certificates"},
+		// A key whose base64 is broken, which pem.Decode skips for the certificate after it.
+		{trusted + "trusted_proxies_ca: |\n  -----BEGIN EC PRIVATE KEY-----\n  !!!!\n  -----END EC PRIVATE KEY-----\n  " +
+			strings.TrimPrefix(caPEM(t, "ca.pem"), "trusted_proxies_ca: |\n  "), "want one or more PEM certificates"},
 		{trusted + "trusted_proxies_ca: |\n  -----BEGIN CERTIFICATE-----\n  AAAA\n  -----END CERTIFICATE-----\n", "trusted_proxies_ca: certificate 1:"},
 	} {
 		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -430,5 +435,9 @@ func TestParseServerTrustedProxiesCARejects(t *testing.T) {
 		if _, err := parseCAs(string(b), now); err == nil || !strings.Contains(err.Error(), "is valid from") {
 			t.Errorf("at %s: want the certificate refused out of force, got %v", now.Format(time.DateOnly), err)
 		}
+	}
+	// The policy's read does not judge the term again: validated, the CA is never dropped from it.
+	if certs, err := parseCAs(string(b), time.Time{}); err != nil || len(certs) != 1 {
+		t.Errorf("without a time: want the certificate, got %d %v", len(certs), err)
 	}
 }

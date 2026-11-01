@@ -160,23 +160,30 @@ func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
 func (s *Server) TrustedPrefixes() []netip.Prefix { return prefixes(s.TrustedProxies) }
 
 // TrustedProxiesCerts are TrustedProxiesCA as DER certificates, in the order written; none without it.
-// A validated server.yml parses.
+// A validated server.yml parses; its term is not judged again here, so a certificate running out between
+// the check and this read cannot drop the CA from the policy without a word.
 func (s *Server) TrustedProxiesCerts() [][]byte {
-	certs, _ := parseCAs(s.TrustedProxiesCA, time.Now())
+	certs, _ := parseCAs(s.TrustedProxiesCA, time.Time{})
 	return certs
 }
 
 // parseCAs reads the certificates of pem: CERTIFICATE blocks and nothing else, at least one, each one
-// a certificate valid at now. An expired one would refuse every connection of the proxies in front.
+// a certificate valid at now (unless now is zero). An expired one would refuse every connection of the
+// proxies in front. Text around or between the blocks is refused, and so is a block pem.Decode would
+// skip as broken: whatever else was pasted there — a key, half a certificate — is not a CA.
 func parseCAs(data string, now time.Time) ([][]byte, error) {
+	junk := errors.New("want one or more PEM certificates (-----BEGIN CERTIFICATE-----) and nothing else")
 	var certs [][]byte
-	rest := []byte(data)
-	for {
-		var b *pem.Block
-		b, rest = pem.Decode(rest)
-		if b == nil {
-			break
+	rest := bytes.TrimSpace([]byte(data))
+	for len(rest) > 0 {
+		if !bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
+			return nil, junk
 		}
+		b, next := pem.Decode(rest)
+		if b == nil || bytes.Count(rest[:len(rest)-len(next)], []byte("-----BEGIN ")) != 1 {
+			return nil, junk
+		}
+		rest = bytes.TrimSpace(next)
 		if b.Type != "CERTIFICATE" {
 			return nil, fmt.Errorf("a %s block; only certificates go here — never a key", b.Type)
 		}
@@ -184,13 +191,13 @@ func parseCAs(data string, now time.Time) ([][]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("certificate %d: %w", len(certs)+1, err)
 		}
-		if now.After(c.NotAfter) || now.Before(c.NotBefore) {
+		if !now.IsZero() && (now.After(c.NotAfter) || now.Before(c.NotBefore)) {
 			return nil, fmt.Errorf("certificate %d (%s) is valid from %s to %s only", len(certs)+1, c.Subject, c.NotBefore.Format(time.DateOnly), c.NotAfter.Format(time.DateOnly))
 		}
 		certs = append(certs, b.Bytes)
 	}
-	if len(bytes.TrimSpace(rest)) > 0 || len(certs) == 0 {
-		return nil, errors.New("want one or more PEM certificates (-----BEGIN CERTIFICATE-----) and nothing else")
+	if len(certs) == 0 {
+		return nil, junk
 	}
 	return certs, nil
 }

@@ -37,7 +37,7 @@ type Policy struct {
 	Block    []BotBlock `json:"block,omitempty"`
 	Egress   *Egress    `json:"egress,omitempty"`
 	// TrustedProxies are the CIDR ranges of the proxies in front of boks whose X-Forwarded-For the
-	// servers on 80 and 443 keep; none trusts no one.
+	// servers on 80 and 443 keep — the one on 443 alone, with TrustedProxiesCA; none trusts no one.
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 	// TrustedProxiesCA are the DER certificates of the CA a trusted proxy's client certificate must
 	// chain to — Cloudflare's Authenticated Origin Pulls (originPull). A policy with them needs
