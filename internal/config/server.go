@@ -6,7 +6,9 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -249,8 +251,46 @@ const DefaultEgressPort = 3128
 // Prefixes are Allow as CIDR ranges, an address alone as the range of that one address.
 func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
 
-// TrustedPrefixes are TrustedProxies as CIDR ranges, as Prefixes are Allow.
-func (s *Server) TrustedPrefixes() []netip.Prefix { return prefixes(s.TrustedProxies) }
+// TrustedPrefixes are TrustedProxies as CIDR ranges, as Prefixes are Allow, less WorkerClientIP: a
+// range that holds it is written as the ranges around it.
+func (s *Server) TrustedPrefixes() []netip.Prefix {
+	var out []netip.Prefix
+	for _, p := range prefixes(s.TrustedProxies) {
+		out = append(out, without(p, WorkerClientIP)...)
+	}
+	return out
+}
+
+// WorkerClientIP is the address Cloudflare writes for the client of a Worker's request to another
+// zone (Cloudflare's HTTP headers, CF-Connecting-IP in Worker subrequests): inside its own ranges, and
+// so, trusted, an address Caddy would read past to the one the Worker wrote before it. Never trusted,
+// it is the client of such a request — the Worker, not whom it names. The documentation names this one
+// address and no range.
+var WorkerClientIP = netip.MustParseAddr("2a06:98c0:3600::103")
+
+// without is p less the address a: p itself when it does not hold a, none when it is a alone, else the
+// halves of p down to a's own, each but the one holding a — 128 less p's bits ranges for IPv6.
+func without(p netip.Prefix, a netip.Addr) []netip.Prefix {
+	if !p.Contains(a) {
+		return []netip.Prefix{p}
+	}
+	var out []netip.Prefix
+	for bits := p.Bits(); bits < a.BitLen(); bits++ {
+		// The half of the range at bits+1 that does not hold a: a with bit bits flipped, masked.
+		b := a.As16()
+		i := bits
+		if a.Is4() {
+			i += 96
+		}
+		b[i/8] ^= 0x80 >> (i % 8)
+		other := netip.AddrFrom16(b)
+		if a.Is4() {
+			other = other.Unmap()
+		}
+		out = append(out, netip.PrefixFrom(other, bits+1).Masked())
+	}
+	return out
+}
 
 // TrustedProxiesCerts are TrustedProxiesCA as DER certificates, in the order written; none without it.
 // A validated server.yml parses.
@@ -283,12 +323,33 @@ func parseCAs(data string) ([][]byte, error) {
 		if _, err := x509.ParseCertificate(b.Bytes); err != nil {
 			return nil, fmt.Errorf("certificate %d: %w", len(certs)+1, err)
 		}
+		if err := CheckOwnCA(b.Bytes); err != nil {
+			return nil, fmt.Errorf("certificate %d: %w", len(certs)+1, err)
+		}
 		certs = append(certs, b.Bytes)
 	}
 	if len(certs) == 0 {
 		return nil, junk
 	}
 	return certs, nil
+}
+
+// sharedOriginPullCA is the SHA-256 of Cloudflare's own origin-pull CA (CN origin-pull.cloudflare.net,
+// 2019–2029; developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem), the CA of global
+// Authenticated Origin Pulls.
+const sharedOriginPullCA = "9a1ac2b4be15f9f27eee20a734cba4e9898f61001b3bd7c84b69b56a3e25a2b9"
+
+// CheckOwnCA refuses Cloudflare's shared origin-pull CA: every zone of every account that turns global
+// Authenticated Origin Pulls on presents a certificate of it, so with it a Worker of anyone's account
+// passes the check, its zone set up the same. Only a zone's own client certificate, uploaded for
+// zone-level pulls, proves the request came through that zone.
+func CheckOwnCA(der []byte) error {
+	sum := sha256.Sum256(der)
+	if hex.EncodeToString(sum[:]) == sharedOriginPullCA {
+		return errors.New("Cloudflare's shared origin-pull CA (origin-pull.cloudflare.net) proves only that a request came through some " +
+			"Cloudflare zone, anyone's; upload a client certificate of your own for zone-level Authenticated Origin Pulls and put its CA here")
+	}
+	return nil
 }
 
 // rangeOf is an address or a CIDR range as a range, an address alone the range of that one address;

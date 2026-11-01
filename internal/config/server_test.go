@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net/netip"
 	"os"
 	"reflect"
 	"strings"
@@ -459,4 +460,74 @@ func expiredCAPEM(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+// Cloudflare's shared origin-pull CA is refused, alone or beside a CA of one's own: any zone with
+// global pulls on presents it.
+func TestParseServerRefusesTheSharedOriginPullCA(t *testing.T) {
+	trusted := "servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n"
+	own := caPEM(t, "ca.pem")
+	shared := caPEM(t, "cloudflare-shared-ca.pem")
+	for _, doc := range []string{trusted + shared, trusted + own + "  " + strings.TrimPrefix(shared, "trusted_proxies_ca: |\n  ")} {
+		_, err := ParseServer([]byte(doc))
+		if err == nil || !strings.Contains(err.Error(), "Cloudflare's shared origin-pull CA") || !strings.Contains(err.Error(), "zone-level") {
+			t.Errorf("want the shared CA refused, got %v", err)
+		}
+	}
+	if _, err := ParseServer([]byte(trusted + own)); err != nil {
+		t.Errorf("a CA of one's own: %v", err)
+	}
+}
+
+// The Worker's client address is cut out of a trusted range that holds it: the ranges around it cover
+// the rest of the range and nothing else; a range without it stays as written; the address alone goes.
+func TestTrustedPrefixesLeaveTheWorkerOut(t *testing.T) {
+	s, err := ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20, \"2a06:98c0::/29\", \"2400:cb00::/32\", \"2a06:98c0:3600::103\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.TrustedPrefixes()
+	if got[0].String() != "173.245.48.0/20" || got[len(got)-1].String() != "2400:cb00::/32" {
+		t.Errorf("ranges without the address changed: %v … %v", got[0], got[len(got)-1])
+	}
+	cut := got[1 : len(got)-1]
+	if len(cut) != 128-29 {
+		t.Fatalf("want %d ranges around the address, got %d", 128-29, len(cut))
+	}
+	whole := netip.MustParsePrefix("2a06:98c0::/29")
+	for _, p := range cut {
+		if p.Contains(WorkerClientIP) || !whole.Contains(p.Addr()) || p.Bits() < 30 {
+			t.Errorf("%v: holds the address or lies outside the range", p)
+		}
+	}
+	// Disjoint, one range per length, so together they are the range less one address.
+	seen := map[int]bool{}
+	for _, p := range cut {
+		if seen[p.Bits()] {
+			t.Errorf("two ranges of /%d", p.Bits())
+		}
+		seen[p.Bits()] = true
+	}
+	for _, a := range []string{"2a06:98c0:3600::102", "2a06:98c0:3600::104", "2a06:98c0::1", "2a06:98c7:ffff:ffff:ffff:ffff:ffff:ffff", "2a06:98c0:3600::"} {
+		if n := countHolding(cut, netip.MustParseAddr(a)); n != 1 {
+			t.Errorf("%s: held by %d ranges, want 1", a, n)
+		}
+	}
+	if countHolding(got, WorkerClientIP) != 0 {
+		t.Errorf("the Worker's address is still trusted")
+	}
+	// IPv4 the same way: 10.0.0.0/30 less 10.0.0.1.
+	if v4 := without(netip.MustParsePrefix("10.0.0.0/30"), netip.MustParseAddr("10.0.0.1")); fmt.Sprint(v4) != "[10.0.0.2/31 10.0.0.0/32]" {
+		t.Errorf("IPv4: %v", v4)
+	}
+}
+
+func countHolding(ps []netip.Prefix, a netip.Addr) int {
+	n := 0
+	for _, p := range ps {
+		if p.Contains(a) {
+			n++
+		}
+	}
+	return n
 }
