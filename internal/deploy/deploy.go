@@ -877,10 +877,42 @@ func missing(ctx context.Context, r remote.Runner, ref string) bool {
 // pull is the one place an app's image is fetched, for a deploy and for a rollback alike. An image on
 // the private registry goes through the login; any other — a public image, or a release recorded
 // before the image moved — is pulled as it always was.
+//
+// A pull that failed on the network (registryDown) is tried again, pullTries in all, pullPause
+// apart: Depot's layer store drops out from Russia for a minute or two at a time (todo#437). A refusal
+// of the token, an image that is not there, and any other error refuse at once.
 func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabled bool, login *Login) error {
 	if !enabled {
 		return nil
 	}
+	for try := 1; ; try++ {
+		err := pullOnce(ctx, r, log, ref, login)
+		if err == nil || !registryDown(err) {
+			return err
+		}
+		if try == pullTries {
+			return fmt.Errorf("%w\nthe pull failed on the network %d times, %s apart: the registry or this server's link to it", err, pullTries, pullPause)
+		}
+		// The error may come over several lines (the login's ends in what was not changed): one line
+		// in the log says it, and the retry after it.
+		fmt.Fprintf(log, "pull %s failed on the network (%s); trying again in %s (%d of %d)\n", ref,
+			strings.ReplaceAll(err.Error(), "\n", "; "), pullPause, try+1, pullTries)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w; stopped waiting to try again: %w", err, ctx.Err())
+		case <-time.After(pullPause):
+		}
+	}
+}
+
+// pullTries and pullPause are how often and how far apart a pull that failed on the network is made:
+// three tries over four minutes outlast the outages seen (todo#437).
+var (
+	pullTries = 3
+	pullPause = 2 * time.Minute
+)
+
+func pullOnce(ctx context.Context, r remote.Runner, log io.Writer, ref string, login *Login) error {
 	if login != nil && login.Logs(ref) {
 		fmt.Fprintf(log, "pull %s (logged in to %s for the pull)\n", ref, login.Host)
 		return pullWithLogin(ctx, r, login, ref)
@@ -888,6 +920,29 @@ func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabl
 	fmt.Fprintf(log, "pull %s\n", ref)
 	_, err := r.Run(ctx, "docker", "pull", ref)
 	return err
+}
+
+// registryDown reports a pull that failed on the network, in docker's words, and was not refused: the
+// token turned down or the image not there are answers, and trying again changes neither. A reset or
+// cut connection may be boks's own ssh to the server rather than the registry; trying that again is
+// as safe, so the words do not tell the two apart and the refusal names both.
+func registryDown(err error) bool {
+	if refusedToken(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"manifest unknown", "not found"} {
+		if strings.Contains(msg, s) {
+			return false
+		}
+	}
+	for _, s := range []string{"tls handshake timeout", "i/o timeout", "connection reset by peer", "unexpected eof",
+		"timeout awaiting response headers", "request canceled while waiting for connection", "client.timeout exceeded"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // container is a previously deployed container of this app: its name, and the two labels that say
