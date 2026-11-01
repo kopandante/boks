@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kopandante/boks/internal/config"
 	"github.com/kopandante/boks/internal/proxy"
 	"github.com/kopandante/boks/internal/release"
 	"github.com/kopandante/boks/internal/remote"
@@ -168,6 +169,12 @@ func policyOfRevision(ctx context.Context, r remote.Runner, rev int) (proxy.Poli
 	p, ok, err := proxy.History(ctx, r, rev)
 	if err == nil && !ok {
 		err = fmt.Errorf("this server never applied revision %d; nothing was changed", rev)
+	}
+	// A revision applied before boks cut Cloudflare's Worker address out of the trusted ranges (#142)
+	// trusts it whole; rolled back to, it trusts what apply would write now (boks#144). Cut to nothing,
+	// the built config trusts no proxy, as with none written.
+	if p.TrustedProxies != nil {
+		p.TrustedProxies = config.WithoutWorker(p.TrustedProxies)
 	}
 	return p, err
 }

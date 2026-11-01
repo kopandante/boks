@@ -257,9 +257,21 @@ func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
 
 // TrustedPrefixes are TrustedProxies as CIDR ranges, as Prefixes are Allow, less WorkerClientIP: a
 // range that holds it is written as the ranges around it.
-func (s *Server) TrustedPrefixes() []netip.Prefix {
+func (s *Server) TrustedPrefixes() []netip.Prefix { return untrustWorker(s.TrustedProxies) }
+
+// WithoutWorker is list, ranges written as a policy holds them, less WorkerClientIP — what a revision
+// applied before boks cut the address trusts once rolled back to (boks#144).
+func WithoutWorker(list []string) []string {
+	var out []string
+	for _, p := range untrustWorker(list) {
+		out = append(out, p.String())
+	}
+	return out
+}
+
+func untrustWorker(list []string) []netip.Prefix {
 	var out []netip.Prefix
-	for _, p := range prefixes(s.TrustedProxies) {
+	for _, p := range prefixes(list) {
 		out = append(out, without(p, WorkerClientIP)...)
 	}
 	return out
