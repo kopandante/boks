@@ -25,5 +25,5 @@ Base: 8f0c85a | Branch: fix/gate-spared-googlebot
 - [x] 1 план
 - [x] 2 реализация
 - [x] 3 PR (#155)
-- [ ] 4 review-loop green
+- [x] 4 review-loop green
 - [ ] 5 merge
