@@ -587,6 +587,11 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			}
 			next.GateSecrets = secrets
 		}
+		// The apps the servers keep, read whole — boks.yml, environment, token — before any server is asked.
+		apps, err := sc.LoadApps(lookupEnv, true)
+		if err != nil {
+			return fmt.Errorf("%s: %w", args[1], err)
+		}
 		if err := askAll(func(ctx context.Context, r remote.Runner) error {
 			if err := deploy.CheckApply(ctx, r, next, force); err != nil {
 				return err
@@ -611,6 +616,16 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		if err := askAll(func(ctx context.Context, r remote.Runner) error { return proxy.CheckServerBoks(ctx, r, next) }); err != nil {
 			return err
 		}
+		// The apps after the server's boks, which deploys from them, and before the policy. A server.yml
+		// without boks: has no apps, and leaves the servers' files alone.
+		if sc.Boks != nil {
+			for _, s := range sc.Servers {
+				fmt.Fprintf(out, "== %s\n", s)
+				if err := deploy.PutApps(ctx, connect(s), out, config.AppsOn(apps, s), o); err != nil {
+					return fmt.Errorf("%s: %w", s, err)
+				}
+			}
+		}
 		if err := on(func(ctx context.Context, r remote.Runner) error { return deploy.ApplyServer(ctx, r, out, next, o) }); err != nil {
 			return err
 		}
@@ -629,7 +644,15 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return on(func(ctx context.Context, r remote.Runner) error { return deploy.RollbackServer(ctx, r, out, rev, o) })
 	case args[0] == "status" && len(args) == 2:
+		// The apps by their boks.yml alone: status reads no secret. One that does not load is a line.
+		apps, appsErr := sc.LoadApps(lookupEnv, false)
+		if appsErr != nil {
+			fmt.Fprintf(out, "! %v\n", appsErr)
+		}
+		server := 0
 		return on(func(ctx context.Context, r remote.Runner) error {
+			name := sc.Servers[server]
+			server++
 			p, open, drift, err := deploy.ServerStatus(ctx, r)
 			if err != nil {
 				return err
@@ -665,6 +688,15 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			}
 			for _, d := range drift {
 				fmt.Fprintf(out, "  ! %s\n", d)
+			}
+			if sc.Boks != nil && appsErr == nil {
+				appDrift, err := deploy.AppsDrift(ctx, r, config.AppsOn(apps, name))
+				if err != nil {
+					appDrift = []string{fmt.Sprintf("could not compare the apps with server.yml: %v", err)}
+				}
+				for _, d := range appDrift {
+					fmt.Fprintf(out, "  ! %s\n", d)
+				}
 			}
 			if open != nil {
 				fmt.Fprintf(out, "  ! %s started %s and never finished; run it again\n", open.Action, open.StartedAt.Format(time.RFC3339))

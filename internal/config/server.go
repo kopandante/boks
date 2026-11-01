@@ -63,7 +63,13 @@ type Server struct {
 	// its sha256 for each architecture written here, so the version and the bytes pass review as the
 	// proxy's image does. `server install` and `server apply` bring it to the server and check it there.
 	Boks *ServerBoks `yaml:"boks"`
+	// Apps are the apps whose config and environment the servers keep (#154, stage 2): by app name, the
+	// path of its boks.yml, relative to server.yml. `server apply` writes them; the server's own boks
+	// deploys from them, so it needs Boks.
+	Apps map[string]string `yaml:"apps"`
 
+	// dir is the directory server.yml is in: the apps' paths are relative to it.
+	dir string
 	// setsUnread is a server.yml read by LoadServerForFleet: range_sets kept as written, no file of them
 	// read, none checked.
 	setsUnread bool
@@ -633,6 +639,7 @@ func parseServerIn(data []byte, dir string, sets bool) (*Server, error) {
 	// The fleet's load keeps range_sets as written, for the rule that a policy needs its revision, but
 	// reads no file of them and checks none.
 	s.setsUnread = !sets
+	s.dir = dir
 	if sets {
 		if err := s.readRangeSets(dir); err != nil {
 			return nil, err
@@ -656,6 +663,17 @@ func (s *Server) validate() error {
 	if s.Boks != nil {
 		if err := s.Boks.validate(); err != nil {
 			return fmt.Errorf("boks: %w", err)
+		}
+	}
+	if len(s.Apps) > 0 && s.Boks == nil {
+		return errors.New("apps: the server's own boks deploys them, so boks: is required")
+	}
+	for name, p := range s.Apps {
+		if !nameRe.MatchString(name) || name == "bin" {
+			return fmt.Errorf("apps: %q must match %s and not be bin", name, nameRe)
+		}
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("apps: %s: the path of its boks.yml is required", name)
 		}
 	}
 	if s.Egress != nil {

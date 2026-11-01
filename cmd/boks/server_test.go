@@ -880,3 +880,71 @@ func TestServerRollbackAsksEveryServersBoksFirst(t *testing.T) {
 		}
 	}
 }
+
+// apply writes the apps of server.yml after the server's boks and before its policy, on the servers
+// each one's boks.yml names (#154, stage 2).
+func TestApplyWritesTheAppsBetweenBoksAndPolicy(t *testing.T) {
+	build := []byte("a build")
+	s := sha256.Sum256(build)
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { return build, nil }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	shop := "app: shop\nimage: ghcr.io/x/shop:v1\nservers: [a]\nenv: {A: \"1\"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "shop.yml"), []byte(shop), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+
+		"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\napps: {shop: shop.yml}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol := "present\n{\"revision\":1,\"floor\":1}"
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
+	run([]string{"server", "apply", path}, io.Discard, io.Discard)
+	boks, app, env, policy := -1, -1, -1, -1
+	for i, in := range a.stdin {
+		switch {
+		case in == string(build) && boks < 0:
+			boks = i
+		case in == shop:
+			app = i
+		case in == "A=1\n":
+			env = i
+		case strings.Contains(in, `"action":"server apply"`) && policy < 0:
+			policy = i
+		}
+	}
+	if boks < 0 || app < boks || env < app || policy < env {
+		t.Errorf("boks at %d, boks.yml at %d, env at %d, the policy at %d", boks, app, env, policy)
+	}
+	for _, in := range b.stdin {
+		if in == shop {
+			t.Errorf("shop written on b, which its boks.yml does not name")
+		}
+	}
+}
+
+// An app that does not load refuses the apply before any server is asked.
+func TestApplyRefusesAnAppBeforeAnyServer(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shop.yml"), []byte("app: shop\nimage: ghcr.io/x/shop:v1\nservers: [a]\nregistry: {host: ghcr.io, token_env: NO_SUCH_TOKEN_X}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+
+		"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\napps: {shop: shop.yml}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &recorder{server: server{}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "apps: shop: registry.token_env: NO_SUCH_TOKEN_X") {
+		t.Fatalf("apply: %d %q", code, errw.String())
+	}
+	if len(a.calls) > 0 {
+		t.Errorf("a server was asked: %v", a.calls)
+	}
+}
