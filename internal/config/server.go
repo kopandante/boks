@@ -6,6 +6,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +37,12 @@ type Server struct {
 	// X-Forwarded-For it brings, with the proxy's address added after it. Without any, boks trusts no
 	// one, and every app sees the address of the connection (#48).
 	TrustedProxies []string `yaml:"trusted_proxies"`
+	// TrustedProxiesCA, when given, is the PEM of the CA certificates a trusted proxy's client
+	// certificate must chain to — Cloudflare's Authenticated Origin Pulls. A TLS connection from a
+	// trusted proxy without such a certificate is refused at the handshake; plain HTTP, which can carry
+	// none, has its forwarded headers no longer trusted. Visitors from other addresses are not asked for
+	// a certificate.
+	TrustedProxiesCA string `yaml:"trusted_proxies_ca"`
 	// Ban, when given, has the proxy refuse an address that sends too many requests: 403 on every host
 	// of the server for a while, without the request reaching any app.
 	Ban *Ban `yaml:"ban"`
@@ -150,6 +158,45 @@ func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
 
 // TrustedPrefixes are TrustedProxies as CIDR ranges, as Prefixes are Allow.
 func (s *Server) TrustedPrefixes() []netip.Prefix { return prefixes(s.TrustedProxies) }
+
+// TrustedProxiesCerts are TrustedProxiesCA as DER certificates, in the order written; none without it.
+// A validated server.yml parses.
+func (s *Server) TrustedProxiesCerts() [][]byte {
+	certs, _ := parseCAs(s.TrustedProxiesCA)
+	return certs
+}
+
+// parseCAs reads the certificates of pem: CERTIFICATE blocks and nothing else, at least one. Text around
+// or between the blocks is refused, and so is a block pem.Decode would skip as broken: whatever else was
+// pasted there — a key, half a certificate — is not a CA. Their term is judged by apply and rollback
+// (proxy.CheckCATerm), not here: an expired CA must not lock every `boks server` command — status, the
+// rollback to a revision without it — out of the server it took down.
+func parseCAs(data string) ([][]byte, error) {
+	junk := errors.New("want one or more PEM certificates (-----BEGIN CERTIFICATE-----) and nothing else")
+	var certs [][]byte
+	rest := bytes.TrimSpace([]byte(data))
+	for len(rest) > 0 {
+		if !bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
+			return nil, junk
+		}
+		b, next := pem.Decode(rest)
+		if b == nil || bytes.Count(rest[:len(rest)-len(next)], []byte("-----BEGIN ")) != 1 {
+			return nil, junk
+		}
+		rest = bytes.TrimSpace(next)
+		if b.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("a %s block; only CERTIFICATE blocks go here — never a key", b.Type)
+		}
+		if _, err := x509.ParseCertificate(b.Bytes); err != nil {
+			return nil, fmt.Errorf("certificate %d: %w", len(certs)+1, err)
+		}
+		certs = append(certs, b.Bytes)
+	}
+	if len(certs) == 0 {
+		return nil, junk
+	}
+	return certs, nil
+}
 
 // rangeOf is an address or a CIDR range as a range, an address alone the range of that one address;
 // the bits past the prefix stay as written.
@@ -350,9 +397,15 @@ func ParseServer(data []byte) (*Server, error) {
 	var keys struct {
 		Ban  yaml.Node `yaml:"ban"`
 		Gate yaml.Node `yaml:"gate"`
+		CA   yaml.Node `yaml:"trusted_proxies_ca"`
 	}
 	if err := yaml.Unmarshal(data, &keys); err != nil {
 		return nil, err
+	}
+	// And for the CA: an empty one — its certificate taken out while changing it — would trust the
+	// headers of every connection from the proxies' addresses again.
+	if strings.TrimSpace(s.TrustedProxiesCA) == "" && keys.CA.Kind != 0 {
+		return nil, errors.New("trusted_proxies_ca: empty; write the CA's certificate, or remove the key to trust the proxies by address alone")
 	}
 	if s.Ban == nil && keys.Ban.Kind != 0 {
 		return nil, errors.New("ban: empty; write `ban: {}` for the defaults (300 requests in 1m ban for 24h), or remove the key for no ban")
@@ -373,7 +426,7 @@ func (s *Server) validate() error {
 	}
 	// A file of servers alone — what `boks server install` reads — has no policy to number. One with a
 	// policy needs its revision, and `boks server apply` asks for one either way.
-	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0 || s.Ban != nil || s.Gate != nil) {
+	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0 || s.TrustedProxiesCA != "" || s.Ban != nil || s.Gate != nil) {
 		return errors.New("revision: required, a whole number from 1 that grows by one with every edit")
 	}
 	if s.Egress != nil {
@@ -397,6 +450,9 @@ func (s *Server) validate() error {
 	}
 	if err := checkWrittenAsIPv4(s.TrustedProxies); err != nil {
 		return fmt.Errorf("trusted_proxies: %w", err)
+	}
+	if err := s.validateCA(); err != nil {
+		return fmt.Errorf("trusted_proxies_ca: %w", err)
 	}
 	names := map[string]bool{}
 	for i, b := range s.Bots.Block {
@@ -425,6 +481,18 @@ func (s *Server) validate() error {
 		}
 	}
 	return nil
+}
+
+// validateCA checks the trusted proxies' CA: certificates alone, beside the proxies they are asked of.
+func (s *Server) validateCA() error {
+	if s.TrustedProxiesCA == "" {
+		return nil
+	}
+	if len(s.TrustedProxies) == 0 {
+		return errors.New("no trusted_proxies to ask a certificate of")
+	}
+	_, err := parseCAs(s.TrustedProxiesCA)
+	return err
 }
 
 func (e *Egress) validate() error {

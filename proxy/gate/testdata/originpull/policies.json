@@ -1,0 +1,21 @@
+[
+  {
+    "client_authentication": {
+      "ca": {
+        "provider": "inline",
+        "trusted_ca_certs": [
+          "MIIBYzCCAQigAwIBAgIJAIq5ZMfWEdYlMAoGCCqGSM49BAMCMCMxITAfBgNVBAMMGGJva3MgdGVzdCBvcmlnaW4tcHVsbCBDQTAgFw0yNjExMDEwMzU1MjlaGA8yMTI2MTAwODAzNTUyOVowIzEhMB8GA1UEAwwYYm9rcyB0ZXN0IG9yaWdpbi1wdWxsIENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzyba+gyUgs6mvF2HejRuLQoIQo6DasYRiXESiG5GEo5waPb0tS6VR1H+O9omg10PEQShq3UT0q8GlNtmptaG3KMjMCEwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAgQwCgYIKoZIzj0EAwIDSQAwRgIhAO5afC32793Ds8foI+o6basM9w5TUcn1JtttfSlpOmg2AiEA58M6+EhvEeRxp/SBcMr4lo65oWzppEVuu+S/XTMSD3E="
+        ]
+      },
+      "mode": "require_and_verify"
+    },
+    "match": {
+      "remote_ip": {
+        "ranges": [
+          "127.0.0.1/32"
+        ]
+      }
+    }
+  },
+  {}
+]

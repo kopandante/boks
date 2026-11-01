@@ -90,9 +90,9 @@ func TestADenyMarksFormat9(t *testing.T) {
 	if fs, err := Fragments(context.Background(), d); err != nil || len(fs) != 1 {
 		t.Errorf("want this boks to read past format 9: %+v %v", fs, err)
 	}
-	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", KeyFormat+1)
+	d.files[Dir+"/routes/new.json"] = fmt.Sprintf("%d\n{\"app\": \"new\", \"routes\": []}\n", OriginPullFormat+1)
 	if _, err := Fragments(context.Background(), d); err == nil || !strings.Contains(err.Error(), "newer than this boks") {
-		t.Errorf("want format %d refused, got %v", KeyFormat+1, err)
+		t.Errorf("want format %d refused, got %v", OriginPullFormat+1, err)
 	}
 }
 

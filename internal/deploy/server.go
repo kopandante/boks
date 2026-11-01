@@ -149,6 +149,9 @@ func CheckServerRollback(ctx context.Context, r remote.Runner, rev int, force bo
 		return err
 	}
 	p.Revision = rev
+	if err := proxy.CheckCATerm(p, time.Now()); err != nil {
+		return fmt.Errorf("revision %d: %w", rev, err)
+	}
 	if err := CheckGateTransition(cur, p, force); err != nil {
 		return err
 	}
@@ -225,8 +228,8 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	if e := next.Egress; e != nil {
 		fmt.Fprintf(log, "  egress proxy on port %d for %s\n", e.Port, strings.Join(e.Allow, ", "))
 	}
-	if len(next.TrustedProxies) > 0 {
-		fmt.Fprintf(log, "  X-Forwarded-For trusted from %s\n", strings.Join(next.TrustedProxies, ", "))
+	if line := proxy.TrustedString(next); line != "" {
+		fmt.Fprintf(log, "  %s\n", line)
 	}
 	if b := next.Ban; b != nil {
 		fmt.Fprintf(log, "  %s\n", b)

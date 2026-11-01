@@ -1,10 +1,19 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // habsida is the bot policy Habsida ran as hand-written Traefik files (bot-policy.yml,
@@ -371,4 +380,83 @@ func TestParseServerBanRejects(t *testing.T) {
 			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc), c.want, err)
 		}
 	}
+}
+
+// caPEM is a file of the live test of the origin pull (proxy/gate), indented under trusted_proxies_ca.
+func caPEM(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile("../../proxy/gate/testdata/originpull/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "trusted_proxies_ca: |\n  " + strings.ReplaceAll(strings.TrimSpace(string(b)), "\n", "\n  ") + "\n"
+}
+
+// The trusted proxies' CA is read as its certificates, DER; without it there are none.
+func TestParseServerTrustedProxiesCA(t *testing.T) {
+	both := "servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n" + caPEM(t, "ca.pem") + "  " + strings.TrimPrefix(caPEM(t, "other-ca.pem"), "trusted_proxies_ca: |\n  ")
+	s, err := ParseServer([]byte(both))
+	if err != nil {
+		t.Fatal(err)
+	}
+	certs := s.TrustedProxiesCerts()
+	if len(certs) != 2 {
+		t.Fatalf("want both certificates, got %d", len(certs))
+	}
+	if c, err := x509.ParseCertificate(certs[0]); err != nil || c.Subject.CommonName != "boks test origin-pull CA" {
+		t.Errorf("first certificate: %v %v", c, err)
+	}
+	s, err = ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n"))
+	if err != nil || s.TrustedProxiesCerts() != nil {
+		t.Errorf("want none without the field: %v", err)
+	}
+}
+
+// A CA without proxies to ask, a key, anything but certificates, and an empty one are refused.
+func TestParseServerTrustedProxiesCARejects(t *testing.T) {
+	trusted := "servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n"
+	for _, c := range []struct{ doc, want string }{
+		{"servers: [a]\n" + caPEM(t, "ca.pem"), "revision"},
+		{"servers: [a]\nrevision: 1\n" + caPEM(t, "ca.pem"), "trusted_proxies_ca: no trusted_proxies to ask a certificate of"},
+		{trusted + caPEM(t, "client.key"), "trusted_proxies_ca: a EC PRIVATE KEY block; only CERTIFICATE blocks go here"},
+		{trusted + "trusted_proxies_ca: cloudflare\n", "trusted_proxies_ca: want one or more PEM certificates"},
+		// The key left with its certificate taken out would trust the proxies by address again.
+		{trusted + "trusted_proxies_ca:\n", "trusted_proxies_ca: empty"},
+		{trusted + "trusted_proxies_ca: |\nban: {}\n", "trusted_proxies_ca: empty"},
+		{trusted + "trusted_proxies_ca: \"\"\n", "trusted_proxies_ca: empty"},
+		{trusted + caPEM(t, "ca.pem") + "  trailing\n", "want one or more PEM certificates"},
+		{trusted + strings.Replace(caPEM(t, "ca.pem"), "|\n  ", "|\n  subject=CN boks\n  ", 1), "want one or more PEM certificates"},
+		{trusted + caPEM(t, "ca.pem") + "  between\n  " + strings.TrimPrefix(caPEM(t, "other-ca.pem"), "trusted_proxies_ca: |\n  "), "want one or more PEM certificates"},
+		// A key whose base64 is broken, which pem.Decode skips for the certificate after it.
+		{trusted + "trusted_proxies_ca: |\n  -----BEGIN EC PRIVATE KEY-----\n  !!!!\n  -----END EC PRIVATE KEY-----\n  " +
+			strings.TrimPrefix(caPEM(t, "ca.pem"), "trusted_proxies_ca: |\n  "), "want one or more PEM certificates"},
+		{trusted + "trusted_proxies_ca: |\n  -----BEGIN CERTIFICATE-----\n  AAAA\n  -----END CERTIFICATE-----\n", "trusted_proxies_ca: certificate 1:"},
+	} {
+		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc)[:40], c.want, err)
+		}
+	}
+	// The term is apply's and rollback's to judge (proxy.CheckCATerm): an expired CA is still read, so
+	// status and a rollback away from it run.
+	doc := trusted + "trusted_proxies_ca: |\n  " + strings.ReplaceAll(strings.TrimSpace(expiredCAPEM(t)), "\n", "\n  ") + "\n"
+	if sc, err := ParseServer([]byte(doc)); err != nil || len(sc.TrustedProxiesCerts()) != 1 {
+		t.Errorf("want an expired CA read: %v", err)
+	}
+}
+
+// expiredCAPEM is a CA certificate that ran out in 2001, as PEM.
+func expiredCAPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "expired CA"},
+		NotBefore: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), NotAfter: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
