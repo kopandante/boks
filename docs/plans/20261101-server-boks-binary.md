@@ -28,6 +28,6 @@ apply` и `proxy upgrade` собирают конфиг прокси серве�
 - [x] 0 worktree
 - [x] 1 план (issue #154)
 - [x] 2 реализация
-- [ ] 3 PR
+- [x] 3 PR (#159)
 - [ ] 4 review-loop green
 - [ ] 5 merge
