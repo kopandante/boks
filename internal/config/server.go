@@ -59,6 +59,10 @@ type Server struct {
 	// into the policy, in the groups whose signatures name the set: a revision holds the list it was
 	// applied with, a rollback puts that list back, and an edit of the file changes nothing until applied.
 	RangeSets map[string]RangeSet `yaml:"range_sets"`
+
+	// setsUnread is a server.yml read by LoadServerForFleet: range_sets kept as written, no file of them
+	// read, none checked.
+	setsUnread bool
 }
 
 // RangeSet is one of range_sets: Ranges as written, or read from File.
@@ -253,9 +257,21 @@ func (e *Egress) Prefixes() []netip.Prefix { return prefixes(e.Allow) }
 
 // TrustedPrefixes are TrustedProxies as CIDR ranges, as Prefixes are Allow, less WorkerClientIP: a
 // range that holds it is written as the ranges around it.
-func (s *Server) TrustedPrefixes() []netip.Prefix {
+func (s *Server) TrustedPrefixes() []netip.Prefix { return untrustWorker(s.TrustedProxies) }
+
+// WithoutWorker is list, ranges written as a policy holds them, less WorkerClientIP — what a revision
+// applied before boks cut the address trusts once rolled back to (boks#144).
+func WithoutWorker(list []string) []string {
+	var out []string
+	for _, p := range untrustWorker(list) {
+		out = append(out, p.String())
+	}
+	return out
+}
+
+func untrustWorker(list []string) []netip.Prefix {
 	var out []netip.Prefix
-	for _, p := range prefixes(s.TrustedProxies) {
+	for _, p := range prefixes(list) {
 		out = append(out, without(p, WorkerClientIP)...)
 	}
 	return out
@@ -519,12 +535,21 @@ func (a BotAllow) validatePaths() error {
 var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 
 // LoadServer reads and checks a server.yml.
-func LoadServer(path string) (*Server, error) {
+func LoadServer(path string) (*Server, error) { return loadServer(path, true) }
+
+// LoadServerForFleet is LoadServer for what takes the list of servers alone — rollback, which takes
+// the rest from the revision in each server's history, and status (which reads server.yml once more by
+// LoadServer only to warn what apply would refuse): range_sets are neither read nor
+// checked, so a file of them missing or broken never stands in the way of going back. Gate signatures
+// naming a set are not checked against range_sets either; apply, by LoadServer, checks them all.
+func LoadServerForFleet(path string) (*Server, error) { return loadServer(path, false) }
+
+func loadServer(path string, sets bool) (*Server, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	s, err := parseServerIn(data, filepath.Dir(path))
+	s, err := parseServerIn(data, filepath.Dir(path), sets)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -532,11 +557,11 @@ func LoadServer(path string) (*Server, error) {
 }
 
 // ParseServer is LoadServer on bytes, its range_sets files read relative to the working directory.
-func ParseServer(data []byte) (*Server, error) { return parseServerIn(data, ".") }
+func ParseServer(data []byte) (*Server, error) { return parseServerIn(data, ".", true) }
 
 // parseServerIn is LoadServer on bytes, its range_sets files read relative to dir: strict about
 // unknown keys and about a second document, for the same reason as Parse.
-func parseServerIn(data []byte, dir string) (*Server, error) {
+func parseServerIn(data []byte, dir string, sets bool) (*Server, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var s Server
@@ -571,8 +596,13 @@ func parseServerIn(data []byte, dir string) (*Server, error) {
 	if s.Gate == nil && keys.Gate.Kind != 0 {
 		return nil, errors.New("gate: empty; remove the key for no gate")
 	}
-	if err := s.readRangeSets(dir); err != nil {
-		return nil, err
+	// The fleet's load keeps range_sets as written, for the rule that a policy needs its revision, but
+	// reads no file of them and checks none.
+	s.setsUnread = !sets
+	if sets {
+		if err := s.readRangeSets(dir); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -599,15 +629,19 @@ func (s *Server) validate() error {
 			return fmt.Errorf("ban: %w", err)
 		}
 	}
-	if err := s.validateRangeSets(); err != nil {
-		return err
+	if !s.setsUnread {
+		if err := s.validateRangeSets(); err != nil {
+			return err
+		}
 	}
 	if s.Gate != nil {
 		if err := s.Gate.validate(); err != nil {
 			return fmt.Errorf("gate: %w", err)
 		}
-		if err := s.Gate.withRangeSets(s.RangeSets); err != nil {
-			return fmt.Errorf("gate: %w", err)
+		if !s.setsUnread {
+			if err := s.Gate.withRangeSets(s.RangeSets); err != nil {
+				return fmt.Errorf("gate: %w", err)
+			}
 		}
 	}
 	// Trusting everyone hands every app the address a visitor writes into X-Forwarded-For.
