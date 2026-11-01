@@ -69,7 +69,7 @@ func CheckServerBoks(ctx context.Context, r remote.Runner, p Policy) error {
 	}
 	if _, err := r.Pipe(ctx, marshal(p), ServerBoks, AssembleCommand, CheckArg); err != nil {
 		return fmt.Errorf("the server's boks does not read this policy (`boks server apply` needs a boks: commit "+
-			"as new as this boks): %w; nothing was changed", err)
+			"as new as this boks): %w; the policy and the proxy were not changed", err)
 	}
 	return nil
 }

@@ -176,7 +176,8 @@ func TestServerConfigRefusesWhatItDoesNotKnow(t *testing.T) {
 }
 
 // The server's boks is asked about the policy as SetPolicy writes it, and its refusal is a refusal that
-// changed nothing; a server without one is not asked.
+// changed neither the policy nor the proxy (on `server apply` the server's boks itself was switched
+// just before, by InstallBoks); a server without one is not asked.
 func TestCheckServerBoks(t *testing.T) {
 	p := Policy{Revision: 3, Floor: 3, Block: []BotBlock{{Name: "crawlers", UserAgent: "(?i)gptbot"}}}
 	o := &owned{fake: &fake{}}
@@ -188,7 +189,7 @@ func TestCheckServerBoks(t *testing.T) {
 	}
 	o = &owned{fake: &fake{}, err: errors.New(`json: unknown field "egress"`)}
 	err := CheckServerBoks(context.Background(), o, p)
-	if err == nil || !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "nothing was changed") {
+	if err == nil || !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "the policy and the proxy were not changed") {
 		t.Fatalf("err = %v, want the server's refusal", err)
 	}
 	f := &fake{}

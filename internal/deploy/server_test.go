@@ -447,7 +447,7 @@ func TestApplyServerAsksTheServersBoksBeforeTheSwap(t *testing.T) {
 	f.fail[check] = errors.New(`json: unknown field "egress"`)
 	next := proxy.Policy{Revision: 2, Egress: &proxy.Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}}}
 	err := ApplyServer(context.Background(), f, io.Discard, next, fixed)
-	if err == nil || !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "nothing was changed") {
+	if err == nil || !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "the policy and the proxy were not changed") {
 		t.Fatalf("want the server's boks's refusal, got %v", err)
 	}
 	if f.has("docker create --name boks-proxy") || f.has("docker stop") || len(f.uploads) > 0 || len(f.appends) > 0 {
