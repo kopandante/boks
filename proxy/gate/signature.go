@@ -33,11 +33,15 @@ import (
 
 // Signature is one shape of headers, off — the default — log or enforce.
 type Signature struct {
-	Name    string          `json:"name"`
-	Mode    string          `json:"mode,omitempty"`
+	Name string `json:"name"`
+	Mode string `json:"mode,omitempty"`
+	// Path, when set, is the RE2 pattern the request's path matches too: the cleaned path, as the gate's
+	// other rules and Caddy's path matcher see it, so that dot segments do not take a file past it.
+	Path    string          `json:"path,omitempty"`
 	Headers []HeaderPattern `json:"headers"`
 
 	compiled []*regexp.Regexp
+	path     *regexp.Regexp
 }
 
 // HeaderPattern is a header's name and the RE2 pattern its first value matches, "" when absent.
@@ -61,6 +65,14 @@ var signatureName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // compile compiles the patterns of s.
 func (s *Signature) compile() error {
+	s.path = nil
+	if s.Path != "" {
+		re, err := regexp.Compile(s.Path)
+		if err != nil {
+			return fmt.Errorf("signatures[%s]: path: %w", s.Name, err)
+		}
+		s.path = re
+	}
 	s.compiled = s.compiled[:0]
 	for _, hp := range s.Headers {
 		re, err := regexp.Compile(hp.Pattern)
@@ -98,8 +110,11 @@ func (s *Signature) validate(groupMode string) error {
 	return fmt.Errorf("signatures[%s]: every pattern matches an absent header, so it would match a request with none of them", s.Name)
 }
 
-// matches says whether every header of s matches its pattern.
-func (s *Signature) matches(r *http.Request) bool {
+// matches says whether the cleaned path p of r matches s's, when it has one, and every header its pattern.
+func (s *Signature) matches(r *http.Request, p string) bool {
+	if s.path != nil && !s.path.MatchString(p) {
+		return false
+	}
 	for i, hp := range s.Headers {
 		if !s.compiled[i].MatchString(r.Header.Get(hp.Name)) {
 			return false
@@ -139,7 +154,7 @@ func (h *Handler) validateSignatures() error {
 // request an enforced signature matches, are refused; a match in log is written and passed on to the
 // rest of the gate. The signature written is the one that decides: the first enforced one that matches,
 // the first in log when none does. A ban is asked only with signature_ban and a signature in enforce.
-func (h *Handler) signed(r *http.Request, ip string) (decision, bool) {
+func (h *Handler) signed(r *http.Request, p, ip string) (decision, bool) {
 	if len(h.Signatures) == 0 {
 		return decision{}, false
 	}
@@ -151,7 +166,7 @@ func (h *Handler) signed(r *http.Request, ip string) (decision, bool) {
 	if h.SignatureBan != 0 && h.enforces() && h.banStore().banned(h.Name, a, now) {
 		return deny("signature_ban", forbidden), true
 	}
-	s := h.matching(r)
+	s := h.matching(r, p)
 	if s == nil {
 		return decision{}, false
 	}
@@ -165,11 +180,11 @@ func (h *Handler) signed(r *http.Request, ip string) (decision, bool) {
 
 // matching is the signature on that matches r — the first enforced one, the first in log when no
 // enforced one does — nil when none does: a signature in log never shadows an enforced one after it.
-func (h *Handler) matching(r *http.Request) *Signature {
+func (h *Handler) matching(r *http.Request, p string) *Signature {
 	var logged *Signature
 	for i := range h.Signatures {
 		s := &h.Signatures[i]
-		if !s.on() || (logged != nil && s.Mode != "enforce") || !s.matches(r) {
+		if !s.on() || (logged != nil && s.Mode != "enforce") || !s.matches(r, p) {
 			continue
 		}
 		if s.Mode == "enforce" {

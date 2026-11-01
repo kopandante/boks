@@ -5,8 +5,9 @@
 // bodies, so the sites' client (lib/security 2.5) refreshes and retries as it does now; in log it
 // writes its verdict into the access log and lets everything through to the site, which still checks.
 //
-// The handler keeps no state but the addresses its signatures banned (signature.go): a reload loses
-// nothing, a restart of the proxy those bans.
+// The handler keeps no state but the addresses its signatures banned (signature.go), the pages of
+// page_first (pagefirst.go) and the files' rhythms of static_rhythm (rhythm.go), each shared by the
+// process's handlers: a reload loses nothing, a restart of the proxy all of them.
 package gate
 
 import (
@@ -79,13 +80,17 @@ type Handler struct {
 	// PageFirst, when on, refuses the API to an address that asked for no page of the group within its
 	// window (pagefirst.go).
 	PageFirst *PageFirst `json:"page_first,omitempty"`
+	// StaticRhythm, when on, refuses the API to an address that fetched the site's files one by one
+	// (rhythm.go).
+	StaticRhythm *StaticRhythm `json:"static_rhythm,omitempty"`
 
 	exempt       []exemptRule
 	checksExempt []netip.Prefix
 	bearer       *bearer
-	bans         *banStore  // the tests' own; sharedBans when nil
-	pages        *pageStore // the tests' own; sharedPages when nil
-	pageOn       bool       // counted in its group's page_first span, which Cleanup ends
+	bans         *banStore    // the tests' own; sharedBans when nil
+	pages        *pageStore   // the tests' own; sharedPages when nil
+	rhythms      *rhythmStore // the tests' own; sharedRhythms when nil
+	pageOn       bool         // counted in its group's page_first span, which Cleanup ends
 	logger       *zap.Logger
 	now          func() time.Time
 	// fault and cookieFault, when set, run where the handler decides and where it fixes a cookie: the
@@ -167,6 +172,11 @@ func (h *Handler) Validate() error {
 	}
 	if h.PageFirst != nil {
 		if err := h.PageFirst.validate(h.Mode); err != nil {
+			return err
+		}
+	}
+	if h.StaticRhythm != nil {
+		if err := h.StaticRhythm.validate(h.Mode); err != nil {
 			return err
 		}
 	}
@@ -363,7 +373,7 @@ func requestToken(r *http.Request) string {
 
 // decide is the API gate of request-gate.ts (apiGate), on the cleaned path, as Caddy's path matcher and
 // the apps see it. Past the path's own refusals, the signatures and their bans (signature.go) are asked of
-// every request, pages, the probe and the exemptions too, but a partner's read with a valid Bearer; then, on /api/, page_first (pagefirst.go), the exemptions, the partner's Bearer, then the token from the cookie or the header,
+// every request, pages, the files under /_next/, the probe and the exemptions too, but a partner's read with a valid Bearer; then, on /api/, page_first (pagefirst.go) and static_rhythm (rhythm.go), the exemptions, the partner's Bearer, then the token from the cookie or the header,
 // its signature and age, the fingerprint, the address. A token without the address is refused, where
 // the site lets it through: the proxy never issues one, and the pages' tokens without it are what the
 // gate closes.
@@ -378,22 +388,23 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 	if nextData(p) {
 		return deny("next_data", badPath)
 	}
-	if d, ok := h.signed(r, ip); ok {
+	if d, ok := h.signed(r, p, ip); ok {
 		return d
 	}
 	if !strings.HasPrefix(p, "/api/") {
 		h.sawPage(r, p, ip)
+		h.sawFile(r, p, ip)
 		return decision{verdict: "page"}
 	}
 	// Before the gated prefixes, as request-gate answers the probe before its API gate.
 	if p == healthPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		return allow("health")
 	}
-	// page_first asks no exemption — the servers calling them ask for no page — but the token's issue:
-	// a scraper asks for it, a browser after its page.
+	// page_first and static_rhythm ask no exemption — the servers calling them ask for no page — but
+	// the token's issue: a scraper asks for it, a browser after its page.
 	exempt := h.exempted(p, r.Method)
 	if !exempt || p == tokenPath {
-		if d, ok := h.pageless(r, p, ip); ok {
+		if d, ok := h.behaved(r, ip); ok {
 			return d
 		}
 	}
@@ -420,6 +431,34 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 		}
 	}
 	return d
+}
+
+// behaved is the verdict of what the address did on an API request of ip — page_first's, then
+// static_rhythm's — and whether there is one. What each finds goes into gate_behavior, both comma-
+// separated; the first in enforce that finds refuses.
+func (h *Handler) behaved(r *http.Request, ip string) (decision, bool) {
+	var found []string
+	reason := ""
+	for _, b := range []struct {
+		name string
+		ask  func(*http.Request, string) (bool, bool)
+	}{{"no_page", h.pageless}, {"serial_static", h.serial}} {
+		flagged, refused := b.ask(r, ip)
+		if !flagged {
+			continue
+		}
+		found = append(found, b.name)
+		if refused && reason == "" {
+			reason = b.name
+		}
+	}
+	if len(found) > 0 {
+		setField(r, zap.String("gate_behavior", strings.Join(found, ",")))
+	}
+	if reason == "" {
+		return decision{}, false
+	}
+	return deny(reason, forbidden), true
 }
 
 // skipFP says whether the fingerprint is not compared on the cleaned path p.

@@ -363,3 +363,64 @@ func TestSignatureSparesBearer(t *testing.T) {
 		t.Errorf("a browser from the banned address: %d %v", w.Code, fields(extra))
 	}
 }
+
+// staticAsDocument is the signature of todo#422: Next.js's files fetched with a page's Sec-Fetch-Dest.
+var staticAsDocument = Signature{Name: "static-as-document", Mode: "enforce", Path: "^/_next/",
+	Headers: []HeaderPattern{{Name: "sec-fetch-dest", Pattern: "^document$"}}}
+
+// A signature with a path matches a request when the path matches too: the scraper's files under
+// /_next/ as documents, not a browser's as scripts, styles, fonts, images, nor a page as a document.
+// The gate sees /_next/: a match there refuses the file and bans the address.
+func TestSignaturePath(t *testing.T) {
+	cases := []struct {
+		name, target, dest string
+		want               int
+		sig                any
+	}{
+		{"the scraper's chunk", "/_next/static/chunks/main.js", "document", 403, "static-as-document"},
+		{"the scraper's font", "/_next/static/media/a.woff2", "document", 403, "static-as-document"},
+		{"the scraper's image optimizer", "/_next/image?url=%2Fa.jpg&w=640&q=75", "document", 403, "static-as-document"},
+		{"a browser's script", "/_next/static/chunks/main.js", "script", 200, nil},
+		{"a browser's style", "/_next/static/css/a.css", "style", 200, nil},
+		{"a browser's font", "/_next/static/media/a.woff2", "font", 200, nil},
+		{"a browser's image", "/_next/image?url=%2Fa.jpg&w=640&q=75", "image", 200, nil},
+		{"a page as a document", "/en/heydealer", "document", 200, nil},
+		{"a path with _next/ inside", "/en/_next/x", "document", 200, nil},
+		// Dot segments the gate lets through are cleaned before the path is matched.
+		{"the scraper's chunk past a dot segment", "/x/../_next/static/chunks/main.js", "document", 403, "static-as-document"},
+		{"the scraper's chunk past a dot", "/./_next/static/chunks/main.js", "document", 403, "static-as-document"},
+	}
+	for _, c := range cases {
+		now := time.Now()
+		h := signing(t, &now, staticAsDocument)
+		r, extra := withLog(browserClient(stormUA, "").request(h, "GET", c.target))
+		r.Header.Set("Sec-Fetch-Dest", c.dest)
+		w := serve(t, h, r)
+		if w.Code != c.want || fields(extra)["gate_signature"] != c.sig {
+			t.Errorf("%s: %d %v, want %d %v", c.name, w.Code, fields(extra), c.want, c.sig)
+		}
+		if banned := h.bans.banned(h.Name, netip.MustParseAddr(visitor), now); banned != (c.want == 403) {
+			t.Errorf("%s: banned %v", c.name, banned)
+		}
+	}
+	// In log the match on a file is written, the file served.
+	now := time.Now()
+	logged := staticAsDocument
+	logged.Mode = "log"
+	h := signing(t, &now, logged)
+	r, extra := withLog(browserClient(stormUA, "").request(h, "GET", "/_next/static/chunks/main.js"))
+	r.Header.Set("Sec-Fetch-Dest", "document")
+	if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_signature"] != "static-as-document" {
+		t.Errorf("log: %d %v", w.Code, fields(extra))
+	}
+}
+
+// A path that is no RE2 pattern is refused at provision, as a header's is.
+func TestSignatureBadPath(t *testing.T) {
+	s := staticAsDocument
+	s.Path = "^/_next/("
+	h := &Handler{Name: "site", Mode: "enforce", Secrets: []string{secret}, Signatures: []Signature{s}}
+	if err := h.Provision(ctxForTest(t)); err == nil || !strings.Contains(err.Error(), "path") {
+		t.Errorf("a bad path: %v", err)
+	}
+}
