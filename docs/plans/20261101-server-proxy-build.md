@@ -17,7 +17,7 @@
   (`proxy.CheckServerBoks`, `boks proxy-config check`) — иначе отказ строгого чтения приходил после
   пересоздания прокси под новую форму (`TestApplyServerAsksTheServersBoksBeforeTheSwap`); и всех серверов
   списка до изменений любого (`TestServerApplyAsksEveryServersBoksFirst`, `…RollbackAsks…`).
-- [ ] 7. PR через `/review-loop --ship`, merge.
+- [x] 7. PR через `/review-loop --ship`, merge — #163, `9704127`.
 
 ## Проверка
 ```
