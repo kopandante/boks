@@ -32,10 +32,18 @@ jobs:
         id: have
         env:
           GH_TOKEN: ${{ github.token }}
+        # gh makes a release with files as a draft, uploads them, then publishes it. A draft left by a run
+        # cut short holds no sum anyone could have written down, and is made again; a published release
+        # is never changed.
         run: |
-          if gh release view "bin-$GITHUB_SHA" >/dev/null 2>&1; then
-            echo "bin-$GITHUB_SHA exists; a release is never changed" >> "$GITHUB_STEP_SUMMARY"
-            echo exists=true >> "$GITHUB_OUTPUT"
+          if draft=$(gh release view "bin-$GITHUB_SHA" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$draft" = true ]; then
+              gh release delete "bin-$GITHUB_SHA" --yes
+              echo "bin-$GITHUB_SHA: a draft left by an earlier run, removed and made again" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "bin-$GITHUB_SHA exists; a release is never changed" >> "$GITHUB_STEP_SUMMARY"
+              echo exists=true >> "$GITHUB_OUTPUT"
+            fi
           fi
       - name: build
         if: steps.have.outputs.exists != 'true'

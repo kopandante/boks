@@ -26,3 +26,15 @@ func TestServerBoks(t *testing.T) {
 		}
 	}
 }
+
+// ~/.boks/bin is the server's boks, so no app is named bin; bins and the like are apps as before (#159).
+func TestAppNamedBin(t *testing.T) {
+	if _, err := Parse([]byte("app: bin\nimage: x\nservers: [a]\n")); err == nil || !strings.Contains(err.Error(), "server's boks") {
+		t.Errorf("bin: %v", err)
+	}
+	for _, app := range []string{"bins", "bin-api", "my-bin"} {
+		if _, err := Parse([]byte("app: " + app + "\nimage: x\nservers: [a]\n")); err != nil {
+			t.Errorf("%s: %v", app, err)
+		}
+	}
+}

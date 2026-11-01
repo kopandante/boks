@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -673,5 +675,53 @@ func TestApplyBringsTheServersBoksFirst(t *testing.T) {
 		if strings.Contains(in, `"revision"`) {
 			t.Errorf("the policy was written: %s", in)
 		}
+	}
+}
+
+// The server's boks is checked on every server before any is changed: a second server whose architecture
+// server.yml writes no sum for refuses the run with the first one's boks and policy as they were, and the
+// build is fetched once (#159).
+func TestApplyChecksBoksOnEveryServerFirst(t *testing.T) {
+	build := []byte("a build")
+	s := sha256.Sum256(build)
+	var fetched int
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { fetched++; return build, nil }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a, b, c]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol := "present\n{\"revision\":1,\"floor\":1}"
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	c := &recorder{server: server{policyRead: pol, "uname -m": "aarch64"}}
+	fleet(t, map[string]*recorder{"a": a, "b": b, "c": c}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "c: boks: server.yml writes no sha256 for arm64") {
+		t.Errorf("apply: %d %q", code, errw.String())
+	}
+	for name, r := range map[string]*recorder{"a": a, "b": b} {
+		for _, in := range r.stdin {
+			if strings.Contains(in, `"revision"`) || in == string(build) {
+				t.Errorf("%s was changed: %.80s", name, in)
+			}
+		}
+	}
+	if fetched != 1 {
+		t.Errorf("fetched %d times", fetched)
+	}
+}
+
+// `boks version` prints the commit and nothing else, even where the ssh socket directory cannot be made:
+// a server's install compares all it prints (#159).
+func TestVersionAloneWithoutSocketDir(t *testing.T) {
+	was, wasRoot := commit, socketRoot
+	commit, socketRoot = strings.Repeat("c", 40), filepath.Join(t.TempDir(), "missing", "x")
+	t.Cleanup(func() { commit, socketRoot = was, wasRoot })
+	var out, errw strings.Builder
+	if code := run([]string{"version"}, &out, &errw); code != 0 || out.String() != commit+"\n" || errw.String() != "" {
+		t.Errorf("version: %d %q %q", code, out.String(), errw.String())
 	}
 }

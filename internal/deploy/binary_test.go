@@ -181,3 +181,78 @@ func TestInstallBoksLinkNotSwitched(t *testing.T) {
 		t.Errorf("the link names %q", got)
 	}
 }
+
+// corrupting writes other bytes than it is given: what a write gone wrong on the way would leave.
+type corrupting struct{ *home }
+
+func (c corrupting) Pipe(ctx context.Context, stdin []byte, args ...string) (string, error) {
+	if stdin != nil {
+		stdin = append([]byte(nil), stdin...)
+		stdin[len(stdin)-2] ^= 1
+	}
+	return c.home.Pipe(ctx, stdin, args...)
+}
+
+func (c corrupting) Run(ctx context.Context, args ...string) (string, error) {
+	return c.Pipe(ctx, nil, args...)
+}
+
+// The sum is checked again on the server, on the bytes written there: a build that arrives otherwise is
+// refused and removed, and the boks that ran stays named.
+func TestInstallBoksChecksTheSumOnTheServer(t *testing.T) {
+	h := newHome(t)
+	ctx := context.Background()
+	var fetched []string
+	a, b := build(commitA), build(commitB)
+	if err := InstallBoks(ctx, h, &strings.Builder{}, &config.ServerBoks{Commit: commitA, SHA256: map[string]string{"amd64": sum(a)}}, served(a, &fetched)); err != nil {
+		t.Fatal(err)
+	}
+	err := InstallBoks(ctx, corrupting{h}, &strings.Builder{}, &config.ServerBoks{Commit: commitB, SHA256: map[string]string{"amd64": sum(b)}}, served(b, &fetched))
+	if err == nil || !strings.Contains(err.Error(), "differs from the one fetched") {
+		t.Errorf("err %v", err)
+	}
+	if got := h.link(t); got != "../_server/bin/boks-"+commitA {
+		t.Errorf("the link names %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, binDir, "boks-"+commitB)); err == nil {
+		t.Error("the refused build is left on the server")
+	}
+}
+
+// CheckBoks refuses what InstallBoks would on this side, with nothing written, and with Remember the
+// install after it fetches nothing again; a server that runs the build already is not fetched for.
+func TestCheckBoks(t *testing.T) {
+	h := newHome(t)
+	ctx := context.Background()
+	var fetched []string
+	a := build(commitA)
+	ok := &config.ServerBoks{Commit: commitA, SHA256: map[string]string{"amd64": sum(a)}}
+	for name, c := range map[string]struct {
+		b    *config.ServerBoks
+		want string
+	}{
+		"no sum for arch": {&config.ServerBoks{Commit: commitA, SHA256: map[string]string{"arm64": sum(a)}}, "no sha256 for amd64"},
+		"another sum":     {&config.ServerBoks{Commit: commitA, SHA256: map[string]string{"amd64": sum(build(commitB))}}, "has sha256"},
+	} {
+		if err := CheckBoks(ctx, h, &strings.Builder{}, c.b, served(a, &fetched)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, ".boks")); err == nil {
+		t.Error("a check wrote to the server")
+	}
+	fetched = nil
+	fetch := Remember(served(a, &fetched))
+	if err := CheckBoks(ctx, h, &strings.Builder{}, ok, fetch); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallBoks(ctx, h, &strings.Builder{}, ok, fetch); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckBoks(ctx, h, &strings.Builder{}, ok, served(a, &fetched)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fetched) != 1 {
+		t.Errorf("fetched %v", fetched)
+	}
+}

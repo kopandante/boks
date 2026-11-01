@@ -58,8 +58,10 @@ const usage = `usage: boks [-f boks.yml] <command>
                    proxy on its own addresses, and keeps that through nftables.service reloads and
                    reboots. --force lets a gate group whose site no longer checks the token itself
                    leave enforce — an emergency's override
-                   With boks: in server.yml, both bring the server its one boks first — the
-                   linux build of that commit from boks's CI, checked against the sha256 written
+                   With boks: in server.yml, install and apply also bring each server its one
+                   boks — the linux build of that commit from boks's CI, checked against the
+                   sha256 server.yml writes on every server before any is changed; apply brings
+                   it before the policy
   server rollback <server.yml> <revision> [--force]
                    put back the policy of an earlier revision on those servers; --force as above
   server status <server.yml>
@@ -91,15 +93,16 @@ func run(args []string, out, errw io.Writer) int {
 		fmt.Fprint(errw, usage)
 		return 2
 	}
+	// Before the mux: a server's install checks what `version` prints, and the mux's warning would be part of it.
+	if fs.Arg(0) == "version" && fs.NArg() == 1 {
+		fmt.Fprintln(out, version())
+		return 0
+	}
 	if m, err := remote.NewMux(socketRoot); err != nil {
 		fmt.Fprintf(errw, "warning: %v; every remote call opens its own connection\n", err)
 	} else {
 		sshMux = m
 		defer func() { sshMux.Close(); sshMux = nil }()
-	}
-	if fs.Arg(0) == "version" && fs.NArg() == 1 {
-		fmt.Fprintln(out, version())
-		return 0
 	}
 	// server.yml belongs to the server, not to an app: no boks.yml is read for it.
 	if fs.Arg(0) == "server" {
@@ -491,11 +494,23 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 	}
 	o := deploy.Options{Now: now, Force: force}
+	// The server's boks is checked on every server with the rest, before any is changed: a sum missing for
+	// one server's architecture, or a build that does not fetch, would otherwise stop the run halfway down
+	// the list. The build is fetched once for all.
+	fetch := deploy.Remember(fetchBoks)
+	checkBoks := func(ctx context.Context, r remote.Runner) error {
+		if sc.Boks == nil {
+			return nil
+		}
+		return deploy.CheckBoks(ctx, r, out, sc.Boks, fetch)
+	}
 	switch {
 	case args[0] == "install" && len(args) == 2:
 		if err := askAll(func(ctx context.Context, r remote.Runner) error {
-			_, err := deploy.CheckInstall(ctx, r)
-			return err
+			if _, err := deploy.CheckInstall(ctx, r); err != nil {
+				return err
+			}
+			return checkBoks(ctx, r)
 		}); err != nil {
 			return err
 		}
@@ -505,7 +520,7 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 				return fmt.Errorf("%s: %w", s, err)
 			}
 			if sc.Boks != nil {
-				if err := deploy.InstallBoks(ctx, connect(s), out, sc.Boks, fetchBoks); err != nil {
+				if err := deploy.InstallBoks(ctx, connect(s), out, sc.Boks, fetch); err != nil {
 					return fmt.Errorf("%s: %w", s, err)
 				}
 			}
@@ -536,14 +551,19 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 			}
 			next.GateSecrets = secrets
 		}
-		if err := askAll(func(ctx context.Context, r remote.Runner) error { return deploy.CheckApply(ctx, r, next, force) }); err != nil {
+		if err := askAll(func(ctx context.Context, r remote.Runner) error {
+			if err := deploy.CheckApply(ctx, r, next, force); err != nil {
+				return err
+			}
+			return checkBoks(ctx, r)
+		}); err != nil {
 			return err
 		}
 		if err := on(func(ctx context.Context, r remote.Runner) error {
-			// The server's boks first: the policy is the same either way, and a build that does not fetch or
-			// check refuses before the policy changes.
+			// The server's boks first: the policy is the same either way, and a build that does not check on
+			// the server refuses before the policy changes.
 			if sc.Boks != nil {
-				if err := deploy.InstallBoks(ctx, r, out, sc.Boks, fetchBoks); err != nil {
+				if err := deploy.InstallBoks(ctx, r, out, sc.Boks, fetch); err != nil {
 					return err
 				}
 			}

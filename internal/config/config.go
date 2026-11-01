@@ -628,6 +628,10 @@ func (c *Config) validate() error {
 	if !nameRe.MatchString(c.App) {
 		return fmt.Errorf("app: %q must match %s", c.App, nameRe)
 	}
+	// ~/.boks/<app> is an app's directory on the server, and ~/.boks/bin holds the server's own boks (#154).
+	if c.App == "bin" {
+		return errors.New(`app: "bin" is the name of the directory of the server's boks, ~/.boks/bin; choose another`)
+	}
 	// A copy is named app-tag-time, its host name on the app's network: one DNS label of 63, with
 	// the time's 10 digits and two dashes, leaves 51 for the app and at least nothing for the tag.
 	if len(c.App) > MaxAppLen {
