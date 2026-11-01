@@ -365,7 +365,9 @@ func TestGooglePool(t *testing.T) {
 		{"a visitor's token from Google", visitor, "66.249.77.192", 403, "ip_mismatch"},
 		{"Googlebot's token from a user-triggered fetcher", "66.249.77.193", "142.250.32.5", 403, "ip_mismatch"},
 		{"a user-triggered fetcher's token from Googlebot", "142.250.32.5", "66.249.77.192", 403, "ip_mismatch"},
-		{"a user-triggered fetcher's token from the next of them", "142.250.32.5", "142.250.32.6", 403, "ip_mismatch"},
+		{"a user-triggered fetcher's token from another /24 of them", "142.250.32.5", "142.250.33.6", 403, "ip_mismatch"},
+		// Within one /24 as any network's addresses (sameNet, #173), not as Google's.
+		{"a user-triggered fetcher's token from its /24", "142.250.32.5", "142.250.32.6", 200, "token"},
 		{"Googlebot over IPv6", "2001:4860:4801:10::1", "2001:4860:4801:11::7", 200, "token"},
 	}
 	for _, c := range cases {

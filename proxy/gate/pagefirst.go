@@ -149,15 +149,10 @@ type pageStore struct {
 	full bool
 }
 
-// pageKey is a's entry in group: an IPv6 address by its /64.
-func pageKey(group string, a netip.Addr) banKey {
-	if a.Is6() {
-		if p, err := a.Prefix(64); err == nil {
-			a = p.Addr()
-		}
-	}
-	return banKey{group, a}
-}
+// pageKey is a's entry in group: its network (netOf) — an IPv4 address by its /24, an IPv6 by its /64.
+// A mobile operator moves its visitor's address within a /24 every few minutes, and the page of the
+// address before would be no page of the next (#173).
+func pageKey(group string, a netip.Addr) banKey { return banKey{group, netOf(a)} }
 
 // groupSpan is since when a group has had page_first on, and how many handlers provisioned have it on:
 // a reload provisions the new ones before it cleans up the old, so the span goes on through it.

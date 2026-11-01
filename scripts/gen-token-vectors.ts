@@ -114,8 +114,8 @@ const tokens: Token[] = [
 	{ name: "other address", class: "ip", token: issued({ fp: FP, ip: OTHER }) },
 	{ name: "ip only, other address", class: "ip", token: issued({ ip: OTHER }) },
 	// The address is compared as a string: another spelling of the client's own is another address.
-	{ name: "own address v4-mapped", class: "ip", token: issued({ fp: FP, ip: `::ffff:${IP}` }) },
-	{ name: "own address ipv6 upper case", class: "ip", token: issued({ fp: FP, ip: IPV6.toUpperCase() }) },
+	{ name: "own address v4-mapped", class: "net", token: issued({ fp: FP, ip: `::ffff:${IP}` }) },
+	{ name: "own address ipv6 upper case", class: "net", token: issued({ fp: FP, ip: IPV6.toUpperCase() }) },
 	{ name: "iat fractional, signed", class: "valid", token: signed(b64url(JSON.stringify({ iat: NOW - 1000.5, nonce: "00", fp: FP, ip: IP }))) },
 	{ name: "nonce a number, signed", class: "no_ip", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: 1, fp: FP, ip: IP }))) },
 	{ name: "nonce null, signed", class: "no_ip", token: signed(b64url(JSON.stringify({ iat: NOW - 1000, nonce: null, fp: FP, ip: IP }))) },
@@ -213,10 +213,18 @@ async function site(token: string | undefined, req: Req, ip: string, d: Delivery
 }
 
 const vectors: object[] = [];
-// The proxy's column is the site's, but for the classes the plan lets it be stricter in.
+// The proxy's column is the site's, but for the classes the plan lets it be stricter in, and the net
+// class: the token's address written otherwise than the request's — v4-mapped, upper case — the site
+// compares as text, the proxy by network (/24, /64, #173), so its verdict is the site's on the token of
+// the request's own address.
 async function push(t: Token, req: Req, ip: string, d: Delivery = {}) {
 	const s = await site(t.token || undefined, req, ip, d);
-	const proxy = t.class === "no_ip" || t.class === "stricter" ? { status: 401, body: '{"error":"Access denied"}' } : s;
+	const proxy =
+		t.class === "no_ip" || t.class === "stricter"
+			? { status: 401, body: '{"error":"Access denied"}' }
+			: t.class === "net"
+				? await site(issued({ fp: FP, ip }), req, ip, d)
+				: s;
 	const name = `${t.name} / ${req.name}${d.via ? `, token by ${d.via}${d.via === "cookie+header" ? (d.header === fresh ? " (valid)" : " (bad)") : ""}` : ""}`;
 	vectors.push({ name, class: t.class, token: t.token, ...(d.via && { via: d.via }), ...(d.header && { header_token: d.header }), method: req.method, path: req.path, fingerprint: req.fingerprint ?? "", client_ip: ip, site: s, proxy });
 }

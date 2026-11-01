@@ -332,7 +332,10 @@ func (h *Handler) cookieWriter(w http.ResponseWriter, r *http.Request, ip string
 		reqFP = signedFP(pl, reason)
 	} else if h.TokenTTL != 0 && strings.HasPrefix(p, "/api/") {
 		// A request decide let through with a token: renewed once half spent, as nothing else renews it.
-		if pl, reason := h.verify(requestToken(r), h.now()); reason == "" && pl.ip == ip && h.halfSpent(pl) {
+		// A token of the address's network (sameNet) too, and the new one is of the request's own
+		// address: a mobile visitor's API calls go on past the token's lifetime, the token following the
+		// address within its network. A page (above) issues one of its own address to any other token's.
+		if pl, reason := h.verify(requestToken(r), h.now()); reason == "" && (pl.ip == ip || sameNet(pl.ip, ip)) && h.halfSpent(pl) {
 			own, reqFP = true, pl.fp
 		}
 	}
@@ -497,6 +500,8 @@ func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload
 	if pl.ip == "" {
 		return deny("no_ip", accessDenied), &pl
 	}
+	match := tokenMatch(pl.ip, ip)
+	setField(r, zap.String("gate_token_ip", match))
 	if !h.skipFP(p) {
 		if fp := r.Header.Get(fpHeader); fp != "" {
 			// A token without the fingerprint passes a GET: the same GET without the header passes
@@ -511,10 +516,55 @@ func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload
 			return deny("no_fp_header", forbidden), &pl
 		}
 	}
-	if pl.ip != ip && !googlePool(pl.ip, ip) {
+	if match == "no" {
 		return deny("ip_mismatch", addressMismatch), &pl
 	}
 	return allow("token"), &pl
+}
+
+// tokenMatch is how the token's address a stands to the request's b, which gate_token_ip logs on every
+// API request whose token's signature and age pass: "exact", the same address (v4-mapped or upper case
+// alike); "net", another of the
+// same network (sameNet); "google", another of Googlebot's (googlePool); "no", none — ip_mismatch. A
+// measurement then tells the passes the network lets through from the exact ones without the token's
+// address in the log (#173).
+func tokenMatch(a, b string) string {
+	x, errA := netip.ParseAddr(a)
+	y, errB := netip.ParseAddr(b)
+	switch {
+	case a == b || errA == nil && errB == nil && x.WithZone("").Unmap() == y.WithZone("").Unmap():
+		return "exact"
+	case sameNet(a, b):
+		return "net"
+	case googlePool(a, b):
+		return "google"
+	}
+	return "no"
+}
+
+// sameNet says whether the addresses a and b are of one network: the same /24 of IPv4, the same /64 of
+// IPv6, an IPv4-mapped IPv6 address as its IPv4 one; never across the families. A mobile operator moves
+// its visitor's address within a /24 every few minutes (iPhone in Albania, todo#419), and the token of
+// the address before is refused as ip_mismatch otherwise (#173). This loosens the binding of the token
+// to its address: a scraper with a token passes from the token's whole network — a protection relaxed.
+func sameNet(a, b string) bool {
+	x, errA := netip.ParseAddr(a)
+	y, errB := netip.ParseAddr(b)
+	return errA == nil && errB == nil && netOf(x) == netOf(y)
+}
+
+// netOf is a's network as an address: its /24 for IPv4, its /64 for IPv6, an IPv4-mapped IPv6 address
+// as IPv4, without a zone.
+func netOf(a netip.Addr) netip.Addr {
+	a = a.WithZone("").Unmap()
+	bits := 64
+	if a.Is4() {
+		bits = 24
+	}
+	if p, err := a.Prefix(bits); err == nil {
+		return p.Addr()
+	}
+	return a
 }
 
 // googleGrace is how long after its issue an expired token of a Googlebot address still passes from one:

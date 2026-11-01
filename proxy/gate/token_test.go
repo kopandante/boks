@@ -69,7 +69,8 @@ func request(method, target, ip string) *http.Request {
 
 // The proxy's verdict on every vector is its second column, and it differs from the site's only in
 // the classes the plan lets it be stricter in: a token without the address, and base64url only Node's
-// lenient decoder reads (AC1).
+// lenient decoder reads (AC1); and in net, the token's own address written otherwise (v4-mapped, upper
+// case), which the site compares as text and the proxy by network (#173).
 func TestVectors(t *testing.T) {
 	v := loadVectors(t)
 	if len(v.Vectors) < 50 {
@@ -110,11 +111,11 @@ func TestVectors(t *testing.T) {
 			t.Errorf("%s: a refusal is application/json, got %q", c.Name, w.Header().Get("Content-Type"))
 		}
 		stricter := c.Class == "no_ip" || c.Class == "stricter"
-		if (c.Site != c.Proxy) != stricter {
+		if c.Class != "net" && (c.Site != c.Proxy) != stricter {
 			t.Errorf("%s [%s]: site %v and proxy %v columns must differ exactly in no_ip and stricter", c.Name, c.Class, c.Site, c.Proxy)
 		}
 	}
-	for _, want := range []string{"valid", "previous", "ttl", "signature", "ip", "no_ip", "stricter", "garbage"} {
+	for _, want := range []string{"valid", "previous", "ttl", "signature", "ip", "net", "no_ip", "stricter", "garbage"} {
 		if classes[want] == 0 {
 			t.Errorf("no vector of class %s", want)
 		}

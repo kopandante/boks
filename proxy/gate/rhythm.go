@@ -159,6 +159,18 @@ type rhythm struct {
 	serial bool
 }
 
+// rhythmKey is a's entry in group: an IPv6 address by its /64, an IPv4 address by itself. Not pageKey's
+// /24 (#173): the files of a /24's visitors timed as one would mix their gaps, and a mark would shut
+// the API to the whole /24.
+func rhythmKey(group string, a netip.Addr) banKey {
+	if a.Is6() {
+		if p, err := a.Prefix(64); err == nil {
+			a = p.Addr()
+		}
+	}
+	return banKey{group, a}
+}
+
 // rhythmStore is the rhythms by group and address, an IPv6 address by its /64.
 type rhythmStore struct {
 	mu    sync.Mutex
@@ -175,7 +187,7 @@ func newRhythmStore() *rhythmStore { return &rhythmStore{of: map[banKey]*rhythm{
 func (s *rhythmStore) saw(group string, a netip.Addr, now time.Time, files int, minGap, window time.Duration) (firstFull bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := pageKey(group, a)
+	k := rhythmKey(group, a)
 	e := s.of[k]
 	if e != nil && !now.Before(e.until) {
 		e = nil
@@ -213,7 +225,7 @@ func (s *rhythmStore) saw(group string, a netip.Addr, now time.Time, files int, 
 func (s *rhythmStore) marked(group string, a netip.Addr, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := s.of[pageKey(group, a)]
+	e := s.of[rhythmKey(group, a)]
 	return e != nil && e.serial && now.Before(e.until)
 }
 

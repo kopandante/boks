@@ -99,7 +99,7 @@ func TestPageFirstWarmupAndLog(t *testing.T) {
 		t.Errorf("warmup: %d %v", w.Code, fields(extra))
 	}
 	now = now.Add(2 * time.Minute)
-	if code := serve(t, h, browserClient(chromeUA, "203.0.113.52").request(h, "GET", "/api/x")).Code; code != 403 {
+	if code := serve(t, h, browserClient(chromeUA, "203.0.114.52").request(h, "GET", "/api/x")).Code; code != 403 {
 		t.Errorf("a new address past warmup: %d", code)
 	}
 	r, extra = withLog(browserClient(chromeUA, "203.0.113.50").request(h, "GET", "/api/x"))
@@ -193,7 +193,7 @@ func TestPageStoreFull(t *testing.T) {
 	s := newPageStore()
 	s.begin("g", now.Add(-time.Hour))
 	s.max = 1
-	a, b, c := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2"), netip.MustParseAddr("203.0.113.3")
+	a, b, c := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.114.2"), netip.MustParseAddr("203.0.115.3")
 	if s.saw("g", a, now) {
 		t.Error("full with room")
 	}
@@ -231,13 +231,13 @@ func TestPageFirstFullFailsOpen(t *testing.T) {
 	h := pageFirsting(t, &now, "enforce")
 	h.pages.max = 1
 	serve(t, h, browserClient(chromeUA, "203.0.113.80").request(h, "GET", "/"))
-	r, extra := withLog(browserClient(chromeUA, "203.0.113.81").request(h, "GET", "/api/x"))
+	r, extra := withLog(browserClient(chromeUA, "203.0.114.81").request(h, "GET", "/api/x"))
 	if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_behavior"] != nil {
 		t.Errorf("no room, no page: %d %v", w.Code, fields(extra))
 	}
 	// With room, the address without a page is refused again.
 	h.pages.max = 2
-	if code := serve(t, h, browserClient(chromeUA, "203.0.113.81").request(h, "GET", "/api/x")).Code; code != 403 {
+	if code := serve(t, h, browserClient(chromeUA, "203.0.114.81").request(h, "GET", "/api/x")).Code; code != 403 {
 		t.Errorf("room, no page: %d", code)
 	}
 }
@@ -248,19 +248,19 @@ func TestPageStoreSweepsOnceAMinute(t *testing.T) {
 	s := newPageStore()
 	s.begin("g", t0.Add(-time.Hour))
 	s.max = 2
-	s.ask("g", netip.MustParseAddr("203.0.113.9"), t0, time.Hour, time.Minute)
-	s.saw("g", netip.MustParseAddr("203.0.113.1"), t0)
-	s.saw("g", netip.MustParseAddr("203.0.113.2"), t0)
+	s.ask("g", netip.MustParseAddr("203.0.109.9"), t0, time.Hour, time.Minute)
+	s.saw("g", netip.MustParseAddr("203.0.101.1"), t0)
+	s.saw("g", netip.MustParseAddr("203.0.102.1"), t0)
 	// Full, nothing past the window: the sweep finds nothing.
-	s.saw("g", netip.MustParseAddr("203.0.113.3"), t0.Add(59*time.Minute+50*time.Second))
+	s.saw("g", netip.MustParseAddr("203.0.103.1"), t0.Add(59*time.Minute+50*time.Second))
 	// Both past the window now, but swept 20 seconds ago: no sweep, no room.
-	d := netip.MustParseAddr("203.0.113.4")
+	d := netip.MustParseAddr("203.0.104.1")
 	s.saw("g", d, t0.Add(time.Hour+10*time.Second))
 	if _, ok := s.last[pageKey("g", d)]; ok || len(s.last) != 2 {
 		t.Errorf("swept within the minute: %d kept", len(s.last))
 	}
 	// A minute after the last sweep: swept, kept.
-	e := netip.MustParseAddr("203.0.113.5")
+	e := netip.MustParseAddr("203.0.105.1")
 	s.saw("g", e, t0.Add(time.Hour+50*time.Second))
 	if _, ok := s.last[pageKey("g", e)]; !ok || len(s.last) != 1 {
 		t.Errorf("not swept past the minute: %d kept", len(s.last))
@@ -334,7 +334,7 @@ func TestPageFirstSurvivesReload(t *testing.T) {
 	if code := serve(t, h2, browserClient(chromeUA, "198.51.100.80").request(h2, "GET", "/api/x")).Code; code != 200 {
 		t.Errorf("the page after the reload: %d", code)
 	}
-	if code := serve(t, h2, browserClient(chromeUA, "198.51.100.81").request(h2, "GET", "/api/x")).Code; code != 403 {
+	if code := serve(t, h2, browserClient(chromeUA, "198.51.101.81").request(h2, "GET", "/api/x")).Code; code != 403 {
 		t.Errorf("no page after the reload, past the warmup: %d", code)
 	}
 }

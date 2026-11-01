@@ -104,6 +104,11 @@ func TestTokenTTLRenewal(t *testing.T) {
 		{"api, half and 1ms", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 6*time.Hour+time.Millisecond, fp, visitor), 200, true},
 		{"api, 1h of 12h", own, "GET", "/api/encar/catalog", issuedAgo(own, now, time.Hour, fp, visitor), 200, false},
 		{"api, token of another address", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 7*time.Hour, fp, "198.51.100.9"), 403, false},
+		// A token of the address's /24 (#173) passes and is renewed alike, the new one of the request's
+		// own address; a page issues one of its own address to it whatever its age.
+		{"api, 7h of 12h, token of the /24", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 7*time.Hour, fp, "203.0.113.200"), 200, true},
+		{"api, 1h of 12h, token of the /24", own, "GET", "/api/encar/catalog", issuedAgo(own, now, time.Hour, fp, "203.0.113.200"), 200, false},
+		{"page, 1h of 12h, token of the /24", own, "GET", "/cars", issuedAgo(own, now, time.Hour, fp, "203.0.113.200"), 200, true},
 		{"api, expired", own, "GET", "/api/encar/catalog", issuedAgo(own, now, 13*time.Hour, fp, visitor), 401, false},
 		{"page, 7h of 12h", own, "GET", "/cars", issuedAgo(own, now, 7*time.Hour, fp, visitor), 200, true},
 		{"page, 1h of 12h", own, "GET", "/cars", issuedAgo(own, now, time.Hour, fp, visitor), 200, false},

@@ -289,11 +289,11 @@ func TestRhythmStoreOverflow(t *testing.T) {
 	s.saw("g", a(4), t0.Add(59*time.Minute+50*time.Second), 6, time.Millisecond, time.Hour)
 	// Past the window now, but swept 20 seconds ago: no sweep, no room.
 	s.saw("g", a(5), t0.Add(time.Hour+10*time.Second), 6, time.Millisecond, time.Hour)
-	if _, ok := s.of[pageKey("g", a(5))]; ok || len(s.of) != 1 {
+	if _, ok := s.of[rhythmKey("g", a(5))]; ok || len(s.of) != 1 {
 		t.Error("swept within the minute")
 	}
 	s.saw("g", a(6), t0.Add(time.Hour+50*time.Second), 6, time.Millisecond, time.Hour)
-	if _, ok := s.of[pageKey("g", a(6))]; !ok || len(s.of) != 1 {
+	if _, ok := s.of[rhythmKey("g", a(6))]; !ok || len(s.of) != 1 {
 		t.Errorf("not swept past the minute: %d", len(s.of))
 	}
 }
