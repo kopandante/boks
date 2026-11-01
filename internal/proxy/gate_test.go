@@ -528,3 +528,38 @@ func TestCheckGateRefusesAGroupWithoutRoutes(t *testing.T) {
 		t.Errorf("want the group without routes refused, got %v", err)
 	}
 }
+
+// refusingBoks is a server whose own boks refuses every config it is asked for: a build older than the
+// policy, or the stage-1b one, which reads no candidate.
+type refusingBoks struct {
+	*disk
+	asked bool
+}
+
+func (b *refusingBoks) Run(ctx context.Context, args ...string) (string, error) {
+	if strings.HasPrefix(strings.Join(args, " "), "sh -c if [ -x "+ServerBoks+" ]") {
+		return "yes", nil
+	}
+	return b.disk.Run(ctx, args...)
+}
+
+func (b *refusingBoks) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
+	if len(args) > 0 && args[0] == ServerBoks {
+		b.asked = true
+		return "", errors.New(`json: unknown field "policy"`)
+	}
+	return b.disk.Pipe(ctx, content, args...)
+}
+
+// apply checks the gate before it installs the build server.yml pins: the server's boks it would ask
+// then is the one being replaced, and its refusal would stop the apply that replaces it.
+func TestCheckGateDoesNotAskTheServersBoks(t *testing.T) {
+	d := newDisk()
+	if _, err := SetRoutes(context.Background(), d, io.Discard, "shop", shopAndBlog[1].Routes); err != nil {
+		t.Fatal(err)
+	}
+	r := &refusingBoks{disk: d}
+	if err := CheckGate(context.Background(), r, gated()); err != nil || r.asked {
+		t.Errorf("err = %v, asked the server's boks: %v", err, r.asked)
+	}
+}

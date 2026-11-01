@@ -31,6 +31,8 @@ func (l Local) exec(ctx context.Context, stdin []byte, args []string) (string, e
 	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
+	// As SSH: a cancelled call ends at its context even when a child of the command holds its output.
+	cmd.WaitDelay = waitDelay
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("%s: %w: %s", args[0], err, strings.TrimSpace(errb.String()))
 	}

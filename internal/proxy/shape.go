@@ -327,7 +327,7 @@ func Drift(ctx context.Context, r remote.Runner, p Policy) ([]string, error) {
 
 // validate asks the running Caddy whether it takes the config p and fs make, changing nothing.
 func validate(ctx context.Context, r remote.Runner, p Policy, fs []Fragment) error {
-	body, err := Config(p, fs)
+	body, err := assembleOf(ctx, r, p, fs)
 	if err != nil {
 		return err
 	}

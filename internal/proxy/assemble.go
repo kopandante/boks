@@ -16,14 +16,61 @@ const ServerBoks = ".boks/bin/boks"
 // AssembleCommand is the command the server's boks assembles the proxy's config with (ServerConfig).
 const AssembleCommand = "proxy-config"
 
-// CheckArg follows AssembleCommand to ask the server's boks whether it reads the policy on stdin
-// (CheckPolicy), changing nothing.
+// CheckArg follows AssembleCommand to ask the server's boks for the config of a policy not applied
+// yet (CandidateConfig), changing nothing.
 const CheckArg = "check"
 
-// ownBoks says whether the server has a boks of its own.
+// ownBoks says whether the server has a boks of its own. One that is there and does not run — a link
+// to a build that is gone — is an error, not "none": assembling here then would be what a server
+// with its own boks never does.
 func ownBoks(ctx context.Context, r remote.Runner) (bool, error) {
-	out, err := r.Run(ctx, "sh", "-c", "[ -x "+ServerBoks+" ] && echo yes; true")
-	return out == "yes", err
+	out, err := r.Run(ctx, "sh", "-c", "if [ -x "+ServerBoks+" ]; then echo yes; elif [ -e "+ServerBoks+" ] || [ -L "+ServerBoks+" ]; then echo broken; fi; true")
+	if err != nil {
+		return false, err
+	}
+	if out == "broken" {
+		return false, fmt.Errorf("the server's boks %s is there but does not run; `boks server apply` installs it again", ServerBoks)
+	}
+	return out == "yes", nil
+}
+
+// candidate is what `boks proxy-config check` reads: a policy not applied yet, as SetPolicy writes it,
+// with the secrets a policy never records, and the routes to assemble with it.
+type candidate struct {
+	Policy         json.RawMessage     `json:"policy"`
+	Fragments      []Fragment          `json:"fragments,omitempty"`
+	EgressPassword string              `json:"egress_password,omitempty"`
+	GateSecrets    map[string][]string `json:"gate_secrets,omitempty"`
+}
+
+// assembleOf is the config p — its secrets loaded — and fs make as this server's proxy would be given
+// it: by the server's own boks if it has one. What a check before any change validates is then the
+// config the reload will load, not one this boks would assemble instead.
+func assembleOf(ctx context.Context, r remote.Runner, p Policy, fs []Fragment) ([]byte, error) {
+	own, err := ownBoks(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if !own {
+		return Config(p, fs)
+	}
+	c := candidate{Policy: marshal(p), Fragments: fs, GateSecrets: p.GateSecrets}
+	if p.Egress != nil {
+		c.EgressPassword = p.Egress.Password
+	}
+	in, err := json.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+	out, err := r.Pipe(ctx, in, ServerBoks, AssembleCommand, CheckArg)
+	if err == nil && out == "" {
+		err = fmt.Errorf("it answered with no config")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("the server's boks did not assemble the config of this policy: %w (if it is a build older than this "+
+			"boks, `boks server apply` with a newer boks: commit replaces it)", err)
+	}
+	return []byte(out + "\n"), nil
 }
 
 // assemble is the config the proxy is to run with the fragments fs and the server's applied policy.
@@ -67,9 +114,15 @@ func CheckServerBoks(ctx context.Context, r remote.Runner, p Policy) error {
 	if err != nil || !own {
 		return err
 	}
-	if _, err := r.Pipe(ctx, marshal(p), ServerBoks, AssembleCommand, CheckArg); err != nil {
-		return fmt.Errorf("the server's boks does not read this policy (`boks server apply` needs a boks: commit "+
-			"as new as this boks): %w; the policy and the proxy were not changed", err)
+	fs, err := Fragments(ctx, r)
+	if err != nil {
+		return err
+	}
+	if err := loadSecrets(ctx, r, &p); err != nil {
+		return err
+	}
+	if _, err := assembleOf(ctx, r, p, fs); err != nil {
+		return fmt.Errorf("%w; the policy and the proxy were not changed", err)
 	}
 	return nil
 }
@@ -99,11 +152,28 @@ func ServerConfig(ctx context.Context, r remote.Runner, in []byte) ([]byte, erro
 	return Config(p, fs)
 }
 
-// CheckPolicy is what the server's boks answers `boks proxy-config check` with: whether it reads the
-// policy in as ServerConfig reads the one on its disk.
-func CheckPolicy(in []byte) error {
-	_, err := strictPolicy(in, "the policy")
-	return err
+// CandidateConfig is what the server's boks answers `boks proxy-config check` with: the config of the
+// candidate in — read as strictly as ServerConfig reads its disk — with the secrets it brings, and for
+// the rest those the server keeps.
+func CandidateConfig(ctx context.Context, r remote.Runner, in []byte) ([]byte, error) {
+	var c candidate
+	if err := strict(in, &c); err != nil {
+		return nil, fmt.Errorf("reading the policy to check: %w; this boks is older than the one that asks", err)
+	}
+	p, err := strictPolicy(c.Policy, "the policy")
+	if err != nil {
+		return nil, err
+	}
+	if p.Egress != nil && c.EgressPassword != "" {
+		e := *p.Egress
+		e.Password = c.EgressPassword
+		p.Egress = &e
+	}
+	p.GateSecrets = c.GateSecrets
+	if err := loadSecrets(ctx, r, &p); err != nil {
+		return nil, err
+	}
+	return Config(p, c.Fragments)
 }
 
 func strictPolicy(b []byte, what string) (Policy, error) {

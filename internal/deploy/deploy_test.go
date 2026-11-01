@@ -302,7 +302,7 @@ ports:
 var fixed = Options{Env: []byte("SECRET=1\n"), Now: func() time.Time { return time.Unix(1700000000, 0) }}
 
 // ownBoks asks whether the server has a boks of its own, which would assemble the proxy's config (#154).
-const ownBoks = "sh -c [ -x .boks/bin/boks ] && echo yes; true"
+const ownBoks = "sh -c if [ -x .boks/bin/boks ]; then echo yes; elif [ -e .boks/bin/boks ] || [ -L .boks/bin/boks ]; then echo broken; fi; true"
 
 func TestRunHappyPath(t *testing.T) {
 	f := newFake()
