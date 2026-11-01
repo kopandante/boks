@@ -134,7 +134,8 @@ func unclean(u *url.URL) bool {
 }
 
 // sameOrigin is request-gate's check on the token's issue: the Origin, or the Referer without one,
-// names the request's own host — else the token would go to another site's page.
+// names the request's own host — else the token would go to another site's page. The Host is read
+// with the source's scheme: Instagram's in-app browser sends `site:443`, which is `site` to https.
 func sameOrigin(r *http.Request) bool {
 	source := r.Header.Get("Origin")
 	if source == "" {
@@ -147,7 +148,7 @@ func sameOrigin(r *http.Request) bool {
 	if err != nil || u.Host == "" {
 		return false
 	}
-	return originHost(u) == r.Host
+	return originHost(u) == originHost(&url.URL{Scheme: u.Scheme, Host: r.Host})
 }
 
 // originHost is a URL's host as WHATWG writes it: lowercase, without the scheme's default port.

@@ -165,20 +165,32 @@ func TestExemptMethods(t *testing.T) {
 func TestTokenIssueOrigin(t *testing.T) {
 	h := enforcing(t, &Handler{}, time.Now())
 	cases := []struct {
-		origin, referer string
-		ok              bool
+		host, origin, referer string
+		ok                    bool
 	}{
-		{"https://cars.example.com", "", true},
-		{"https://CARS.example.com:443", "", true},
-		{"", "https://cars.example.com/catalog?x=1", true},
-		{"https://evil.example", "https://cars.example.com/", false},
-		{"null", "", false},
-		{"", "", false},
-		{"https://cars.example.com:8443", "", false},
+		{"", "https://cars.example.com", "", true},
+		{"", "https://CARS.example.com:443", "", true},
+		{"", "", "https://cars.example.com/catalog?x=1", true},
+		{"", "https://evil.example", "https://cars.example.com/", false},
+		{"", "null", "", false},
+		{"", "", "", false},
+		{"", "https://cars.example.com:8443", "", false},
+		// Host with the scheme's default port, as Instagram's in-app browser sends it (#175).
+		{"cars.example.com:443", "https://cars.example.com", "", true},
+		{"CARS.example.com:443", "", "https://cars.example.com/", true},
+		{"cars.example.com:80", "http://cars.example.com", "", true},
+		{"cars.example.com:8443", "https://cars.example.com", "", false},
+		{"cars.example.com:443", "http://cars.example.com", "", false},
+		{"cars.example.com:80", "https://cars.example.com", "", false},
+		{"evil.example:443", "https://cars.example.com", "", false},
+		{"cars.example.com:443", "https://evil.example", "", false},
 	}
 	for _, c := range cases {
 		r := request(http.MethodGet, tokenPath, visitor)
 		r.Host = "cars.example.com"
+		if c.host != "" {
+			r.Host = c.host
+		}
 		if c.origin != "" {
 			r.Header.Set("Origin", c.origin)
 		}
@@ -186,7 +198,7 @@ func TestTokenIssueOrigin(t *testing.T) {
 			r.Header.Set("Referer", c.referer)
 		}
 		if w := serve(t, h, r); (w.Code == 200) != c.ok {
-			t.Errorf("origin %q referer %q: %d, want ok=%v", c.origin, c.referer, w.Code, c.ok)
+			t.Errorf("host %q origin %q referer %q: %d, want ok=%v", c.host, c.origin, c.referer, w.Code, c.ok)
 		}
 	}
 }
