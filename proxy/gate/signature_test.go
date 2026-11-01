@@ -386,6 +386,9 @@ func TestSignaturePath(t *testing.T) {
 		{"a browser's image", "/_next/image?url=%2Fa.jpg&w=640&q=75", "image", 200, nil},
 		{"a page as a document", "/en/heydealer", "document", 200, nil},
 		{"a path with _next/ inside", "/en/_next/x", "document", 200, nil},
+		// Dot segments the gate lets through are cleaned before the path is matched.
+		{"the scraper's chunk past a dot segment", "/x/../_next/static/chunks/main.js", "document", 403, "static-as-document"},
+		{"the scraper's chunk past a dot", "/./_next/static/chunks/main.js", "document", 403, "static-as-document"},
 	}
 	for _, c := range cases {
 		now := time.Now()

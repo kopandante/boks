@@ -388,7 +388,7 @@ func (h *Handler) decide(r *http.Request, ip string) decision {
 	if nextData(p) {
 		return deny("next_data", badPath)
 	}
-	if d, ok := h.signed(r, ip); ok {
+	if d, ok := h.signed(r, p, ip); ok {
 		return d
 	}
 	if !strings.HasPrefix(p, "/api/") {
