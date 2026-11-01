@@ -22,6 +22,6 @@ Base: 7a97564 | Branch: fix/pull-retry
 - [x] 0 worktree
 - [x] 1 план (issue #150)
 - [x] 2 реализация
-- [ ] 3 PR
+- [x] 3 PR (#152)
 - [ ] 4 review-loop green
 - [ ] 5 merge
