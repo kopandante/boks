@@ -1,6 +1,6 @@
 # Plan: googlePool — только адреса обхода Googlebot (boks#138)
 
-Base: a8c7bc2 (перенос на main после #137 и PR про общий CA) | Branch: fix/gate-google-pool-crawlers
+Base: 7a97564 (перенесено на main после #137, #141, #142, #143, #146) | Branch: fix/gate-google-pool-crawlers
 
 Зачем: исключение гейта для пула Google (`googlePool`, boks#129) включало user-triggered-fetchers-google —
 сервисы, которые программирует сам пользователь Google; скрейпер оттуда получал токен и проход с любого
@@ -29,6 +29,6 @@ Base: a8c7bc2 (перенос на main после #137 и PR про общий 
 - [x] 0 worktree
 - [x] 1 план
 - [x] 2 реализация
-- [ ] 3 PR
+- [x] 3 PR
 - [ ] 4 review-loop green
 - [ ] 5 merge
