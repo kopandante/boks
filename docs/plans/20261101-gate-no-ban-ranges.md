@@ -21,6 +21,6 @@ Base: 879488d | Branch: feat/gate-no-ban-ranges
 - [x] 0 worktree
 - [x] 1 план (issue #160)
 - [x] 2 реализация
-- [ ] 3 PR
+- [x] 3 PR (#161)
 - [ ] 4 review-loop green
 - [ ] 5 merge
