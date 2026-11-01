@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -50,6 +51,97 @@ type Server struct {
 	// Gate, when given, has the proxy check the sites' API token on the hosts of the apps it names, in
 	// place of each site (gate.go).
 	Gate *Gate `yaml:"gate"`
+	// RangeSets are named sets of addresses — a country's, from its registry's delegations — that a gate
+	// signature's `ranges` names (#140): a list of addresses and CIDR ranges, or a file of them beside
+	// server.yml, one on a line, # for comments. A file is read when server.yml is, and what it held goes
+	// into the policy, in the groups whose signatures name the set: a revision holds the list it was
+	// applied with, a rollback puts that list back, and an edit of the file changes nothing until applied.
+	RangeSets map[string]RangeSet `yaml:"range_sets"`
+}
+
+// RangeSet is one of range_sets: Ranges as written, or read from File.
+type RangeSet struct {
+	File   string
+	Ranges []string
+}
+
+// maxRangeSet bounds a set: Japan's delegations merged are some thousands of ranges.
+const maxRangeSet = 50_000
+
+func (r *RangeSet) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&r.File)
+	}
+	return n.Decode(&r.Ranges)
+}
+
+// readRangeFile is a file of range_sets: an address or a CIDR range on a line, blank lines and what
+// follows # left out.
+func readRangeFile(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out, nil
+}
+
+// readRangeSets reads every set given as a file, relative to dir, into its Ranges.
+func (s *Server) readRangeSets(dir string) error {
+	for name, rs := range s.RangeSets {
+		if rs.File == "" {
+			continue
+		}
+		f := rs.File
+		if !filepath.IsAbs(f) {
+			f = filepath.Join(dir, f)
+		}
+		list, err := readRangeFile(f)
+		if err != nil {
+			return fmt.Errorf("range_sets.%s: %w", name, err)
+		}
+		rs.Ranges = list
+		s.RangeSets[name] = rs
+	}
+	return nil
+}
+
+// validateRangeSets checks every set: a name, addresses and CIDR ranges alone, none of every address.
+func (s *Server) validateRangeSets() error {
+	for name, rs := range s.RangeSets {
+		switch {
+		case !nameRe.MatchString(name):
+			return fmt.Errorf("range_sets: name %q must match %s", name, nameRe)
+		case len(rs.Ranges) == 0:
+			return fmt.Errorf("range_sets.%s: empty; a signature on it would match no one", name)
+		case len(rs.Ranges) > maxRangeSet:
+			return fmt.Errorf("range_sets.%s: %d ranges, more than %d", name, len(rs.Ranges), maxRangeSet)
+		}
+		if err := checkRanges(rs.Ranges, "holds every address; a signature on it would ignore the address"); err != nil {
+			return fmt.Errorf("range_sets.%s: %w", name, err)
+		}
+		if err := checkWrittenAsIPv4(rs.Ranges); err != nil {
+			return fmt.Errorf("range_sets.%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// RangePrefixes are a set's ranges as masked CIDR ranges, as TrustedPrefixes are TrustedProxies.
+func (r RangeSet) RangePrefixes() []string {
+	var out []string
+	for _, p := range prefixes(r.Ranges) {
+		out = append(out, p.String())
+	}
+	return out
 }
 
 // Ban is the ban by request rate. An address that sends more than a rule's Limit requests within its
@@ -371,16 +463,19 @@ func LoadServer(path string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := ParseServer(data)
+	s, err := parseServerIn(data, filepath.Dir(path))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return s, nil
 }
 
-// ParseServer is LoadServer on bytes: strict about unknown keys and about a second document, for the
-// same reason as Parse.
-func ParseServer(data []byte) (*Server, error) {
+// ParseServer is LoadServer on bytes, its range_sets files read relative to the working directory.
+func ParseServer(data []byte) (*Server, error) { return parseServerIn(data, ".") }
+
+// parseServerIn is LoadServer on bytes, its range_sets files read relative to dir: strict about
+// unknown keys and about a second document, for the same reason as Parse.
+func parseServerIn(data []byte, dir string) (*Server, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var s Server
@@ -415,6 +510,9 @@ func ParseServer(data []byte) (*Server, error) {
 	if s.Gate == nil && keys.Gate.Kind != 0 {
 		return nil, errors.New("gate: empty; remove the key for no gate")
 	}
+	if err := s.readRangeSets(dir); err != nil {
+		return nil, err
+	}
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -427,7 +525,7 @@ func (s *Server) validate() error {
 	}
 	// A file of servers alone — what `boks server install` reads — has no policy to number. One with a
 	// policy needs its revision, and `boks server apply` asks for one either way.
-	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0 || s.TrustedProxiesCA != "" || s.Ban != nil || s.Gate != nil) {
+	if s.Revision < 1 && (s.Revision != 0 || len(s.Bots.Block) > 0 || len(s.Bots.Allow) > 0 || s.Egress != nil || len(s.TrustedProxies) > 0 || s.TrustedProxiesCA != "" || len(s.RangeSets) > 0 || s.Ban != nil || s.Gate != nil) {
 		return errors.New("revision: required, a whole number from 1 that grows by one with every edit")
 	}
 	if s.Egress != nil {
@@ -440,8 +538,14 @@ func (s *Server) validate() error {
 			return fmt.Errorf("ban: %w", err)
 		}
 	}
+	if err := s.validateRangeSets(); err != nil {
+		return err
+	}
 	if s.Gate != nil {
 		if err := s.Gate.validate(); err != nil {
+			return fmt.Errorf("gate: %w", err)
+		}
+		if err := s.Gate.withRangeSets(s.RangeSets); err != nil {
 			return fmt.Errorf("gate: %w", err)
 		}
 	}
