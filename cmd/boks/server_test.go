@@ -25,6 +25,9 @@ import (
 
 const policyRead = "sh -c if [ -f '.boks/_server/policy.json' ]"
 
+// keysRead reads authorized_keys for the deploy keys (#154, stage 3).
+const keysRead = "sh -c if [ -L .ssh/authorized_keys ]"
+
 // Every server is asked before any changes: b has moved past the file's revision, so a is not
 // touched either — a refusal halfway down the list would leave the fleet on two policies. No
 // boks.yml is read: server.yml belongs to the server.
@@ -665,7 +668,7 @@ func TestApplyBringsTheServersBoksFirst(t *testing.T) {
 	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := &recorder{server: server{policyRead: "present\n{\"revision\":1,\"floor\":1}", "uname -m": "x86_64"}}
+	a := &recorder{server: server{policyRead: "present\n{\"revision\":1,\"floor\":1}", "uname -m": "x86_64", keysRead: "absent"}}
 	fleet(t, map[string]*recorder{"a": a}, time.Now)
 	var errw strings.Builder
 	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "404 Not Found; nothing was changed") {
@@ -694,8 +697,8 @@ func TestApplyChecksBoksOnEveryServerFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	pol := "present\n{\"revision\":1,\"floor\":1}"
-	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
-	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64", keysRead: "absent"}}
+	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64", keysRead: "absent"}}
 	c := &recorder{server: server{policyRead: pol, "uname -m": "aarch64"}}
 	fleet(t, map[string]*recorder{"a": a, "b": b, "c": c}, time.Now)
 	var errw strings.Builder
@@ -738,7 +741,7 @@ func TestApplyWritesBoksBeforeThePolicy(t *testing.T) {
 	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+hex.EncodeToString(s[:])+"}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := &recorder{server: server{policyRead: "present\n{\"revision\":1,\"floor\":1}", "uname -m": "x86_64"}}
+	a := &recorder{server: server{policyRead: "present\n{\"revision\":1,\"floor\":1}", "uname -m": "x86_64", keysRead: "absent"}}
 	fleet(t, map[string]*recorder{"a": a}, time.Now)
 	// The fake answers no firewall, so the run ends in an error after the policy; what is checked is the
 	// order of what was written up to there.
@@ -772,7 +775,7 @@ func TestApplyBoksRefusedOnAServerLeavesEveryPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	pol := "present\n{\"revision\":1,\"floor\":1}"
-	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64", keysRead: "absent"}}
 	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64", "fail": "version 2>&1"}}
 	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
 	var errw strings.Builder
@@ -903,8 +906,8 @@ func TestApplyWritesTheAppsBetweenBoksAndPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	pol := "present\n{\"revision\":1,\"floor\":1}"
-	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
-	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64"}}
+	a := &recorder{server: server{policyRead: pol, "uname -m": "x86_64", keysRead: "absent"}}
+	b := &recorder{server: server{policyRead: pol, "uname -m": "x86_64", keysRead: "absent"}}
 	fleet(t, map[string]*recorder{"a": a, "b": b}, time.Now)
 	run([]string{"server", "apply", path}, io.Discard, io.Discard)
 	boks, app, env, policy := -1, -1, -1, -1

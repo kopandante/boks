@@ -67,6 +67,10 @@ type Server struct {
 	// path of its boks.yml, relative to server.yml. `server apply` writes them; the server's own boks
 	// deploys from them, so it needs Boks.
 	Apps map[string]string `yaml:"apps"`
+	// DeployKeys are, by app of Apps, the ssh public key a site's CI deploys that app with (#154, stage 3):
+	// `server apply` writes each into authorized_keys bound to `boks deploy-hook <app>`, so the key does
+	// nothing but deploy its app.
+	DeployKeys map[string]string `yaml:"deploy_keys"`
 
 	// dir is the directory server.yml is in: the apps' paths are relative to it.
 	dir string
@@ -674,6 +678,14 @@ func (s *Server) validate() error {
 		}
 		if strings.TrimSpace(p) == "" {
 			return fmt.Errorf("apps: %s: the path of its boks.yml is required", name)
+		}
+	}
+	for app, key := range s.DeployKeys {
+		if _, ok := s.Apps[app]; !ok {
+			return fmt.Errorf("deploy_keys: %s is not an app of apps:", app)
+		}
+		if _, err := DeployKey(key); err != nil {
+			return fmt.Errorf("deploy_keys: %s: %w", app, err)
 		}
 	}
 	if s.Egress != nil {

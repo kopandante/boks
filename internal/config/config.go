@@ -1183,3 +1183,6 @@ func (c *Config) resolve(p string) string {
 	}
 	return filepath.Join(c.Dir, p)
 }
+
+// ValidAppName says whether name is one an app may have: what `app:` takes.
+func ValidAppName(name string) bool { return nameRe.MatchString(name) && name != "bin" }
