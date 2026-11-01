@@ -1,10 +1,13 @@
 package config
 
 import (
+	"crypto/x509"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // habsida is the bot policy Habsida ran as hand-written Traefik files (bot-policy.yml,
@@ -369,6 +372,63 @@ func TestParseServerBanRejects(t *testing.T) {
 	} {
 		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc), c.want, err)
+		}
+	}
+}
+
+// caPEM is a file of the live test of the origin pull (proxy/gate), indented under trusted_proxies_ca.
+func caPEM(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile("../../proxy/gate/testdata/originpull/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "trusted_proxies_ca: |\n  " + strings.ReplaceAll(strings.TrimSpace(string(b)), "\n", "\n  ") + "\n"
+}
+
+// The trusted proxies' CA is read as its certificates, DER; without it there are none.
+func TestParseServerTrustedProxiesCA(t *testing.T) {
+	both := "servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n" + caPEM(t, "ca.pem") + "  " + strings.TrimPrefix(caPEM(t, "other-ca.pem"), "trusted_proxies_ca: |\n  ")
+	s, err := ParseServer([]byte(both))
+	if err != nil {
+		t.Fatal(err)
+	}
+	certs := s.TrustedProxiesCerts()
+	if len(certs) != 2 {
+		t.Fatalf("want both certificates, got %d", len(certs))
+	}
+	if c, err := x509.ParseCertificate(certs[0]); err != nil || c.Subject.CommonName != "boks test origin-pull CA" {
+		t.Errorf("first certificate: %v %v", c, err)
+	}
+	s, err = ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n"))
+	if err != nil || s.TrustedProxiesCerts() != nil {
+		t.Errorf("want none without the field: %v", err)
+	}
+}
+
+// A CA without proxies to ask, a key, anything but certificates, and a certificate out of force are
+// refused: applied, the last would refuse every connection of the proxies in front.
+func TestParseServerTrustedProxiesCARejects(t *testing.T) {
+	trusted := "servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n"
+	for _, c := range []struct{ doc, want string }{
+		{"servers: [a]\n" + caPEM(t, "ca.pem"), "revision"},
+		{"servers: [a]\nrevision: 1\n" + caPEM(t, "ca.pem"), "trusted_proxies_ca: no trusted_proxies to ask a certificate of"},
+		{trusted + caPEM(t, "client.key"), "trusted_proxies_ca: a EC PRIVATE KEY block; only certificates go here"},
+		{trusted + "trusted_proxies_ca: cloudflare\n", "trusted_proxies_ca: want one or more PEM certificates"},
+		{trusted + caPEM(t, "ca.pem") + "  trailing\n", "want one or more PEM certificates"},
+		{trusted + "trusted_proxies_ca: |\n  -----BEGIN CERTIFICATE-----\n  AAAA\n  -----END CERTIFICATE-----\n", "trusted_proxies_ca: certificate 1:"},
+	} {
+		if _, err := ParseServer([]byte(c.doc)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want an error containing %q, got %v", strings.TrimSpace(c.doc)[:40], c.want, err)
+		}
+	}
+	b, err := os.ReadFile("../../proxy/gate/testdata/originpull/ca.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, now := range []time.Time{time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)} {
+		if _, err := parseCAs(string(b), now); err == nil || !strings.Contains(err.Error(), "is valid from") {
+			t.Errorf("at %s: want the certificate refused out of force, got %v", now.Format(time.DateOnly), err)
 		}
 	}
 }

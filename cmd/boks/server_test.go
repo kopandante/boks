@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/pem"
 	"io"
 	"os"
 	"path/filepath"
@@ -188,6 +190,28 @@ func TestPolicyOfCarriesTheTrustedProxies(t *testing.T) {
 	}
 	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\n"))
 	if err != nil || policyOf(sc).TrustedProxies != nil {
+		t.Errorf("want none without the field: %v", err)
+	}
+}
+
+// The policy carries the trusted proxies' CA as its DER certificates, and none without it.
+func TestPolicyOfCarriesTheTrustedProxiesCA(t *testing.T) {
+	pemBytes, err := os.ReadFile("../../proxy/gate/testdata/originpull/ca.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := "servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\ntrusted_proxies_ca: |\n  " +
+		strings.ReplaceAll(strings.TrimSpace(string(pemBytes)), "\n", "\n  ") + "\n"
+	sc, err := config.ParseServer([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk, _ := pem.Decode(pemBytes)
+	if got := policyOf(sc).TrustedProxiesCA; len(got) != 1 || !bytes.Equal(got[0], blk.Bytes) {
+		t.Errorf("want the CA's certificate, got %d", len(got))
+	}
+	sc, err = config.ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [173.245.48.0/20]\n"))
+	if err != nil || policyOf(sc).TrustedProxiesCA != nil {
 		t.Errorf("want none without the field: %v", err)
 	}
 }

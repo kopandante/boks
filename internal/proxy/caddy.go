@@ -5,6 +5,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -130,6 +131,12 @@ type Fragment struct {
 // from the blocks and the ban — and assemble the config without
 // the partners' exemptions, so the next deploy from it would ban the partners again, without a word.
 // Like 8 and 9, it is written only in the marker, by `boks server apply` of a policy that has either.
+//
+// Format 11 is the origin pull: the trusted proxies' CA (trusted_proxies_ca). A boks of format 10 would
+// read the policy without it and assemble the config that trusts the headers of every connection from
+// the proxies' addresses again — a Worker of anyone's Cloudflare account picking the address a ban
+// judges — without a word. Like 8 to 10, it is written only in the marker, by `boks server apply` of a
+// policy that has one: a server without stays open to the boks of format 10, and of 9 below it.
 const FragmentFormat = 7
 
 // GateFormat is the format of a server whose policy has a gate.
@@ -139,9 +146,12 @@ const GateFormat = 8
 const DenyFormat = 9
 
 // KeyFormat is the format of a server whose policy has a key — an allow by a header or by domains, or
-// spare_bearer —
-// and the newest this boks reads.
+// spare_bearer.
 const KeyFormat = 10
+
+// OriginPullFormat is the format of a server whose policy has the trusted proxies' CA, and the newest
+// this boks reads.
+const OriginPullFormat = 11
 
 func fragmentPath(app string) string { return path.Join(Dir, "routes", app+".json") }
 
@@ -330,8 +340,14 @@ func Config(p Policy, fragments []Fragment) ([]byte, error) {
 	// The apps' servers only: the egress server, which joins them below, has its clients connect to it
 	// directly.
 	if len(p.TrustedProxies) > 0 {
-		for _, s := range servers {
-			trustProxies(s, p.TrustedProxies)
+		for name, s := range servers {
+			switch {
+			case len(p.TrustedProxiesCA) == 0:
+				trustProxies(s, p.TrustedProxies)
+			case name == "https":
+				trustProxies(s, p.TrustedProxies)
+				originPull(s, p)
+			}
 		}
 	}
 	if p.Egress != nil {
@@ -382,9 +398,40 @@ func policyRoutes(p Policy, hs []gateHandler, fragments []Fragment, s *server, t
 	}
 	s.Routes = slices.Concat(botRoutes(p, keys), gate, s.Routes)
 	if p.Ban != nil {
-		s.Routes = append([]caddyRoute{banRoute(*p.Ban, p, banBearers(spared, fragments))}, s.Routes...)
+		s.Routes = append([]caddyRoute{banRoute(plainBan(*p.Ban, p, tls), p, banBearers(spared, fragments))}, s.Routes...)
 	}
 	return nil
+}
+
+// plainBan is the ban of the server on 80, b with the trusted proxies left uncounted when they have a
+// CA: there their headers are not trusted (originPull), the client is the proxy's node, and a ban of it
+// would refuse every visitor it carries over plain HTTP.
+func plainBan(b Ban, p Policy, tls bool) Ban {
+	if tls || len(p.TrustedProxiesCA) == 0 {
+		return b
+	}
+	b.ExemptRanges = slices.Concat(b.ExemptRanges, p.TrustedProxies)
+	return b
+}
+
+// TrustedString is the line `boks server status` and apply print of p's trusted proxies, "" without.
+func TrustedString(p Policy) string {
+	if len(p.TrustedProxies) == 0 {
+		return ""
+	}
+	s := "X-Forwarded-For trusted from " + strings.Join(p.TrustedProxies, ", ")
+	if len(p.TrustedProxiesCA) == 0 {
+		return s
+	}
+	var names []string
+	for _, der := range p.TrustedProxiesCA {
+		name := "an unreadable certificate"
+		if c, err := x509.ParseCertificate(der); err == nil {
+			name = c.Subject.String()
+		}
+		names = append(names, name)
+	}
+	return s + " over TLS only, with a client certificate of " + strings.Join(names, ", ") + "; the rest refused at the handshake"
 }
 
 // The shape of Caddy's JSON config, as far as boks writes it.
@@ -421,6 +468,27 @@ type (
 		TrustedProxies       *ipSource `json:"trusted_proxies,omitempty"`
 		ClientIPHeaders      []string  `json:"client_ip_headers,omitempty"`
 		TrustedProxiesStrict int       `json:"trusted_proxies_strict,omitempty"`
+		// TLSConnPolicies, the first whose match takes the handshake, are set with the trusted proxies'
+		// CA alone (originPull); Caddy adds its default one without.
+		TLSConnPolicies []tlsConnPolicy `json:"tls_connection_policies,omitempty"`
+		StrictSNIHost   *bool           `json:"strict_sni_host,omitempty"`
+	}
+	tlsConnPolicy struct {
+		Match                *handshakeMatch `json:"match,omitempty"`
+		ClientAuthentication *clientAuth     `json:"client_authentication,omitempty"`
+	}
+	// handshakeMatch is Caddy's tls.handshake_match: RemoteIP the address of the connection.
+	handshakeMatch struct {
+		RemoteIP *remoteIP `json:"remote_ip,omitempty"`
+	}
+	clientAuth struct {
+		CA   *caPool `json:"ca"`
+		Mode string  `json:"mode"`
+	}
+	// caPool is Caddy's tls.ca_pool.source.inline: DER certificates, base64 in JSON.
+	caPool struct {
+		Provider       string   `json:"provider"`
+		TrustedCACerts [][]byte `json:"trusted_ca_certs"`
 	}
 	// ipSource is Caddy's static source of IP ranges (http.ip_sources.static).
 	ipSource struct {
@@ -607,6 +675,27 @@ func trustProxies(s *server, ranges []string) {
 	s.TrustedProxiesStrict = 1
 }
 
+// originPull has s ask a connection from the trusted proxies for a client certificate of their CA —
+// Cloudflare's Authenticated Origin Pulls — and refuse the handshake without one; a connection from any
+// other address is asked for none. Refused rather than let in with its headers untrusted: the client of
+// such a request would be the proxy's node, and the ban, which judges the client, would refuse every
+// visitor behind it. A connection from the proxies' addresses without the certificate is a request
+// someone else sent through them — a Worker of another account — or a zone not set up yet, and is
+// refused either way. Plain HTTP carries no certificate: the server on 80 trusts no one with a CA
+// (Config), and its ban leaves the proxies' addresses out (policyRoutes).
+//
+// Caddy turns on strict_sni_host by itself when a policy asks for a client certificate, answering 421 to
+// a request whose Host is not its SNI; it stays off, as without the CA: the certificate proves the
+// proxy, not a host, and a visitor connecting without SNI kept being served.
+func originPull(s *server, p Policy) {
+	s.TLSConnPolicies = []tlsConnPolicy{
+		{Match: &handshakeMatch{RemoteIP: &remoteIP{Ranges: p.TrustedProxies}},
+			ClientAuthentication: &clientAuth{CA: &caPool{Provider: "inline", TrustedCACerts: p.TrustedProxiesCA}, Mode: "require_and_verify"}},
+		{},
+	}
+	s.StrictSNIHost = new(bool)
+}
+
 // hasHost tells whether hosts names h in any case: Caddy matches hosts without regard to case, and
 // refuses a host matcher that names one twice.
 func hasHost(hosts []string, h string) bool {
@@ -728,9 +817,9 @@ func Fragments(ctx context.Context, r remote.Runner) ([]Fragment, error) {
 		// The format a fragment opens with; one written before it was introduced has none.
 		var format int
 		if json.Unmarshal(v, &format) == nil {
-			if format > KeyFormat {
+			if format > OriginPullFormat {
 				return nil, fmt.Errorf("reading the proxy's routes: a route file has format %d, newer than this boks (%d) knows; "+
-					"update boks before changing this server", format, KeyFormat)
+					"update boks before changing this server", format, OriginPullFormat)
 			}
 			continue
 		}

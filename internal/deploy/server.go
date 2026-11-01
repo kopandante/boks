@@ -225,8 +225,8 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	if e := next.Egress; e != nil {
 		fmt.Fprintf(log, "  egress proxy on port %d for %s\n", e.Port, strings.Join(e.Allow, ", "))
 	}
-	if len(next.TrustedProxies) > 0 {
-		fmt.Fprintf(log, "  X-Forwarded-For trusted from %s\n", strings.Join(next.TrustedProxies, ", "))
+	if line := proxy.TrustedString(next); line != "" {
+		fmt.Fprintf(log, "  %s\n", line)
 	}
 	if b := next.Ban; b != nil {
 		fmt.Fprintf(log, "  %s\n", b)

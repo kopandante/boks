@@ -39,7 +39,11 @@ type Policy struct {
 	// TrustedProxies are the CIDR ranges of the proxies in front of boks whose X-Forwarded-For the
 	// servers on 80 and 443 keep; none trusts no one.
 	TrustedProxies []string `json:"trusted_proxies,omitempty"`
-	Ban            *Ban     `json:"ban,omitempty"`
+	// TrustedProxiesCA are the DER certificates of the CA a trusted proxy's client certificate must
+	// chain to — Cloudflare's Authenticated Origin Pulls (originPull). A policy with them needs
+	// OriginPullFormat.
+	TrustedProxiesCA [][]byte `json:"trusted_proxies_ca,omitempty"`
+	Ban              *Ban     `json:"ban,omitempty"`
 	// Gate is the gate as server.yml writes it, the proxy's check of the sites' API token (gate.go).
 	Gate json.RawMessage `json:"gate,omitempty"`
 	// SpareBearer, set by the apply of a boks that knows it whenever a group of the gate that is not off
@@ -172,9 +176,12 @@ func (p Policy) keyed() bool {
 	return p.SpareBearer || slices.ContainsFunc(p.Allow, func(a BotAllow) bool { return a.Header != "" || len(a.Domains) > 0 })
 }
 
-// policyFormat is the format a policy needs boks to know: the keys' with a key, the deny's with a deny,
-// the gate's with a gate, the fragments' with none.
+// policyFormat is the format a policy needs boks to know: the origin pull's with a CA of the trusted
+// proxies, the keys' with a key, the deny's with a deny, the gate's with a gate, the fragments' with none.
 func policyFormat(p Policy) int {
+	if len(p.TrustedProxiesCA) > 0 {
+		return OriginPullFormat
+	}
 	if p.keyed() {
 		return KeyFormat
 	}
