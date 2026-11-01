@@ -454,8 +454,11 @@ func TestApplyServerAsksTheServersBoksBeforeTheSwap(t *testing.T) {
 		t.Errorf("want nothing changed: %v %v %v", f.calls, f.uploads, f.appends)
 	}
 	// It was asked about the bytes SetPolicy would write.
-	var asked proxy.Policy
-	if err := json.Unmarshal([]byte(f.stdin[check]), &asked); err != nil || asked.Revision != 2 || asked.Floor != 2 || asked.Egress == nil {
+	var c struct {
+		Policy proxy.Policy `json:"policy"`
+	}
+	err = json.Unmarshal([]byte(f.stdin[check]), &c)
+	if asked := c.Policy; err != nil || asked.Revision != 2 || asked.Floor != 2 || asked.Egress == nil {
 		t.Errorf("asked about %q (%v), want next with its floor", f.stdin[check], err)
 	}
 }

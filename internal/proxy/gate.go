@@ -444,7 +444,7 @@ func CheckGate(ctx context.Context, r remote.Runner, p Policy) error {
 	if err := loadSecrets(ctx, r, &p); err != nil {
 		return err
 	}
-	if _, err := Config(p, fs); err != nil {
+	if _, err := assembleOf(ctx, r, p, fs); err != nil {
 		return err
 	}
 	hs, err := gateHandlers(p)

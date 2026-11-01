@@ -36,7 +36,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   version          the commit this boks was built from
   proxy-config     (the server's own boks) the proxy's config of the routes on stdin and the
                    policy of this server; deploy, apply and proxy upgrade ask it for that config;
-                   with check, whether it reads the policy on stdin, which apply asks first
+                   with check, the config of a policy not applied yet, sent with its secrets
+                   and routes on stdin, which apply and the checks before any change ask for
   proxy boot       make sure the proxy (Caddy) is running (idempotent)
   proxy list       routes the proxy serves, for every app on each server
   proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
@@ -231,21 +232,22 @@ var (
 )
 
 // assembleHere prints the config of the routes on stdin and the policy of this machine, the server
-// whose boks this is, read from the home as ssh would reach it. With check, stdin is a policy, and the
-// answer is whether this boks reads it (proxy.CheckServerBoks).
+// whose boks this is, read from the home as ssh would reach it. With check, stdin is a policy not
+// applied yet with its routes, and the answer is its config (proxy.CandidateConfig).
 func assembleHere(ctx context.Context, out io.Writer, check bool) error {
 	in, err := io.ReadAll(stdin)
 	if err != nil {
 		return err
 	}
-	if check {
-		return proxy.CheckPolicy(in)
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
-	body, err := proxy.ServerConfig(ctx, remote.Local{Dir: home}, in)
+	assemble := proxy.ServerConfig
+	if check {
+		assemble = proxy.CandidateConfig
+	}
+	body, err := assemble(ctx, remote.Local{Dir: home}, in)
 	if err != nil {
 		return err
 	}

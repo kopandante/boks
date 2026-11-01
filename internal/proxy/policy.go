@@ -480,7 +480,7 @@ func SetPolicy(ctx context.Context, r remote.Runner, log io.Writer, p Policy) er
 	if err := loadSecrets(ctx, r, &p); err != nil {
 		return err
 	}
-	if _, err := Config(p, fs); err != nil {
+	if _, err := assembleOf(ctx, r, p, fs); err != nil {
 		return err
 	}
 	// A marker going up first: alone, it only stops an older boks. One going down — the gate removed —

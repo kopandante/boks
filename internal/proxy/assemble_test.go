@@ -23,7 +23,7 @@ type owned struct {
 }
 
 func (o *owned) Run(ctx context.Context, args ...string) (string, error) {
-	if strings.Join(args, " ") == "sh -c [ -x "+ServerBoks+" ] && echo yes; true" {
+	if strings.HasPrefix(strings.Join(args, " "), "sh -c if [ -x "+ServerBoks+" ]") {
 		o.calls = append(o.calls, "own boks?")
 		return "yes", nil
 	}
@@ -39,7 +39,7 @@ func (o *owned) Pipe(ctx context.Context, content []byte, args ...string) (strin
 	case ServerBoks + " " + AssembleCommand + " " + CheckArg:
 		o.calls = append(o.calls, "check")
 		o.piped = content
-		return "", o.err
+		return o.config, o.err
 	}
 	return o.fake.Pipe(ctx, content, args...)
 }
@@ -175,22 +175,31 @@ func TestServerConfigRefusesWhatItDoesNotKnow(t *testing.T) {
 	}
 }
 
-// The server's boks is asked about the policy as SetPolicy writes it, and its refusal is a refusal that
-// changed neither the policy nor the proxy (on `server apply` the server's boks itself was switched
-// just before, by InstallBoks); a server without one is not asked.
+// The server's boks is asked for the config of the policy as SetPolicy writes it, with the secrets it
+// never records and the server's routes; its refusal is a refusal that changed neither the policy nor
+// the proxy; a server without one is not asked.
 func TestCheckServerBoks(t *testing.T) {
-	p := Policy{Revision: 3, Floor: 3, Block: []BotBlock{{Name: "crawlers", UserAgent: "(?i)gptbot"}}}
-	o := &owned{fake: &fake{}}
+	p := Policy{Revision: 3, Floor: 3, Block: []BotBlock{{Name: "crawlers", UserAgent: "(?i)gptbot"}}, Egress: encar}
+	o := &owned{fake: &fake{}, config: "{}"}
 	if err := CheckServerBoks(context.Background(), o, p); err != nil {
 		t.Fatal(err)
 	}
-	if string(o.piped) != string(marshal(p)) {
-		t.Errorf("asked about %s, want the bytes SetPolicy writes", o.piped)
+	var c candidate
+	if err := strict(o.piped, &c); err != nil {
+		t.Fatal(err)
+	}
+	if !sameJSON(c.Policy, marshal(p)) || c.EgressPassword != "s3cret" {
+		t.Errorf("asked about %s with password %q, want the bytes SetPolicy writes and the password", c.Policy, c.EgressPassword)
 	}
 	o = &owned{fake: &fake{}, err: errors.New(`json: unknown field "egress"`)}
 	err := CheckServerBoks(context.Background(), o, p)
 	if err == nil || !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "the policy and the proxy were not changed") {
 		t.Fatalf("err = %v, want the server's refusal", err)
+	}
+	// A build that answers with nothing — the stage-1b one, which only read the policy — does not pass.
+	o = &owned{fake: &fake{}}
+	if err := CheckServerBoks(context.Background(), o, p); err == nil || !strings.Contains(err.Error(), "no config") {
+		t.Errorf("err = %v, want an empty answer refused", err)
 	}
 	f := &fake{}
 	if err := CheckServerBoks(context.Background(), f, p); err != nil {
@@ -203,14 +212,80 @@ func TestCheckServerBoks(t *testing.T) {
 	}
 }
 
-// CheckPolicy reads a policy as ServerConfig reads the one on the disk: a field this boks does not know
-// is refused, one it knows is taken.
-func TestCheckPolicyIsStrict(t *testing.T) {
-	if err := CheckPolicy(marshal(Policy{Revision: 2, Block: []BotBlock{{Name: "a", UserAgent: "b"}}})); err != nil {
-		t.Errorf("a policy of this boks refused: %v", err)
+// What a check before any change validates is the config the server's boks assembles, not this boks's.
+func TestValidateChecksTheServersConfig(t *testing.T) {
+	o := &owned{fake: &fake{state: running}, config: `{"from":"the server"}`}
+	if err := validate(context.Background(), o, Policy{Revision: 2}, site); err != nil {
+		t.Fatal(err)
 	}
-	err := CheckPolicy([]byte(`{"revision": 2, "floor": 2, "newer_filter": {"on": true}}`))
-	if err == nil || !strings.Contains(err.Error(), "newer_filter") || !strings.Contains(err.Error(), "server apply") {
+	if at(o.calls, "check") < 0 {
+		t.Errorf("validate did not ask the server's boks: %v", o.calls)
+	}
+}
+
+// A server's boks that is there and does not run is an error, never a config assembled here.
+func TestABrokenServerBoksIsAnError(t *testing.T) {
+	f := &fake{out: map[string]string{"sh -c if [ -x " + ServerBoks + " ]": "broken"}}
+	if _, err := assemble(context.Background(), f, site); err == nil || !strings.Contains(err.Error(), "does not run") {
+		t.Errorf("assemble: err = %v", err)
+	}
+	if at(f.calls, "sh -c if [ -f '.boks/_server/policy.json'") >= 0 {
+		t.Errorf("assembled here: %v", f.calls)
+	}
+	if _, err := assembleOf(context.Background(), f, Policy{}, site); err == nil {
+		t.Errorf("assembleOf: no error")
+	}
+}
+
+// CandidateConfig is Config of the policy it is sent, read strictly, with the secrets it brings and
+// for the rest those the server keeps.
+func TestCandidateConfig(t *testing.T) {
+	p := Policy{Revision: 4, Block: []BotBlock{{Name: "a", UserAgent: "b"}}, Egress: encar}
+	in, _ := json.Marshal(candidate{Policy: marshal(p), Fragments: site, EgressPassword: "s3cret"})
+	got, err := CandidateConfig(context.Background(), home(t, ""), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := Config(p, site)
+	if string(got) != string(want) {
+		t.Errorf("config differs from Config of the policy sent")
+	}
+	// Without the password it brings, the one the server keeps.
+	l := home(t, "")
+	if err := os.MkdirAll(filepath.Join(l.Dir, ServerDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.Dir, egressSecretPath()), []byte("encar:s3cret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in, _ = json.Marshal(candidate{Policy: marshal(p), Fragments: site})
+	if got, err := CandidateConfig(context.Background(), l, in); err != nil || string(got) != string(want) {
+		t.Errorf("with the server's password: err = %v, or config differs", err)
+	}
+	in, _ = json.Marshal(candidate{Policy: []byte(`{"revision": 2, "floor": 2, "newer_filter": {"on": true}}`)})
+	if _, err := CandidateConfig(context.Background(), home(t, ""), in); err == nil || !strings.Contains(err.Error(), "newer_filter") ||
+		!strings.Contains(err.Error(), "server apply") {
 		t.Errorf("err = %v, want the unknown field refused with what to do", err)
+	}
+	if _, err := CandidateConfig(context.Background(), home(t, ""), []byte(`{"policy": {}, "newer": 1}`)); err == nil || !strings.Contains(err.Error(), "newer") {
+		t.Errorf("err = %v, want an unknown field of the request refused", err)
+	}
+}
+
+// The gate's secrets a candidate brings are the ones its config holds: without them, a server that
+// keeps none would refuse the check, and one that keeps old ones would validate their config instead.
+func TestCandidateConfigTakesTheGatesSecrets(t *testing.T) {
+	p := gated()
+	in, _ := json.Marshal(candidate{Policy: marshal(p), Fragments: shopAndBlog, GateSecrets: p.GateSecrets})
+	got, err := CandidateConfig(context.Background(), home(t, ""), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Config(p, shopAndBlog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("config differs from Config of the gated policy")
 	}
 }
