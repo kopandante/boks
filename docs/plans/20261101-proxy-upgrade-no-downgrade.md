@@ -21,6 +21,6 @@ Base: a331057 | Branch: fix/proxy-upgrade-no-downgrade
 - [x] 0 worktree
 - [x] 1 план (issue #145)
 - [x] 2 реализация
-- [ ] 3 PR
+- [x] 3 PR (#146)
 - [ ] 4 review-loop green
 - [ ] 5 merge
