@@ -30,5 +30,5 @@ Base: 99d0bc8 | Branch: fix/aop-shared-ca-worker
 - [x] 1 план
 - [x] 2 реализация
 - [x] 3 PR
-- [ ] 4 review-loop green
+- [x] 4 review-loop green
 - [ ] 5 merge
