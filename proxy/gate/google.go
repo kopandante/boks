@@ -19,7 +19,8 @@ import (
 //go:embed google/*.json
 var googleFiles embed.FS
 
-var googleRanges = sync.OnceValue(func() []netip.Prefix {
+// googleRanges are the ranges of every file, by its name.
+var googleRanges = sync.OnceValue(func() map[string][]netip.Prefix {
 	ps, err := readGoogle()
 	if err != nil {
 		// The files are the image's own; a test reads them all (TestGoogleRanges).
@@ -28,12 +29,15 @@ var googleRanges = sync.OnceValue(func() []netip.Prefix {
 	return ps
 })
 
-func readGoogle() ([]netip.Prefix, error) {
+// googlebotFile is Googlebot's own crawl addresses — googlebot.json before Google renamed it.
+const googlebotFile = "common-crawlers.json"
+
+func readGoogle() (map[string][]netip.Prefix, error) {
 	entries, err := googleFiles.ReadDir("google")
 	if err != nil {
 		return nil, err
 	}
-	var out []netip.Prefix
+	out := map[string][]netip.Prefix{}
 	for _, e := range entries {
 		b, err := googleFiles.ReadFile("google/" + e.Name())
 		if err != nil {
@@ -54,11 +58,25 @@ func readGoogle() ([]netip.Prefix, error) {
 			if err != nil || pr.Bits() == 0 {
 				return nil, fmt.Errorf("%s: prefix %q", e.Name(), s)
 			}
-			out = append(out, pr.Masked())
+			out[e.Name()] = append(out[e.Name()], pr.Masked())
 		}
+	}
+	if len(out[googlebotFile]) == 0 {
+		return nil, fmt.Errorf("no ranges in %s", googlebotFile)
 	}
 	return out, nil
 }
 
 // isGoogle says whether a is in Google's published ranges of Googlebot and its user-triggered fetchers.
-func isGoogle(a netip.Addr) bool { return inRanges(googleRanges(), a) }
+func isGoogle(a netip.Addr) bool {
+	for _, ps := range googleRanges() {
+		if inRanges(ps, a) {
+			return true
+		}
+	}
+	return false
+}
+
+// isGooglebot says whether a is one of Googlebot's crawl addresses alone (googlebotFile): not a
+// user-triggered fetcher's, which a user of Google programs himself — Apps Script among them.
+func isGooglebot(a netip.Addr) bool { return inRanges(googleRanges()[googlebotFile], a) }

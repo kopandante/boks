@@ -350,8 +350,9 @@ func TestSkipFPAnchored(t *testing.T) {
 	}
 }
 
-// A token of one Google crawl address passes from another of Google's; a visitor's token from Google's
-// address, or Google's from a visitor's, is still refused.
+// A token of one of Googlebot's crawl addresses passes from another of Googlebot's; one of Google's
+// user-triggered fetchers (142.250.32.0/27 is theirs alone) is asked as anyone, whichever end it is at
+// (#138); a visitor's token from Google's address, or Google's from a visitor's, is still refused.
 func TestGooglePool(t *testing.T) {
 	h := enforcing(t, &Handler{}, time.Now())
 	cases := []struct {
@@ -361,6 +362,10 @@ func TestGooglePool(t *testing.T) {
 		{"Google's token from the next Google address", "66.249.77.193", "66.249.77.192", 200},
 		{"Google's token from a visitor", "66.249.77.193", visitor, 403},
 		{"a visitor's token from Google", visitor, "66.249.77.192", 403},
+		{"Googlebot's token from a user-triggered fetcher", "66.249.77.193", "142.250.32.5", 403},
+		{"a user-triggered fetcher's token from Googlebot", "142.250.32.5", "66.249.77.192", 403},
+		{"a user-triggered fetcher's token from the next of them", "142.250.32.5", "142.250.32.6", 403},
+		{"Googlebot over IPv6", "2001:4860:4801:10::1", "2001:4860:4801:11::7", 200},
 	}
 	for _, c := range cases {
 		r := request(http.MethodGet, "/api/encar/catalog", c.from)

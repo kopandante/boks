@@ -509,13 +509,15 @@ func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload
 	return allow("token"), &pl
 }
 
-// googlePool says whether the token's address a and the request's b are both Google's: its renderer takes
-// the token from one crawl address and calls the API from the next (66.249.77.193, then .192 —
-// cars.dbauto.kr 30.10), and the card it renders stays "loading" in the index (todo#419).
+// googlePool says whether the token's address a and the request's b are both Googlebot's crawl
+// addresses: its renderer takes the token from one and calls the API from the next (66.249.77.193, then
+// .192 — cars.dbauto.kr 30.10), and the card it renders stays "loading" in the index (todo#419). Not
+// Google's user-triggered fetchers (#138): a user of Google programs those himself, and a scraper there
+// would carry its token to any of Google's addresses.
 func googlePool(a, b string) bool {
 	x, errA := netip.ParseAddr(a)
 	y, errB := netip.ParseAddr(b)
-	return errA == nil && errB == nil && isGoogle(x) && isGoogle(y)
+	return errA == nil && errB == nil && isGooglebot(x) && isGooglebot(y)
 }
 
 // refuse answers as NextResponse.json({error}, {status}) does.
