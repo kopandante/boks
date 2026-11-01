@@ -49,7 +49,7 @@ func TestWorkerIsTheClientThroughCaddy(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	for _, c := range []struct{ xff, want string }{
+	for i, c := range []struct{ xff, want string }{
 		{"1.2.3.4, 2a06:98c0:3600::103", "2a06:98c0:3600::103"},
 		{"1.2.3.4, 2a06:98c0:3600::104", "1.2.3.4"},
 	} {
@@ -62,8 +62,14 @@ func TestWorkerIsTheClientThroughCaddy(t *testing.T) {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		mu.Lock()
-		got := seen[len(seen)-1]
+		n, got := len(seen), ""
+		if n > 0 {
+			got = seen[n-1]
+		}
 		mu.Unlock()
+		if n != i+1 {
+			t.Fatalf("%s: %d, the app got %d requests, want %d", c.xff, resp.StatusCode, n, i+1)
+		}
 		if resp.StatusCode != http.StatusOK || got != c.want {
 			t.Errorf("%s: %d, the app got %q, want %q", c.xff, resp.StatusCode, got, c.want)
 		}

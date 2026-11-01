@@ -617,6 +617,11 @@ func (s *Server) validate() error {
 	if err := checkWrittenAsIPv4(s.TrustedProxies); err != nil {
 		return fmt.Errorf("trusted_proxies: %w", err)
 	}
+	// The Worker's address alone is cut to nothing (TrustedPrefixes): applied, nothing would be trusted
+	// and a CA beside it dropped without a word.
+	if len(s.TrustedProxies) > 0 && len(s.TrustedPrefixes()) == 0 {
+		return fmt.Errorf("trusted_proxies: only %s, Cloudflare's client address of a Worker, which boks never trusts; name the proxies in front of boks", WorkerClientIP)
+	}
 	if err := s.validateCA(); err != nil {
 		return fmt.Errorf("trusted_proxies_ca: %w", err)
 	}

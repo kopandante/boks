@@ -558,3 +558,19 @@ func TestWorkerGolden(t *testing.T) {
 		t.Errorf("trusted ranges\n%s\nwant (%s, BOKS_UPDATE=1 to rewrite)\n%s %v", got, workerGolden, want, err)
 	}
 }
+
+// trusted_proxies holding the Worker's address alone is refused: cut, it would trust nothing and drop a
+// CA beside it silently.
+func TestParseServerRefusesTheWorkerAlone(t *testing.T) {
+	for _, tp := range []string{`"2a06:98c0:3600::103"`, `"2a06:98c0:3600::103/128"`} {
+		for _, ca := range []string{"", caPEM(t, "ca.pem")} {
+			_, err := ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [" + tp + "]\n" + ca))
+			if err == nil || !strings.Contains(err.Error(), "never trusts") {
+				t.Errorf("%s: want refused, got %v", tp, err)
+			}
+		}
+	}
+	if _, err := ParseServer([]byte("servers: [a]\nrevision: 1\ntrusted_proxies: [\"2a06:98c0:3600::103\", 173.245.48.0/20]\n")); err != nil {
+		t.Errorf("beside another range: %v", err)
+	}
+}
