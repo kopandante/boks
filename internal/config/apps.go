@@ -52,14 +52,16 @@ func (s *Server) loadApp(name string, lookup func(string) (string, bool), secret
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(s.dir, path)
 	}
+	// Read once: the bytes checked are the bytes the servers get.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ServerApp{}, err
 	}
-	cfg, err := Load(path)
+	cfg, err := Parse(data)
 	if err != nil {
-		return ServerApp{}, err
+		return ServerApp{}, fmt.Errorf("%s: %w", path, err)
 	}
+	cfg.Dir = filepath.Dir(path)
 	switch {
 	case cfg.App != name:
 		return ServerApp{}, fmt.Errorf("%s names the app %s", path, cfg.App)

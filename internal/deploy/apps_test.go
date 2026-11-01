@@ -63,6 +63,13 @@ func TestPutApps(t *testing.T) {
 	if i := slices.IndexFunc(h.calls, func(c string) bool { return strings.HasPrefix(c, "lock: ln -sn") }); i != 0 {
 		t.Errorf("the lock is not taken first: %v", h.calls)
 	}
+	// boks.yml goes last: a run cut before it leaves the old one, and status names it as differing.
+	at := func(f string) int {
+		return slices.IndexFunc(h.calls, func(c string) bool { return strings.Contains(c, "apps/shop/"+f+".tmp") })
+	}
+	if cfg, env, token := at("boks.yml"), at("env"), at("registry.token"); env < 0 || token < 0 || cfg < env || cfg < token {
+		t.Errorf("boks.yml at %d, env at %d, the token at %d: %v", cfg, env, token, h.calls)
+	}
 	// ... and released last, after every write: the server's boks never reads a half-written app.
 	if last := h.calls[len(h.calls)-1]; !strings.HasPrefix(last, "lock: sh -c [ \"$(readlink") {
 		t.Errorf("the lock is not released last: %v", h.calls)

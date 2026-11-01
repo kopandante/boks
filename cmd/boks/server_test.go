@@ -920,8 +920,8 @@ func TestApplyWritesTheAppsBetweenBoksAndPolicy(t *testing.T) {
 			policy = i
 		}
 	}
-	if boks < 0 || app < boks || env < app || policy < env {
-		t.Errorf("boks at %d, boks.yml at %d, env at %d, the policy at %d", boks, app, env, policy)
+	if boks < 0 || env < boks || app < env || policy < app {
+		t.Errorf("boks at %d, env at %d, boks.yml at %d, the policy at %d", boks, env, app, policy)
 	}
 	for _, in := range b.stdin {
 		if in == shop {

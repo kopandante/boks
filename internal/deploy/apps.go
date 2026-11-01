@@ -23,8 +23,9 @@ func appFile(app, name string) string { return path.Join(appsDir, app, name) }
 // PutApps makes apps — those of server.yml that go on this server — the apps the server keeps: each one's
 // files written, the token removed for a public image, and the directory of an app server.yml no longer
 // names removed. Under the admission lock: the server's boks reads them for a deploy. Every file is
-// written whole or not at all, so a cut run leaves each app's file either old or new; the next apply
-// writes them all again.
+// written whole or not at all, and boks.yml last: a cut run leaves an app's boks.yml old while its
+// environment may be new, which status names as a boks.yml that differs; the next apply writes them all
+// again.
 func PutApps(ctx context.Context, r remote.Runner, log io.Writer, apps []config.ServerApp, o Options) error {
 	adm, err := admit(ctx, r, log, proxyHolder, o)
 	if err != nil {
@@ -56,18 +57,22 @@ func PutApps(ctx context.Context, r remote.Runner, log io.Writer, apps []config.
 	return nil
 }
 
+// putApp writes boks.yml after the environment and the token: status compares boks.yml alone, so an app
+// whose boks.yml is new has the rest new too.
 func putApp(ctx context.Context, r remote.Runner, a config.ServerApp) error {
-	if err := remote.UploadAtomic(ctx, r, a.Config, appFile(a.Name, "boks.yml")); err != nil {
-		return err
-	}
 	if err := remote.UploadAtomic(ctx, r, a.Env, appFile(a.Name, "env")); err != nil {
 		return err
 	}
+	var err error
 	if a.Token == "" {
-		_, err := r.Run(ctx, "rm", "-f", appFile(a.Name, "registry.token"))
+		_, err = r.Run(ctx, "rm", "-f", appFile(a.Name, "registry.token"))
+	} else {
+		err = remote.UploadAtomic(ctx, r, []byte(a.Token+"\n"), appFile(a.Name, "registry.token"))
+	}
+	if err != nil {
 		return err
 	}
-	return remote.UploadAtomic(ctx, r, []byte(a.Token+"\n"), appFile(a.Name, "registry.token"))
+	return remote.UploadAtomic(ctx, r, a.Config, appFile(a.Name, "boks.yml"))
 }
 
 // keptApps are the apps the server keeps files for, by name.
