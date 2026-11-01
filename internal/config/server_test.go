@@ -415,6 +415,10 @@ func TestParseServerTrustedProxiesCARejects(t *testing.T) {
 		{"servers: [a]\nrevision: 1\n" + caPEM(t, "ca.pem"), "trusted_proxies_ca: no trusted_proxies to ask a certificate of"},
 		{trusted + caPEM(t, "client.key"), "trusted_proxies_ca: a EC PRIVATE KEY block; only certificates go here"},
 		{trusted + "trusted_proxies_ca: cloudflare\n", "trusted_proxies_ca: want one or more PEM certificates"},
+		// The key left with its certificate taken out would trust the proxies by address again.
+		{trusted + "trusted_proxies_ca:\n", "trusted_proxies_ca: empty"},
+		{trusted + "trusted_proxies_ca: |\nban: {}\n", "trusted_proxies_ca: empty"},
+		{trusted + "trusted_proxies_ca: \"\"\n", "trusted_proxies_ca: empty"},
 		{trusted + caPEM(t, "ca.pem") + "  trailing\n", "want one or more PEM certificates"},
 		{trusted + strings.Replace(caPEM(t, "ca.pem"), "|\n  ", "|\n  subject=CN boks\n  ", 1), "want one or more PEM certificates"},
 		{trusted + caPEM(t, "ca.pem") + "  between\n  " + strings.TrimPrefix(caPEM(t, "other-ca.pem"), "trusted_proxies_ca: |\n  "), "want one or more PEM certificates"},

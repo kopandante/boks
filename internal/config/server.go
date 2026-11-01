@@ -401,9 +401,15 @@ func ParseServer(data []byte) (*Server, error) {
 	var keys struct {
 		Ban  yaml.Node `yaml:"ban"`
 		Gate yaml.Node `yaml:"gate"`
+		CA   yaml.Node `yaml:"trusted_proxies_ca"`
 	}
 	if err := yaml.Unmarshal(data, &keys); err != nil {
 		return nil, err
+	}
+	// And for the CA: an empty one — its certificate taken out while changing it — would trust the
+	// headers of every connection from the proxies' addresses again.
+	if strings.TrimSpace(s.TrustedProxiesCA) == "" && keys.CA.Kind != 0 {
+		return nil, errors.New("trusted_proxies_ca: empty; write the CA's certificate, or remove the key to trust the proxies by address alone")
 	}
 	if s.Ban == nil && keys.Ban.Kind != 0 {
 		return nil, errors.New("ban: empty; write `ban: {}` for the defaults (300 requests in 1m ban for 24h), or remove the key for no ban")
