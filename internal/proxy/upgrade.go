@@ -25,9 +25,10 @@ func Image(ctx context.Context, r remote.Runner) (string, error) {
 // since a boot leaves a running proxy alone. It is a short outage on 80 and 443, open WebSockets
 // included: stop, swap, start. Everything that can refuse does so before the stop: a swap an earlier
 // run left cut, a deploy of some app in progress (its reload would meet no proxy), an image that does
-// not pull, a config the new Caddy refuses, an image older than the one running (unless force). Then begin is called with the image the proxy runs, and
-// an error from it stops the upgrade with nothing touched. After the stop, any failure puts the old
-// container back and starts it. The caller holds the server's admission lock.
+// not pull, a config the new Caddy refuses, an image older than the one running (unless force). Then
+// begin is called with the image the proxy runs, and an error from it stops the upgrade with nothing
+// touched. After the stop, any failure puts the old container back and starts it. The caller holds
+// the server's admission lock.
 func Upgrade(ctx context.Context, r remote.Runner, log io.Writer, image string, force bool, begin func(from string) error) error {
 	// First: a cut swap leaves the old proxy aside and, under the proxy's name, nothing, or a new one
 	// that may never have started — whose image is the one asked for.
@@ -223,10 +224,11 @@ func exists(ctx context.Context, r remote.Runner, name string) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-// imageLevel reads the ban and gate of a boks-caddy tag (…-ban10-gate9-…): gate 0 for a ban without one,
-// as images before the gate were; ok is false for a tag without a ban — an image boks does not number.
+// levelRe finds the ban and the gate in a boks-caddy tag (proxy/TAG plus, off main, -<sha7>).
 var levelRe = regexp.MustCompile(`-ban(\d+)(?:-gate(\d+))?(?:-|$)`)
 
+// imageLevel reads the ban and gate of a boks-caddy tag (…-ban10-gate9-…): gate 0 for a ban without one,
+// as images before the gate were; ok is false for a tag without a ban — an image boks does not number.
 func imageLevel(image string) (ban, gate int, ok bool) {
 	ref, _, _ := strings.Cut(image, "@")
 	if i := strings.LastIndex(ref, "/"); i >= 0 {
