@@ -877,10 +877,39 @@ func missing(ctx context.Context, r remote.Runner, ref string) bool {
 // pull is the one place an app's image is fetched, for a deploy and for a rollback alike. An image on
 // the private registry goes through the login; any other — a public image, or a release recorded
 // before the image moved — is pulled as it always was.
+//
+// A pull the registry's network failed (registryDown) is tried again, pullTries in all, pullPause
+// apart: Depot's layer store drops out from Russia for a minute or two at a time (todo#437). A refusal
+// of the token, an image that is not there, and any other error refuse at once.
 func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabled bool, login *Login) error {
 	if !enabled {
 		return nil
 	}
+	for try := 1; ; try++ {
+		err := pullOnce(ctx, r, log, ref, login)
+		if err == nil || !registryDown(err) {
+			return err
+		}
+		if try == pullTries {
+			return fmt.Errorf("%w\nthe registry did not answer %d times, %s apart", err, pullTries, pullPause)
+		}
+		fmt.Fprintf(log, "pull %s: the registry did not answer (%v); trying again in %s (%d of %d)\n", ref, err, pullPause, try+1, pullTries)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w; stopped waiting to try again: %w", err, ctx.Err())
+		case <-time.After(pullPause):
+		}
+	}
+}
+
+// pullTries and pullPause are how often and how far apart a pull whose registry did not answer is
+// made: three tries over four minutes outlast the outages seen (todo#437).
+var (
+	pullTries = 3
+	pullPause = 2 * time.Minute
+)
+
+func pullOnce(ctx context.Context, r remote.Runner, log io.Writer, ref string, login *Login) error {
 	if login != nil && login.Logs(ref) {
 		fmt.Fprintf(log, "pull %s (logged in to %s for the pull)\n", ref, login.Host)
 		return pullWithLogin(ctx, r, login, ref)
@@ -888,6 +917,27 @@ func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabl
 	fmt.Fprintf(log, "pull %s\n", ref)
 	_, err := r.Run(ctx, "docker", "pull", ref)
 	return err
+}
+
+// registryDown reports a pull that failed on the way to the registry, in docker's words, and was not
+// refused: the token turned down or the image not there are answers, and trying again changes neither.
+func registryDown(err error) bool {
+	if refusedToken(err) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"manifest unknown", "not found", "no such image"} {
+		if strings.Contains(msg, s) {
+			return false
+		}
+	}
+	for _, s := range []string{"tls handshake timeout", "i/o timeout", "connection reset by peer", "unexpected eof",
+		"timeout awaiting response headers", "request canceled while waiting for connection", "client.timeout exceeded"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // container is a previously deployed container of this app: its name, and the two labels that say
