@@ -98,3 +98,23 @@ func TestNoBanRangesDecode(t *testing.T) {
 		t.Fatalf("%v %+v", err, h.Checks)
 	}
 }
+
+// An office banned before it went into no_ban_ranges — the ban outlives the reload that adds it — is not
+// asked the ban: its Chrome passes, and its scraper is refused by the signature, not the ban (#160).
+func TestNoBanSkipsAnEarlierBan(t *testing.T) {
+	now := time.Now()
+	h := officeGroup(t, &now)
+	a := netip.MustParseAddr(office)
+	if !h.banStore().ban(h.Name, a, now.Add(time.Hour), now) {
+		t.Fatal("the ban was not kept")
+	}
+	officeChrome := client{ua: chromeUA, fpHeader: true, tokenFP: true, ip: office}
+	if code, f := apiOf(t, h, officeChrome, "/api/x"); code != 200 {
+		t.Errorf("the office's Chrome under an earlier ban: %d %v", code, f)
+	}
+	r, extra := withLog(client{ua: stormUA, fpHeader: true, tokenFP: true, ip: office}.request(h, "GET", "/api/auctions/heydealer/cars"))
+	r.Header.Set("Accept-Encoding", scraperAE)
+	if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "signature" {
+		t.Errorf("the office's scraper under an earlier ban: %d %v", w.Code, fields(extra))
+	}
+}
