@@ -50,6 +50,7 @@ func TestSignatureByClient(t *testing.T) {
 		{"Firefox", firefoxUA, "gzip, deflate, br, zstd", "", 200, "token"},
 		{"a server's Node fetch: not a browser's name", "node", scraperAE, "", 200, "token"},
 		{"the scraper's headers from Google", stormUA, scraperAE, "66.249.66.1", 200, "token"},
+		{"the scraper's headers from a user-triggered fetcher of Google", stormUA, scraperAE, "142.250.32.5", 403, "signature"},
 		{"the scraper's headers as YandexBot from Yandex", yandexBotUA, scraperAE, "213.180.203.222", 200, "token"},
 		{"the scraper's headers as YandexBot from elsewhere", yandexBotUA, scraperAE, "", 403, "signature"},
 		{"the scraper from the checks' exempt address", stormUA, scraperAE, "139.100.226.95", 200, "token"},
@@ -422,5 +423,41 @@ func TestSignatureBadPath(t *testing.T) {
 	h := &Handler{Name: "site", Mode: "enforce", Secrets: []string{secret}, Signatures: []Signature{s}}
 	if err := h.Provision(ctxForTest(t)); err == nil || !strings.Contains(err.Error(), "path") {
 		t.Errorf("a bad path: %v", err)
+	}
+}
+
+// A scraper in a user-triggered fetcher of Google (Apps Script: its user programs it), with a token
+// issued to its own 142.250.32.x, is asked as anyone: its signature bans it, and page_first and the
+// static rhythm refuse it; Googlebot is still spared all three. Of the checks it stays exempt of
+// fetch_meta and alpn alone (Read Aloud — TestShadowByClient) (#151).
+func TestUserFetcherIsNotSpared(t *testing.T) {
+	const fetcher = "142.250.32.5"
+	now := time.Now()
+	h := signing(t, &now, scraperSig)
+	r := browserClient(stormUA, fetcher).request(h, "GET", "/api/auctions/heydealer/cars")
+	r.Header.Set("Accept-Encoding", scraperAE)
+	if w := serve(t, h, r); w.Code != 403 {
+		t.Fatalf("the scraper's match from the fetcher: %d", w.Code)
+	}
+	r, extra := withLog(browserClient(chromeUA, fetcher).request(h, "GET", "/api/auctions/heydealer/cars"))
+	if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "signature_ban" {
+		t.Errorf("the fetcher after its match: %d %v", w.Code, fields(extra))
+	}
+
+	p := pageFirsting(t, &now, "enforce")
+	for ip, want := range map[string]int{fetcher: 403, "66.249.66.1": 200} {
+		c := client{ua: googleUA, fpHeader: true, tokenFP: true, ip: ip}
+		if code := serve(t, p, c.request(p, "GET", "/api/x")).Code; code != want {
+			t.Errorf("page_first, the API without a page from %s: %d, want %d", ip, code, want)
+		}
+	}
+
+	for ip, want := range map[string]int{fetcher: 403, "66.249.66.1": 200} {
+		s := rhythming(t, &now, "enforce")
+		c := client{ua: googleUA, fpHeader: true, tokenFP: true, ip: ip}
+		files(t, s, &now, c, 6, time.Second)
+		if code, _ := apiOf(t, s, c, "/api/x"); code != want {
+			t.Errorf("static_rhythm, the API after serial files from %s: %d, want %d", ip, code, want)
+		}
 	}
 }

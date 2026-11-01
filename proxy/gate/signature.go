@@ -176,8 +176,8 @@ func (h *Handler) signed(r *http.Request, p, ip string) (decision, bool) {
 	if err != nil || h.spared(r, a) {
 		return decision{}, false
 	}
-	now := h.now()
-	if h.SignatureBan != 0 && h.enforces() && h.banStore().banned(h.Name, a, now) {
+	now, noBan := h.now(), h.noBan(a)
+	if h.SignatureBan != 0 && !noBan && h.enforces() && h.banStore().banned(h.Name, a, now) {
 		return deny("signature_ban", forbidden), true
 	}
 	s := h.matching(r, p, a)
@@ -188,9 +188,15 @@ func (h *Handler) signed(r *http.Request, p, ip string) (decision, bool) {
 	if s.Mode != "enforce" {
 		return decision{}, false
 	}
-	h.banAddr(r, a, s, now)
+	if !noBan {
+		h.banAddr(r, a, s, now)
+	}
 	return deny("signature", forbidden), true
 }
+
+// noBan says whether a is in checks.no_ban_ranges: refused by an enforced signature, banned by none, asked
+// no check, page_first or static_rhythm (#160).
+func (h *Handler) noBan(a netip.Addr) bool { return inRanges(h.checksNoBan, a) }
 
 // matching is the signature on that matches r — the first enforced one, the first in log when no
 // enforced one does — nil when none does: a signature in log never shadows an enforced one after it.
@@ -219,12 +225,14 @@ func (h *Handler) enforces() bool {
 	return false
 }
 
-// spared says whether r from a is never matched: an exempt address of the checks, Google's, Yandex's
-// robots, and a partner's read with a valid Bearer from wherever it comes. The partner's server sends
+// spared says whether r from a is never matched: an exempt address of the checks, Googlebot's (not
+// Google's user-triggered fetchers: their users program them, and a scraper there would be spared
+// page_first, the rhythm and every signature — #151; they stay exempt of fetch_meta and alpn alone),
+// Yandex's robots, and a partner's read with a valid Bearer from wherever it comes. The partner's server sends
 // what its HTTP library sends — the very shapes a signature is written against — and a match would
 // refuse a read the owner sold and ban the partner's address with it; its ban, the read too.
 func (h *Handler) spared(r *http.Request, a netip.Addr) bool {
-	return inRanges(h.checksExempt, a) || isGoogle(a) || isYandex(a, r.UserAgent()) || h.keyed(r)
+	return inRanges(h.checksExempt, a) || isGooglebot(a) || isYandex(a, r.UserAgent()) || h.keyed(r)
 }
 
 // banAddr bans a for the group's signature_ban, when it has one, and writes the ban's start.

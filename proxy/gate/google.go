@@ -5,8 +5,9 @@ package gate
 // there): common-crawlers.json — Googlebot — and user-triggered-fetchers-google.json — Google's own
 // fetchers a user asks for, Read Aloud among them. An address in either passes fetch_meta and alpn: by
 // the address Google publishes, never by a User-Agent anyone can write. Only common-crawlers.json lets a
-// token pass from a neighbouring address (googlePool, #138): the files are not interchangeable, and a
-// prefix moved from one to the other widens or narrows that exception. The files are Google's JSON
+// token pass from a neighbouring address (googlePool, #138) and spares an address the signatures, their
+// ban, page_first and static_rhythm (spared, #151): the files are not interchangeable, and a prefix moved
+// from one to the other widens or narrows those exceptions. The files are Google's JSON
 // compacted to one line (`curl -sL <url> | jq -c .`), the same data. The lists change rarely; a new
 // download is a new image.
 
