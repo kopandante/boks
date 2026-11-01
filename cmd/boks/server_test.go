@@ -539,8 +539,9 @@ func TestRangeFileNeverBlocksTheRollback(t *testing.T) {
 		t.Errorf("status with the file gone: %d %q %q", code, out.String(), errw.String())
 	}
 
-	for _, body := range []*string{nil, new(string)} {
-		if body != nil {
+	// The file gone, then there but holding no range (a comment alone).
+	for _, written := range []bool{false, true} {
+		if written {
 			if err := os.MkdirAll(filepath.Join(dir, "ranges"), 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -553,7 +554,7 @@ func TestRangeFileNeverBlocksTheRollback(t *testing.T) {
 		t.Setenv("SHOP_GATE_SECRET", strings.Repeat("s", 32))
 		errw.Reset()
 		want := "range_sets.jp: open"
-		if body != nil {
+		if written {
 			want = "range_sets.jp: empty"
 		}
 		for _, cmd := range []string{"apply", "install"} {

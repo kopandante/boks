@@ -60,7 +60,8 @@ type Server struct {
 	// applied with, a rollback puts that list back, and an edit of the file changes nothing until applied.
 	RangeSets map[string]RangeSet `yaml:"range_sets"`
 
-	// setsUnread is a server.yml read by LoadServerForFleet: range_sets neither read nor checked.
+	// setsUnread is a server.yml read by LoadServerForFleet: range_sets kept as written, no file of them
+	// read, none checked.
 	setsUnread bool
 }
 
@@ -583,11 +584,13 @@ func parseServerIn(data []byte, dir string, sets bool) (*Server, error) {
 	if s.Gate == nil && keys.Gate.Kind != 0 {
 		return nil, errors.New("gate: empty; remove the key for no gate")
 	}
-	if !sets {
-		s.RangeSets, s.setsUnread = nil, true
-	}
-	if err := s.readRangeSets(dir); err != nil {
-		return nil, err
+	// The fleet's load keeps range_sets as written, for the rule that a policy needs its revision, but
+	// reads no file of them and checks none.
+	s.setsUnread = !sets
+	if sets {
+		if err := s.readRangeSets(dir); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -614,8 +617,10 @@ func (s *Server) validate() error {
 			return fmt.Errorf("ban: %w", err)
 		}
 	}
-	if err := s.validateRangeSets(); err != nil {
-		return err
+	if !s.setsUnread {
+		if err := s.validateRangeSets(); err != nil {
+			return err
+		}
 	}
 	if s.Gate != nil {
 		if err := s.Gate.validate(); err != nil {
