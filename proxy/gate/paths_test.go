@@ -358,20 +358,21 @@ func TestGooglePool(t *testing.T) {
 	cases := []struct {
 		name, signedFor, from string
 		status                int
+		reason                string
 	}{
-		{"Google's token from the next Google address", "66.249.77.193", "66.249.77.192", 200},
-		{"Google's token from a visitor", "66.249.77.193", visitor, 403},
-		{"a visitor's token from Google", visitor, "66.249.77.192", 403},
-		{"Googlebot's token from a user-triggered fetcher", "66.249.77.193", "142.250.32.5", 403},
-		{"a user-triggered fetcher's token from Googlebot", "142.250.32.5", "66.249.77.192", 403},
-		{"a user-triggered fetcher's token from the next of them", "142.250.32.5", "142.250.32.6", 403},
-		{"Googlebot over IPv6", "2001:4860:4801:10::1", "2001:4860:4801:11::7", 200},
+		{"Google's token from the next Google address", "66.249.77.193", "66.249.77.192", 200, "token"},
+		{"Google's token from a visitor", "66.249.77.193", visitor, 403, "ip_mismatch"},
+		{"a visitor's token from Google", visitor, "66.249.77.192", 403, "ip_mismatch"},
+		{"Googlebot's token from a user-triggered fetcher", "66.249.77.193", "142.250.32.5", 403, "ip_mismatch"},
+		{"a user-triggered fetcher's token from Googlebot", "142.250.32.5", "66.249.77.192", 403, "ip_mismatch"},
+		{"a user-triggered fetcher's token from the next of them", "142.250.32.5", "142.250.32.6", 403, "ip_mismatch"},
+		{"Googlebot over IPv6", "2001:4860:4801:10::1", "2001:4860:4801:11::7", 200, "token"},
 	}
 	for _, c := range cases {
-		r := request(http.MethodGet, "/api/encar/catalog", c.from)
+		r, extra := withLog(request(http.MethodGet, "/api/encar/catalog", c.from))
 		r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, c.signedFor)})
-		if w := serve(t, h, r); w.Code != c.status {
-			t.Errorf("%s: %d %s, want %d", c.name, w.Code, w.Body.String(), c.status)
+		if w := serve(t, h, r); w.Code != c.status || fields(extra)["gate_reason"] != c.reason {
+			t.Errorf("%s: %d %s %v, want %d %s", c.name, w.Code, w.Body.String(), fields(extra), c.status, c.reason)
 		}
 	}
 }

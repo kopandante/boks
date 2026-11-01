@@ -3,8 +3,10 @@ package gate
 // Google's published ranges, as downloaded on the date each file's creationTime says, from
 // https://developers.google.com/static/crawling/ipranges/ (the old search/apis/ipranges/ URLs redirect
 // there): common-crawlers.json — Googlebot — and user-triggered-fetchers-google.json — Google's own
-// fetchers a user asks for, Read Aloud among them. An address in them passes fetch_meta and alpn: by
-// the address Google publishes, never by a User-Agent anyone can write. The files are Google's JSON
+// fetchers a user asks for, Read Aloud among them. An address in either passes fetch_meta and alpn: by
+// the address Google publishes, never by a User-Agent anyone can write. Only common-crawlers.json lets a
+// token pass from a neighbouring address (googlePool, #138): the files are not interchangeable, and a
+// prefix moved from one to the other widens or narrows that exception. The files are Google's JSON
 // compacted to one line (`curl -sL <url> | jq -c .`), the same data. The lists change rarely; a new
 // download is a new image.
 
@@ -29,8 +31,13 @@ var googleRanges = sync.OnceValue(func() map[string][]netip.Prefix {
 	return ps
 })
 
-// googlebotFile is Googlebot's own crawl addresses — googlebot.json before Google renamed it.
-const googlebotFile = "common-crawlers.json"
+// googlebotFile is Google's common crawlers — Googlebot and its siblings (GoogleOther,
+// Google-InspectionTool…) — googlebot.json before Google renamed it; userFetchersFile is the fetchers a
+// user of Google asks for.
+const (
+	googlebotFile    = "common-crawlers.json"
+	userFetchersFile = "user-triggered-fetchers-google.json"
+)
 
 func readGoogle() (map[string][]netip.Prefix, error) {
 	entries, err := googleFiles.ReadDir("google")
@@ -77,6 +84,7 @@ func isGoogle(a netip.Addr) bool {
 	return false
 }
 
-// isGooglebot says whether a is one of Googlebot's crawl addresses alone (googlebotFile): not a
-// user-triggered fetcher's, which a user of Google programs himself — Apps Script among them.
+// isGooglebot says whether a is one of Google's common crawlers' addresses (googlebotFile), where
+// Googlebot crawls: not a user-triggered fetcher's, which a user of Google programs himself — Apps
+// Script among them.
 func isGooglebot(a netip.Addr) bool { return inRanges(googleRanges()[googlebotFile], a) }
