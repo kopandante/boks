@@ -20,6 +20,6 @@ context deadline exceeded. Сразу отказ: no such host, авториза
 - [x] 0 worktree
 - [x] 1 план
 - [x] 2 реализация
-- [ ] 3 PR
+- [x] 3 PR
 - [ ] 4 review-loop green
 - [ ] 5 merge
