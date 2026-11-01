@@ -60,7 +60,8 @@ func BootProxy(ctx context.Context, r remote.Runner, log io.Writer, image string
 	return then()
 }
 
-// UpgradeProxy replaces the running proxy with one from image (proxy.Upgrade), under the server's
+// UpgradeProxy replaces the running proxy with one from image (proxy.Upgrade; o.Force takes an older
+// image), under the server's
 // admission lock and in the server's journal from the moment its checks have passed: a run cut in
 // the middle of the swap is the one the next `boks server status` names.
 func UpgradeProxy(ctx context.Context, r remote.Runner, log io.Writer, image string, o Options) error {
@@ -73,7 +74,7 @@ func UpgradeProxy(ctx context.Context, r remote.Runner, log io.Writer, image str
 	}
 	defer adm.release(ctx)
 	op := ""
-	err = proxy.Upgrade(ctx, r, log, image, func(from string) error {
+	err = proxy.Upgrade(ctx, r, log, image, o.Force, func(from string) error {
 		var err error
 		op, err = beginServer(ctx, r, log, o, upgradeAction, from, image)
 		return err

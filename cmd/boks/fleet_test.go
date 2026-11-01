@@ -443,3 +443,22 @@ func TestDeployAsksEveryServerForTheCPUsFirst(t *testing.T) {
 		t.Errorf("no server may change: a %v, b %v", a.calls, b.calls)
 	}
 }
+
+// `boks proxy upgrade` with a proxy_image older than the proxy the server runs refuses and pulls
+// nothing; --force goes on to the pull (boks#145).
+func TestProxyUpgradeRefusesAnOlderImageWithoutForce(t *testing.T) {
+	running := "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban10-gate9-go1.27.3"
+	cfg := "app: bot\nimage: x\nservers: [a]\nproxy_image: ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban9-gate4-go1.27.3\n"
+	for _, args := range [][]string{{"proxy", "upgrade"}, {"proxy", "upgrade", "--force"}} {
+		a := &recorder{server: server{"docker ps -a --filter name=^boks-proxy$": "running\tcaddy", "sh -c docker inspect -f": running}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		err := dispatch(context.Background(), parseConfig(t, cfg), args, io.Discard)
+		forced := len(args) == 3
+		if refused := err != nil && strings.Contains(err.Error(), "older than the running"); refused == forced {
+			t.Errorf("%v: %v", args, err)
+		}
+		if pulled := a.ran("docker pull"); pulled != forced {
+			t.Errorf("%v: pulled %v: %v", args, pulled, a.calls)
+		}
+	}
+}
