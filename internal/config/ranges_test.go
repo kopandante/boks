@@ -117,3 +117,35 @@ func TestRangeSetsRefused(t *testing.T) {
 		t.Errorf("range_sets without a revision: %v", err)
 	}
 }
+
+// The fleet's load (rollback, status) reads no set file: with ranges/jp.txt gone it loads, the sets left
+// out, while apply's load refuses it. The rest of server.yml is still checked.
+func TestFleetLoadReadsNoSetFile(t *testing.T) {
+	dir := t.TempDir()
+	yml := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(yml, []byte(rangedGate("range_sets:\n  jp: ranges/jp.txt\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadServer(yml); err == nil || !strings.Contains(err.Error(), "range_sets.jp: open") {
+		t.Errorf("apply's load with the file gone: %v", err)
+	}
+	s, err := LoadServerForFleet(yml)
+	if err != nil {
+		t.Fatalf("fleet load with the file gone: %v", err)
+	}
+	if len(s.RangeSets["jp"].Ranges) > 0 || strings.Contains(string(s.Gate.JSON), "range_sets") {
+		t.Errorf("fleet load read sets: %v %s", s.RangeSets, s.Gate.JSON)
+	}
+	// Without a revision it refuses as apply's load does — with a gate, and with range_sets alone.
+	for _, bad := range []string{
+		strings.Replace(rangedGate("range_sets:\n  jp: ranges/jp.txt\n"), "revision: 1\n", "", 1),
+		"servers: [a]\nrange_sets:\n  jp: ranges/jp.txt\n",
+	} {
+		if err := os.WriteFile(yml, []byte(bad), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadServerForFleet(yml); err == nil || !strings.Contains(err.Error(), "revision: required") {
+			t.Errorf("fleet load took a server.yml without revision: %v\n%s", err, bad)
+		}
+	}
+}

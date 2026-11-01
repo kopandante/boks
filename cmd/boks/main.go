@@ -446,9 +446,21 @@ func serverCmd(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) < 2 {
 		return fmt.Errorf("server needs one of: install <server.yml>, apply <server.yml> [--force], rollback <server.yml> <revision> [--force], status <server.yml>")
 	}
-	sc, err := config.LoadServer(args[1])
+	// Rollback and status take the list of servers alone: a range_sets file missing or broken must never
+	// stand in the way of going back (rollback takes the sets from the revision in each server's
+	// history), and status warns of it rather than fail. Install and apply read server.yml whole.
+	load := config.LoadServer
+	if args[0] == "rollback" || args[0] == "status" {
+		load = config.LoadServerForFleet
+	}
+	sc, err := load(args[1])
 	if err != nil {
 		return err
+	}
+	if args[0] == "status" {
+		if _, err := config.LoadServer(args[1]); err != nil {
+			fmt.Fprintf(out, "! %v; apply would refuse it\n", err)
+		}
 	}
 	on := func(fn action) error {
 		for _, s := range sc.Servers {
