@@ -152,7 +152,7 @@ func TestInstallBoksRefuses(t *testing.T) {
 		if got := h.link(t); got != "../_server/bin/boks-"+commitA {
 			t.Errorf("%s: the link names %q", name, got)
 		}
-		if _, err := os.Stat(filepath.Join(h.dir, binDir, "boks-"+commitB)); err == nil {
+		if left, _ := filepath.Glob(filepath.Join(h.dir, binDir, "boks-"+commitB+"*")); len(left) > 0 {
 			t.Errorf("%s: the refused build is left on the server", name)
 		}
 	}
@@ -215,7 +215,7 @@ func TestInstallBoksChecksTheSumOnTheServer(t *testing.T) {
 	if got := h.link(t); got != "../_server/bin/boks-"+commitA {
 		t.Errorf("the link names %q", got)
 	}
-	if _, err := os.Stat(filepath.Join(h.dir, binDir, "boks-"+commitB)); err == nil {
+	if left, _ := filepath.Glob(filepath.Join(h.dir, binDir, "boks-"+commitB+"*")); len(left) > 0 {
 		t.Error("the refused build is left on the server")
 	}
 }

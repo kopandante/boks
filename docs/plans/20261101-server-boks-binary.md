@@ -29,5 +29,5 @@ apply` и `proxy upgrade` собирают конфиг прокси серве�
 - [x] 1 план (issue #154)
 - [x] 2 реализация
 - [x] 3 PR (#159)
-- [ ] 4 review-loop green
+- [x] 4 review-loop green (без codex — лимит; агентские линзы + /code-review high)
 - [ ] 5 merge
