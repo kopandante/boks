@@ -904,9 +904,19 @@ gate:
   запросу, который токен пропустил: `fp` — 403 `Fingerprint mismatch` (клиент 2.5 обновит токен), остальные —
   403 `Forbidden`, `gate_reason: check_<имя>`. Опубликованные диапазоны Googlebot и user-triggered fetchers
   Google (файлы в образе, `proxy/gate/google/`) проходят `fetch_meta` и `alpn` — user-triggered fetchers только
-  здесь (Read Aloud и т. п.), в сигнатурах, page_first и static_rhythm они как все (#151, образ gate12; до него — исключены везде). `fetch_meta` и `alpn` проходят и роботы Яндекса: UA с
-  `Yandex` с адреса из анонсов AS13238 (`proxy/gate/yandex/as13238.txt`, RIPEstat; без DNS на запросе, образ
-  gate4); `exempt_ranges` — все проверки. `no_ban_ranges` (boks#160, образ gate14; решение владельца 01.11
+  здесь (Read Aloud и т. п.), в сигнатурах, page_first и static_rhythm они как все (#151, образ gate12; до него — исключены везде). `fetch_meta` и `alpn` проходят и роботы поиска Яндекса
+  (образ gate15, #162; до него — любой UA с `Yandex` из AS13238, образ gate4): UA с токеном робота
+  (`YandexBot/`, `YandexMobileBot/`, `YandexImages/`, `YandexVideo/`, `YandexRenderResourcesBot/`) с адреса из
+  анонсов AS13238 (`proxy/gate/yandex/as13238.txt`, RIPEstat), подтверждённый способом Яндекса: обратный DNS
+  кончается на `.yandex.ru`, `.yandex.net` или `.yandex.com`, а прямой резолв этого имени содержит тот же адрес.
+  DNS спрашивается только у таких запросов (UA робота из AS13238), прочие его не ждут: ответ на адрес хранится
+  в памяти процесса — подтверждение 24 ч, отказ 1 ч, не больше 4096 адресов; один запрос DNS на адрес
+  одновременно, таймаут 1,5 с. Резолвер недоступен (ошибка или таймаут, а не NXDOMAIN и не «имя не то») —
+  вердикт прежний, по AS13238 и UA, держится минуту, в журнале запроса `gate_yandex_dns: unavailable`: падение
+  DNS не режет робота поиска. Служебные фетчеры Яндекса (`YandexTranslate`, `YandexScreenshotBot`,
+  `YandexMetrika` и любой другой `Yandex*`) поблажек не получают ни здесь, ни ниже — проверяются как браузер,
+  как user-triggered fetchers Google в сигнатурах. Сверка адреса и срока токена, модуль бана и `bots.block`
+  для роботов Яндекса не меняются; `exempt_ranges` — все проверки. `no_ban_ranges` (boks#160, образ gate14; решение владельца 01.11
   «блокируем, но не баним» — офисы клиентов): fp, fetch_meta, alpn, page_first и static_rhythm для них не
   спрашиваются, как для `exempt_ranges`, а сигнатуры сверяются: совпадение в `enforce` — 403 `Forbidden`,
   `gate_reason: signature` и `gate_signature` в журнале, но бана нет — офис не теряет доступ на
