@@ -9,7 +9,7 @@
 - [x] 3. `boks deploy-hook <app>`: тег из `SSH_ORIGINAL_COMMAND` строго, файлы сервера, `deploy.Run` через `remote.Local` (`cmd/boks/main.go`).
 - [x] 4. Тесты: инъекции в тег, выкат по файлам сервера, чужой boks.yml, блок ключей (сохранение, замена, снятие, отказы), порядок в apply, откат без приложений; мутации — ловятся.
 - [x] 5. `docs/architecture.md`.
-- [ ] 6. PR через `/review-loop --ship`, merge.
+- [x] 6. PR через `/review-loop --ship`, merge — #170, `9ed4ca1`.
 
 ## Проверка
 ```
