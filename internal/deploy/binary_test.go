@@ -156,3 +156,28 @@ func TestInstallBoksRefuses(t *testing.T) {
 		}
 	}
 }
+
+// A link that does not switch is a failed install, not "runs": the script's last line succeeds whatever
+// came before it, so the swap has to stop the script itself.
+func TestInstallBoksLinkNotSwitched(t *testing.T) {
+	h := newHome(t)
+	ctx := context.Background()
+	var fetched []string
+	a, b := build(commitA), build(commitB)
+	if err := InstallBoks(ctx, h, &strings.Builder{}, &config.ServerBoks{Commit: commitA, SHA256: map[string]string{"amd64": sum(a)}}, served(a, &fetched)); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the new link is made: ln puts the link inside it, and mv cannot put a directory
+	// over the link, as root too.
+	if err := os.MkdirAll(filepath.Join(h.dir, binLink+".new", "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var log strings.Builder
+	err := InstallBoks(ctx, h, &log, &config.ServerBoks{Commit: commitB, SHA256: map[string]string{"amd64": sum(b)}}, served(b, &fetched))
+	if err == nil || !strings.Contains(err.Error(), "not switched") {
+		t.Errorf("err %v, log %s", err, log.String())
+	}
+	if got := h.link(t); got != "../_server/bin/boks-"+commitA {
+		t.Errorf("the link names %q", got)
+	}
+}

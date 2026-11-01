@@ -96,7 +96,7 @@ func InstallBoks(ctx context.Context, r remote.Runner, log io.Writer, b *config.
 		"[ \"$(sha256sum " + q + " | cut -d' ' -f1)\" = " + remote.Quote(want) + " ] || { rm -f " + q + "; echo 'boks: the build written differs from the one fetched' >&2; exit 1; }\n" +
 		"v=$(" + q + " version 2>&1) && [ \"$v\" = " + remote.Quote(b.Commit) + " ] || { rm -f " + q + "; echo \"boks: the build says it is $v, not " + b.Commit + "\" >&2; exit 1; }\n" +
 		"prev=" + prev + "\n" +
-		"mkdir -p .boks/bin && ln -sfn " + remote.Quote(rel) + " " + binLink + ".new && mv -f " + binLink + ".new " + binLink + "\n" +
+		"mkdir -p .boks/bin && ln -sfn " + remote.Quote(rel) + " " + binLink + ".new && mv -f " + binLink + ".new " + binLink + " || { echo 'boks: the link was not switched' >&2; exit 1; }\n" +
 		// Kept: the new build and the one it replaced, to go back to by hand.
 		"for f in " + binDir + "/boks-*; do case \"../_server/bin/${f##*/}\" in " + remote.Quote(rel) + "|\"$prev\") ;; *) rm -f \"$f\";; esac; done; true"
 	if _, err := r.Run(ctx, "sh", "-c", script); err != nil {
