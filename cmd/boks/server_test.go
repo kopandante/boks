@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/netip"
 	"os"
@@ -614,5 +616,62 @@ func TestRollbackToAnOldRevisionLeavesTheWorkerOut(t *testing.T) {
 	}
 	if !slices.Contains(p.TrustedProxies, "2a06:98c0:3600::102/128") {
 		t.Errorf("the rollback dropped the neighbours of the address: %v", p.TrustedProxies)
+	}
+}
+
+// `boks version` says the commit boks's CI built it from; status names the server's boks, and the one
+// server.yml names when they differ (#154).
+func TestServerBoksInStatusAndVersion(t *testing.T) {
+	was := commit
+	commit = strings.Repeat("c", 40)
+	t.Cleanup(func() { commit = was })
+	var out strings.Builder
+	if code := run([]string{"version"}, &out, io.Discard); code != 0 || strings.TrimSpace(out.String()) != commit {
+		t.Errorf("version: %d %q", code, out.String())
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	named := strings.Repeat("a", 40)
+	if err := os.WriteFile(path, []byte("servers: [a]\nboks:\n  commit: "+named+"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := "sh -c readlink .boks/bin/boks 2>/dev/null; true"
+	for running, want := range map[string]string{
+		"../_server/bin/boks-" + named:                   "  boks " + named + "\n",
+		"../_server/bin/boks-" + strings.Repeat("d", 40): "! boks " + strings.Repeat("d", 40) + ", and server.yml names " + named,
+		"": "! boks none, and server.yml names " + named,
+	} {
+		a := &recorder{server: server{link: running}}
+		fleet(t, map[string]*recorder{"a": a}, time.Now)
+		out.Reset()
+		var errw strings.Builder
+		if code := run([]string{"server", "status", path}, &out, &errw); code != 0 || !strings.Contains(out.String(), want) {
+			t.Errorf("%q: %d %q %q", running, code, out.String(), errw.String())
+		}
+	}
+}
+
+// apply brings the server's boks before the policy: a build that does not fetch refuses with the policy
+// as it was (#154).
+func TestApplyBringsTheServersBoksFirst(t *testing.T) {
+	was := fetchBoks
+	fetchBoks = func(context.Context, string) ([]byte, error) { return nil, errors.New("404 Not Found") }
+	t.Cleanup(func() { fetchBoks = was })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "server.yml")
+	if err := os.WriteFile(path, []byte("servers: [a]\nrevision: 2\nboks:\n  commit: "+strings.Repeat("a", 40)+"\n  sha256: {amd64: "+strings.Repeat("b", 64)+"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &recorder{server: server{policyRead: "present\n{\"revision\":1,\"floor\":1}", "uname -m": "x86_64"}}
+	fleet(t, map[string]*recorder{"a": a}, time.Now)
+	var errw strings.Builder
+	if code := run([]string{"server", "apply", path}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "404 Not Found; nothing was changed") {
+		t.Errorf("apply: %d %q", code, errw.String())
+	}
+	for _, in := range a.stdin {
+		if strings.Contains(in, `"revision"`) {
+			t.Errorf("the policy was written: %s", in)
+		}
 	}
 }

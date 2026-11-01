@@ -1299,6 +1299,19 @@ egress:
 
 ## Обновления
 
+**Серверный boks** (boks#154, этап 1; решение владельца 01.11: «Сайт вообще не должен иметь понятия о
+boks»). У сервера один boks, его ставит infra. CI boks (`.github/workflows/boks-binary.yml`) на каждый
+push в main собирает `boks` linux/amd64 и arm64 (`CGO_ENABLED=0 -trimpath`, `-X main.commit=<sha>`) и
+кладёт в release `bin-<commit>` с `SHA256SUMS`; release не меняется никогда. `server.yml` называет
+версию — `boks: {commit: <sha>, sha256: {amd64: …, arm64: …}}` — и она проходит ревью, как
+`DefaultProxyImage`. `server install` и `server apply` (до политики) скачивают сборку для архитектуры
+сервера на машину оператора, сверяют sha256 с `server.yml`, пишут на сервер в
+`~/.boks/_server/bin/boks-<commit>` (0700), там снова сверяют sha256 и `boks version` = commit, и только
+потом одним rename переключают ссылку `~/.boks/bin/boks`. Любой отказ оставляет прежний boks; сборка
+той же версии с верной суммой не трогается; хранятся новая и предыдущая сборки. Сервер в GitHub не
+ходит, curl ему не нужен. `server status` называет версию и расхождение с `server.yml`. Дальше по #154:
+сборку конфига прокси и `proxy upgrade` делает серверный boks, выкат приложения — `deploy-hook`.
+
 boks — бинарник на ноутбуке, обновление тривиально. Прокси — `boks proxy upgrade` (G3, 2026-10-06):
 `proxy boot` работающий прокси не трогает, а только говорит, что конфиг называет другой образ.
 Upgrade не понижает прокси (boks#145): образ, чей тег старше работающего по `banN` или `gateM`

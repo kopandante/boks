@@ -1,0 +1,66 @@
+# Builds boks for linux amd64 and arm64 on every push to main that changes its Go code, and puts both
+# builds and their SHA256SUMS in a release of the commit, tagged bin-<commit> (#154). A server runs one
+# of these: server.yml names the commit and the sha256 of each build, so the version and the bytes pass
+# review as the proxy's image does, and `boks server install|apply` fetches the build from here, checks
+# it against server.yml and checks it again on the server.
+#
+# A release, once made, is never changed: a run for a commit that has one already stops there, so a
+# sum written in server.yml stays true.
+name: boks binary
+
+on:
+  push:
+    branches: [main]
+    paths: ["**.go", go.mod, go.sum, .github/workflows/boks-binary.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: boks-binary-${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: release exists?
+        id: have
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "bin-$GITHUB_SHA" >/dev/null 2>&1; then
+            echo "bin-$GITHUB_SHA exists; a release is never changed" >> "$GITHUB_STEP_SUMMARY"
+            echo exists=true >> "$GITHUB_OUTPUT"
+          fi
+      - name: build
+        if: steps.have.outputs.exists != 'true'
+        run: |
+          mkdir dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.commit=$GITHUB_SHA" -o "dist/boks-linux-$arch" ./cmd/boks
+          done
+          (cd dist && sha256sum boks-linux-* > SHA256SUMS)
+          cat dist/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+      - name: release
+        if: steps.have.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "boks $GITHUB_SHA for linux. For server.yml:"
+            echo
+            echo '```yaml'
+            echo "boks:"
+            echo "  commit: $GITHUB_SHA"
+            echo "  sha256:"
+            while read -r sum file; do echo "    ${file#boks-linux-}: $sum"; done < dist/SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "bin-$GITHUB_SHA" dist/* --target "$GITHUB_SHA" \
+            --title "boks ${GITHUB_SHA::12}" --notes-file notes.md --latest=false

@@ -1,0 +1,158 @@
+package deploy
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kopandante/boks/internal/config"
+)
+
+// home runs commands with sh in a directory standing for the server's home, as ssh would: the install's
+// script is shell, and its checks are what a test has to see run. sha256sum is the coreutils one on a
+// server; where it is not (macOS), a shim gives the same output.
+type home struct {
+	dir, path string
+	calls     []string
+}
+
+func newHome(t *testing.T) *home {
+	t.Helper()
+	h := &home{dir: t.TempDir()}
+	bin := t.TempDir()
+	if _, err := exec.LookPath("sha256sum"); err != nil {
+		shim := "#!/bin/sh\nexec shasum -a 256 \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(bin, "sha256sum"), []byte(shim), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.path = bin + string(os.PathListSeparator) + os.Getenv("PATH")
+	return h
+}
+
+func (h *home) Run(ctx context.Context, args ...string) (string, error) {
+	return h.Pipe(ctx, nil, args...)
+}
+
+func (h *home) Pipe(ctx context.Context, stdin []byte, args ...string) (string, error) {
+	h.calls = append(h.calls, strings.Join(args, " "))
+	if args[0] == "uname" {
+		return "x86_64", nil
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir, cmd.Env = h.dir, append(os.Environ(), "PATH="+h.path)
+	if stdin != nil {
+		cmd.Stdin = strings.NewReader(string(stdin))
+	}
+	var out, errb strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		return "", errors.New(err.Error() + ": " + errb.String())
+	}
+	return strings.TrimSpace(out.String()), nil
+}
+
+// build is a stand-in for boks's build of commit: a script that says commit to `version`.
+func build(says string) []byte { return []byte("#!/bin/sh\necho " + says + "\n") }
+
+func sum(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
+
+func (h *home) link(t *testing.T) string {
+	t.Helper()
+	l, err := os.Readlink(filepath.Join(h.dir, binLink))
+	if err != nil {
+		return ""
+	}
+	return l
+}
+
+const (
+	commitA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	commitB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	commitC = "cccccccccccccccccccccccccccccccccccccccc"
+)
+
+func served(body []byte, fetched *[]string) Fetch {
+	return func(_ context.Context, url string) ([]byte, error) {
+		*fetched = append(*fetched, url)
+		return body, nil
+	}
+}
+
+// The build is fetched for the server's architecture, checked, written, checked there, and only then
+// named by the link; a second install of the same is left alone; a third commit keeps the one it
+// replaced and removes older ones (#154).
+func TestInstallBoks(t *testing.T) {
+	h := newHome(t)
+	var fetched []string
+	ctx := context.Background()
+	for i, c := range []string{commitA, commitB, commitB, commitC} {
+		b := build(c)
+		var log strings.Builder
+		if err := InstallBoks(ctx, h, &log, &config.ServerBoks{Commit: c, SHA256: map[string]string{"amd64": sum(b)}}, served(b, &fetched)); err != nil {
+			t.Fatalf("%d %s: %v", i, c[:4], err)
+		}
+		if got := h.link(t); got != "../_server/bin/boks-"+c {
+			t.Errorf("%d: the link names %q", i, got)
+		}
+		if got, _ := RunningBoks(ctx, h); got != c {
+			t.Errorf("%d: running %q", i, got)
+		}
+		if i == 2 && (len(fetched) != 2 || !strings.Contains(log.String(), "already")) {
+			t.Errorf("the same build again was fetched: %v %s", fetched, log.String())
+		}
+	}
+	if fetched[0] != "https://github.com/kopandante/boks/releases/download/bin-"+commitA+"/boks-linux-amd64" {
+		t.Errorf("fetched %s", fetched[0])
+	}
+	left, _ := filepath.Glob(filepath.Join(h.dir, binDir, "boks-*"))
+	var names []string
+	for _, f := range left {
+		names = append(names, filepath.Base(f))
+	}
+	if strings.Join(names, " ") != "boks-"+commitB+" boks-"+commitC {
+		t.Errorf("builds kept: %v", names)
+	}
+	if fi, err := os.Stat(filepath.Join(h.dir, binDir, "boks-"+commitC)); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("mode: %v %v", fi, err)
+	}
+}
+
+// A build whose sum is not server.yml's, one that says another commit, and an architecture server.yml
+// writes no sum for are refused, and the boks that ran stays named.
+func TestInstallBoksRefuses(t *testing.T) {
+	h := newHome(t)
+	ctx := context.Background()
+	var fetched []string
+	good := build(commitA)
+	if err := InstallBoks(ctx, h, &strings.Builder{}, &config.ServerBoks{Commit: commitA, SHA256: map[string]string{"amd64": sum(good)}}, served(good, &fetched)); err != nil {
+		t.Fatal(err)
+	}
+	liar := build(commitC)
+	for name, c := range map[string]struct {
+		b    *config.ServerBoks
+		body []byte
+		want string
+	}{
+		"another sum":     {&config.ServerBoks{Commit: commitB, SHA256: map[string]string{"amd64": sum(good)}}, build(commitB), "has sha256"},
+		"another commit":  {&config.ServerBoks{Commit: commitB, SHA256: map[string]string{"amd64": sum(liar)}}, liar, "says it is " + commitC},
+		"no sum for arch": {&config.ServerBoks{Commit: commitB, SHA256: map[string]string{"arm64": sum(liar)}}, liar, "no sha256 for amd64"},
+	} {
+		err := InstallBoks(ctx, h, &strings.Builder{}, c.b, served(c.body, &fetched))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+		if got := h.link(t); got != "../_server/bin/boks-"+commitA {
+			t.Errorf("%s: the link names %q", name, got)
+		}
+		if _, err := os.Stat(filepath.Join(h.dir, binDir, "boks-"+commitB)); err == nil {
+			t.Errorf("%s: the refused build is left on the server", name)
+		}
+	}
+}
