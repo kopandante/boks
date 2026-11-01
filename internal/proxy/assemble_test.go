@@ -31,10 +31,15 @@ func (o *owned) Run(ctx context.Context, args ...string) (string, error) {
 }
 
 func (o *owned) Pipe(ctx context.Context, content []byte, args ...string) (string, error) {
-	if strings.Join(args, " ") == ServerBoks+" "+AssembleCommand {
+	switch strings.Join(args, " ") {
+	case ServerBoks + " " + AssembleCommand:
 		o.calls = append(o.calls, "assemble")
 		o.piped = content
 		return o.config, o.err
+	case ServerBoks + " " + AssembleCommand + " " + CheckArg:
+		o.calls = append(o.calls, "check")
+		o.piped = content
+		return "", o.err
 	}
 	return o.fake.Pipe(ctx, content, args...)
 }
@@ -167,5 +172,44 @@ func TestServerConfigRefusesWhatItDoesNotKnow(t *testing.T) {
 	_, err = ServerConfig(context.Background(), home(t, ""), []byte(`[{"app":"web","routes":[{"host":"a.example.com","dial":"web:80","tls":true,"mirror":"x"}]}]`))
 	if err == nil || !strings.Contains(err.Error(), "mirror") {
 		t.Errorf("routes: err = %v, want a refusal naming the field", err)
+	}
+}
+
+// The server's boks is asked about the policy as SetPolicy writes it, and its refusal is a refusal that
+// changed nothing; a server without one is not asked.
+func TestCheckServerBoks(t *testing.T) {
+	p := Policy{Revision: 3, Floor: 3, Block: []BotBlock{{Name: "crawlers", UserAgent: "(?i)gptbot"}}}
+	o := &owned{fake: &fake{}}
+	if err := CheckServerBoks(context.Background(), o, p); err != nil {
+		t.Fatal(err)
+	}
+	if string(o.piped) != string(marshal(p)) {
+		t.Errorf("asked about %s, want the bytes SetPolicy writes", o.piped)
+	}
+	o = &owned{fake: &fake{}, err: errors.New(`json: unknown field "egress"`)}
+	err := CheckServerBoks(context.Background(), o, p)
+	if err == nil || !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("err = %v, want the server's refusal", err)
+	}
+	f := &fake{}
+	if err := CheckServerBoks(context.Background(), f, p); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.calls {
+		if strings.Contains(c, AssembleCommand) {
+			t.Errorf("asked a server without its own boks: %v", f.calls)
+		}
+	}
+}
+
+// CheckPolicy reads a policy as ServerConfig reads the one on the disk: a field this boks does not know
+// is refused, one it knows is taken.
+func TestCheckPolicyIsStrict(t *testing.T) {
+	if err := CheckPolicy(marshal(Policy{Revision: 2, Block: []BotBlock{{Name: "a", UserAgent: "b"}}})); err != nil {
+		t.Errorf("a policy of this boks refused: %v", err)
+	}
+	err := CheckPolicy([]byte(`{"revision": 2, "floor": 2, "newer_filter": {"on": true}}`))
+	if err == nil || !strings.Contains(err.Error(), "newer_filter") || !strings.Contains(err.Error(), "server apply") {
+		t.Errorf("err = %v, want the unknown field refused with what to do", err)
 	}
 }

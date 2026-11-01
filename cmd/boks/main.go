@@ -35,7 +35,8 @@ const usage = `usage: boks [-f boks.yml] <command>
   releases         releases recorded on each server, newest last
   version          the commit this boks was built from
   proxy-config     (the server's own boks) the proxy's config of the routes on stdin and the
-                   policy of this server; deploy, apply and proxy upgrade ask it for that config
+                   policy of this server; deploy, apply and proxy upgrade ask it for that config;
+                   with check, whether it reads the policy on stdin, which apply asks first
   proxy boot       make sure the proxy (Caddy) is running (idempotent)
   proxy list       routes the proxy serves, for every app on each server
   proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
@@ -102,8 +103,8 @@ func run(args []string, out, errw io.Writer) int {
 	}
 	// The server's boks assembling the proxy's config for whichever boks runs a deploy or an apply
 	// there (#154): no boks.yml, no ssh — the server is the machine it runs on.
-	if fs.Arg(0) == proxy.AssembleCommand && fs.NArg() == 1 {
-		if err := assembleHere(context.Background(), out); err != nil {
+	if fs.Arg(0) == proxy.AssembleCommand && (fs.NArg() == 1 || fs.NArg() == 2 && fs.Arg(1) == proxy.CheckArg) {
+		if err := assembleHere(context.Background(), out, fs.NArg() == 2); err != nil {
 			fmt.Fprintln(errw, "error:", err)
 			return 1
 		}
@@ -230,13 +231,17 @@ var (
 )
 
 // assembleHere prints the config of the routes on stdin and the policy of this machine, the server
-// whose boks this is, read from the home as ssh would reach it.
-func assembleHere(ctx context.Context, out io.Writer) error {
-	home, err := os.UserHomeDir()
+// whose boks this is, read from the home as ssh would reach it. With check, stdin is a policy, and the
+// answer is whether this boks reads it (proxy.CheckServerBoks).
+func assembleHere(ctx context.Context, out io.Writer, check bool) error {
+	in, err := io.ReadAll(stdin)
 	if err != nil {
 		return err
 	}
-	in, err := io.ReadAll(stdin)
+	if check {
+		return proxy.CheckPolicy(in)
+	}
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}

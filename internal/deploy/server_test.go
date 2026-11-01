@@ -433,3 +433,29 @@ func TestServerStatusSaysWhatItCannotCompare(t *testing.T) {
 		t.Errorf("policy %+v, drift %v, err %v", p, drift, err)
 	}
 }
+
+// A server whose own boks does not read the policy refuses it before anything changes (#154): found
+// only by the load after the swap, it would leave the proxy made for the new egress port serving the
+// policy put back, which does not listen there.
+func TestApplyServerAsksTheServersBoksBeforeTheSwap(t *testing.T) {
+	f := serverFake(t, proxy.Policy{Revision: 1, Floor: 1})
+	f.out["docker inspect -f {{range"] = "443/tcp 80/tcp |"
+	f.out["docker exec boks-proxy caddy list-modules"] = "http.handlers.forward_proxy"
+	f.out[proxyImage] = config.DefaultProxyImage
+	f.out[ownBoks] = "yes"
+	check := proxy.ServerBoks + " " + proxy.AssembleCommand + " " + proxy.CheckArg
+	f.fail[check] = errors.New(`json: unknown field "egress"`)
+	next := proxy.Policy{Revision: 2, Egress: &proxy.Egress{Port: 3128, Allow: []string{"203.0.113.10/32"}, Ports: []int{443}}}
+	err := ApplyServer(context.Background(), f, io.Discard, next, fixed)
+	if err == nil || !strings.Contains(err.Error(), "unknown field") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("want the server's boks's refusal, got %v", err)
+	}
+	if f.has("docker create --name boks-proxy") || f.has("docker stop") || len(f.uploads) > 0 || len(f.appends) > 0 {
+		t.Errorf("want nothing changed: %v %v %v", f.calls, f.uploads, f.appends)
+	}
+	// It was asked about the bytes SetPolicy would write.
+	var asked proxy.Policy
+	if err := json.Unmarshal([]byte(f.stdin[check]), &asked); err != nil || asked.Revision != 2 || asked.Floor != 2 || asked.Egress == nil {
+		t.Errorf("asked about %q (%v), want next with its floor", f.stdin[check], err)
+	}
+}

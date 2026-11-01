@@ -816,3 +816,23 @@ func TestProxyConfigFromTheHome(t *testing.T) {
 		t.Errorf("proxy-config printed a config other than Config's")
 	}
 }
+
+// With check, the server's boks reads the policy on stdin and says only whether it knows every field.
+func TestProxyConfigCheck(t *testing.T) {
+	wasIn := stdin
+	t.Cleanup(func() { stdin = wasIn })
+	for _, c := range []struct {
+		in   string
+		code int
+	}{
+		{`{"revision": 2, "floor": 2, "block": [{"name": "crawlers", "user_agent": "(?i)gptbot"}]}`, 0},
+		{`{"revision": 2, "floor": 2, "newer_filter": true}`, 1},
+	} {
+		stdin = strings.NewReader(c.in)
+		var out, errw strings.Builder
+		code := run([]string{"-f", filepath.Join(t.TempDir(), "no-boks.yml"), "proxy-config", "check"}, &out, &errw)
+		if code != c.code || out.String() != "" || (c.code == 1) != strings.Contains(errw.String(), "newer_filter") {
+			t.Errorf("%s: %d %q %q", c.in, code, out.String(), errw.String())
+		}
+	}
+}

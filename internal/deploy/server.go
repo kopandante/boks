@@ -216,6 +216,11 @@ func withServer(ctx context.Context, r remote.Runner, log io.Writer, o Options, 
 	if err != nil {
 		return err
 	}
+	// The server's own boks reads next before anything changes: refused only by the load in SetPolicy,
+	// it would leave the proxy Reshape made for next serving the policy put back.
+	if err := proxy.CheckServerBoks(ctx, r, next); err != nil {
+		return err
+	}
 	op, err := beginServer(ctx, r, log, o, action, strconv.Itoa(cur.Revision), strconv.Itoa(next.Revision))
 	if err != nil {
 		return err
