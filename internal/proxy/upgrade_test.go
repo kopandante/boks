@@ -338,6 +338,14 @@ func TestBootNamesAnotherImage(t *testing.T) {
 	if err := Boot(context.Background(), s, &log, newImage); err != nil || strings.Contains(log.String(), "warning") {
 		t.Errorf("the image the config names: want no warning, got %v %s", err, log.String())
 	}
+	// An older image the config names: the warning says so and that upgrade will not take it (boks#145).
+	const running, older = "boks-caddy:2.11.7-ban10-gate9-go1.27.3", "boks-caddy:2.11.7-ban9-gate4-go1.27.3"
+	s = newSwap(running)
+	log.Reset()
+	if err := Boot(context.Background(), s, &log, older); err != nil ||
+		!strings.Contains(log.String(), "the config names the older "+older+"; `boks proxy upgrade` refuses") {
+		t.Errorf("an older image: want it named older, got %v %s", err, log.String())
+	}
 }
 
 // The ban and gate of a boks-caddy tag, with or without a registry and digest; gate 0 for a ban without
