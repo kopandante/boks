@@ -120,9 +120,12 @@ login, pull и logout идут одним скриптом под тем же п
 **Повтор pull** (boks#150, решение владельца 01.11 «Сбои ретраить», todo#437): хранилище слоёв Depot
 (Tigris) пропадает из РФ пачками по 1–2 минуты, и `docker pull` кончается `TLS handshake timeout`.
 Pull образа приложения (deploy и rollback, с логином и без) при сетевой ошибке по словам docker
-(`TLS handshake timeout`, `i/o timeout`, `connection reset by peer`, `unexpected EOF`, таймауты
-ожидания ответа) повторяется — всего 3 попытки, через 2 минуты, строка в выводе выката на каждый повтор (в журнал операций сервера не пишется: pull идёт до его записи).
-Отказ токена, «нет образа» и прочие ошибки — сразу отказ. Обрыв может быть и ssh boks до сервера, а не реестра: повтор так же безопасен, и итоговая ошибка называет оба (`failed on the network 3 times … the registry or this server's link to it`). Пауза прерывается отменой; pull идёт под
+(`TLS handshake timeout`, `i/o timeout`, `connection reset by peer`, `connection timed out`,
+`connection refused`, `no route to host`, `network is unreachable`, `server misbehaving`, `EOF` и
+`unexpected EOF`, HTTP 502/503/504, `context deadline exceeded`, таймауты ожидания ответа; список широкий
+нарочно — boks#153, решение infra-pm: повтор ограничен и безвреден, непойманный сбой — ручной перезапуск)
+повторяется — всего 3 попытки, через 2 минуты, строка в выводе выката на каждый повтор (в журнал операций сервера не пишется: pull идёт до его записи).
+Отказ токена, «нет образа», `no such host` (опечатка в имени реестра — ждать нечего) и прочие ошибки — сразу отказ. Обрыв может быть и ssh boks до сервера, а не реестра: повтор так же безопасен, и итоговая ошибка называет оба (`failed on the network 3 times … the registry or this server's link to it`). Пауза прерывается отменой; pull идёт под
 замком приложения, до замка допуска, и другие приложения сервера не ждут. Pull образа прокси
 (`proxy upgrade`, `migrate`) не повторяется.
 

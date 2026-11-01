@@ -923,27 +923,35 @@ func pullOnce(ctx context.Context, r remote.Runner, log io.Writer, ref string, l
 }
 
 // registryDown reports a pull that failed on the network, in docker's words, and was not refused: the
-// token turned down or the image not there are answers, and trying again changes neither. A reset or
-// cut connection may be boks's own ssh to the server rather than the registry; trying that again is
-// as safe, so the words do not tell the two apart and the refusal names both.
+// token turned down, the image not there and a registry name that does not resolve (no such host: a
+// typo, nothing to wait for) are answers, and trying again changes none. A reset or cut connection may
+// be boks's own ssh to the server rather than the registry; trying that again is as safe, so the words
+// do not tell the two apart and the refusal names both. The list is wide on purpose (boks#153): a try
+// more is bounded and harmless, a failure not caught is a deploy started again by hand.
 func registryDown(err error) bool {
 	if refusedToken(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	for _, s := range []string{"manifest unknown", "not found"} {
+	for _, s := range []string{"manifest unknown", "not found", "no such host"} {
 		if strings.Contains(msg, s) {
 			return false
 		}
 	}
 	for _, s := range []string{"tls handshake timeout", "i/o timeout", "connection reset by peer", "unexpected eof",
-		"timeout awaiting response headers", "request canceled while waiting for connection", "client.timeout exceeded"} {
+		"timeout awaiting response headers", "request canceled while waiting for connection", "client.timeout exceeded",
+		"connection timed out", "connection refused", "no route to host", "network is unreachable", "server misbehaving",
+		"context deadline exceeded"} {
 		if strings.Contains(msg, s) {
 			return true
 		}
 	}
-	return false
+	return networkWord.MatchString(msg)
 }
+
+// networkWord is a bare EOF — a connection that closed — and a gateway's 502, 503 or 504, as words of
+// their own: not inside a digest, a port or another word.
+var networkWord = regexp.MustCompile(`(^|[^0-9a-z])(eof|50[234])($|[^0-9a-z])`)
 
 // container is a previously deployed container of this app: its name, and the two labels that say
 // how it must be replaced.
