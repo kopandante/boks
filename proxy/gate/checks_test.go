@@ -239,8 +239,8 @@ func TestChecksValidate(t *testing.T) {
 // the measurement; an address beside them is not Google's.
 func TestGoogleRanges(t *testing.T) {
 	ps, err := readGoogle()
-	if err != nil || len(ps) < 100 {
-		t.Fatalf("%d ranges, %v", len(ps), err)
+	if err != nil || len(ps[googlebotFile]) < 100 || len(ps[userFetchersFile]) < 100 {
+		t.Fatalf("%d and %d ranges, %v", len(ps[googlebotFile]), len(ps[userFetchersFile]), err)
 	}
 	for _, ip := range []string{"66.249.66.1", "192.178.6.3", "142.250.32.5", "2001:4860:4801:10::1"} {
 		if !isGoogle(netip.MustParseAddr(ip)) {
