@@ -123,31 +123,38 @@ func TestRegistryDownWords(t *testing.T) {
 		`manifest for ghcr.io/x/y:v2 not found: manifest unknown`:                                                        false,
 		`pull access denied for y, repository does not exist`:                                                            false,
 		// Neither a digest nor a port nor a word that holds the letters or the numbers.
-		`write /var/lib/docker/tmp/sha256:5031a0eofb: no space left on device`: false,
-		`invalid reference format: registry.depot.dev:5030/p`:                  false,
-		`exec format error: GEOF`:                                              false,
+		`write /var/lib/docker/tmp/sha256:5031a0eofb: no space left on device`:                    false,
+		`failed to register layer: write /usr/share/nginx/html/503.html: no space left on device`: false,
+		`read tcp 10.0.0.2:51234->34.1.2.3:443: read: unexpected EOF`:                             true,
+		`invalid reference format: registry.depot.dev:5030/p`:                                     false,
+		`exec format error: GEOF`: false,
 	} {
-		if got := registryDown(errors.New(msg), "registry.depot.dev/p/app:v2"); got != want {
+		if got := registryDown(errors.New(msg)); got != want {
 			t.Errorf("%q: %v, want %v", msg, got, want)
 		}
 	}
 }
 
-// The image is named in the error of a pull with the login, and its tag and the registry's port are
-// the user's: a 502, 503 or EOF there is not the network (boks#156).
-func TestRegistryDownNotTheRef(t *testing.T) {
-	for ref, msg := range map[string]string{
-		"registry.depot.dev/p/app:503":     "pull registry.depot.dev/p/app:503 from registry.depot.dev: sh: exit status 1: failed to register layer: no space left on device",
-		"registry.depot.dev/p/app:1.0.502": "pull registry.depot.dev/p/app:1.0.502 from registry.depot.dev: sh: exit status 1: toomanyrequests: retry later",
-		"reg.example:504/app:eof":          "pull reg.example:504/app:eof from reg.example:504: sh: exit status 1: no matching manifest for linux/arm64",
+// A 502, 503 or 504 is the network only with the reason HTTP gives it: the number alone may be the
+// user's tag or port, which the error names (boks#156).
+func TestRegistryDownNotTheTag(t *testing.T) {
+	for _, msg := range []string{
+		"pull registry.depot.dev/p/app:503 from registry.depot.dev: sh: exit status 1: failed to register layer: no space left on device",
+		"pull registry.depot.dev/p/app:1.0.502 from registry.depot.dev: sh: exit status 1: toomanyrequests: retry later",
+		`docker: exit status 1: failed to resolve reference "ghcr.io/x/app:503": unexpected status from HEAD request to https://ghcr.io/v2/x/app/manifests/503: 403 Forbidden`,
+		"pull reg.example:504/app:v1 from reg.example:504: sh: exit status 1: no matching manifest for linux/arm64",
 	} {
-		if registryDown(errors.New(msg), ref) {
-			t.Errorf("%q: tried again for words of the image %s", msg, ref)
+		if registryDown(errors.New(msg)) {
+			t.Errorf("%q: tried again for the number of the tag or port", msg)
 		}
 	}
-	// The words of the network still count when the image is named beside them.
-	msg := "pull registry.depot.dev/p/app:503 from registry.depot.dev: sh: exit status 1: received unexpected HTTP status: 502 Bad Gateway"
-	if !registryDown(errors.New(msg), "registry.depot.dev/p/app:503") {
-		t.Errorf("%q: not tried again", msg)
+	for _, msg := range []string{
+		"pull registry.depot.dev/p/app:503 from registry.depot.dev: sh: exit status 1: received unexpected HTTP status: 502 Bad Gateway",
+		`unexpected status from GET request to https://ghcr.io/v2/x/app/manifests/503: 503 Service Unavailable`,
+		"unknown: 504 Gateway Time-out",
+	} {
+		if !registryDown(errors.New(msg)) {
+			t.Errorf("%q: not tried again", msg)
+		}
 	}
 }

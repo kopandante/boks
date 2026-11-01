@@ -887,7 +887,7 @@ func pull(ctx context.Context, r remote.Runner, log io.Writer, ref string, enabl
 	}
 	for try := 1; ; try++ {
 		err := pullOnce(ctx, r, log, ref, login)
-		if err == nil || !registryDown(err, ref) {
+		if err == nil || !registryDown(err) {
 			return err
 		}
 		if try == pullTries {
@@ -928,24 +928,17 @@ func pullOnce(ctx context.Context, r remote.Runner, log io.Writer, ref string, l
 // be boks's own ssh to the server rather than the registry; trying that again is as safe, so the words
 // do not tell the two apart and the refusal names both. The list is wide on purpose (boks#153): a try
 // more is bounded and harmless, a failure not caught is a deploy started again by hand.
-//
-// The error of a pull with the login names the image and its registry, and the tag and the port are
-// the user's own: they are taken out first, so an image tagged 503 is not the network.
-func registryDown(err error, ref string) bool {
+func registryDown(err error) bool {
 	if refusedToken(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	if ref = strings.ToLower(ref); ref != "" {
-		host, _, _ := strings.Cut(ref, "/")
-		msg = strings.ReplaceAll(strings.ReplaceAll(msg, ref, " "), host, " ")
-	}
 	for _, s := range []string{"manifest unknown", "not found", "no such host"} {
 		if strings.Contains(msg, s) {
 			return false
 		}
 	}
-	for _, s := range []string{"tls handshake timeout", "i/o timeout", "connection reset by peer", "unexpected eof",
+	for _, s := range []string{"tls handshake timeout", "i/o timeout", "connection reset by peer",
 		"timeout awaiting response headers", "request canceled while waiting for connection", "client.timeout exceeded",
 		"connection timed out", "connection refused", "no route to host", "network is unreachable", "server misbehaving",
 		"context deadline exceeded"} {
@@ -956,9 +949,11 @@ func registryDown(err error, ref string) bool {
 	return networkWord.MatchString(msg)
 }
 
-// networkWord is a bare EOF — a connection that closed — and a gateway's 502, 503 or 504, as words of
-// their own: not inside a digest, a port or another word.
-var networkWord = regexp.MustCompile(`(^|[^0-9a-z])(eof|50[234])($|[^0-9a-z])`)
+// networkWord is a bare EOF — a connection that closed — as a word of its own, not inside a digest or
+// another word, and a gateway's 502, 503 or 504 with the reason HTTP gives it ("502 Bad Gateway"):
+// a number alone may be the user's — an image tagged 503 is in the error, and in the manifest URL
+// docker names (boks#156).
+var networkWord = regexp.MustCompile(`(^|[^0-9a-z])eof($|[^0-9a-z])|50[234] (bad gateway|service unavailable|gateway time-?out)`)
 
 // container is a previously deployed container of this app: its name, and the two labels that say
 // how it must be replaced.
