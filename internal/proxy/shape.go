@@ -306,7 +306,7 @@ func Drift(ctx context.Context, r remote.Runner, p Policy) ([]string, error) {
 	}
 	if have != want {
 		out = append(out, fmt.Sprintf("the proxy publishes egress port %d and mounts hosts file %q, the policy needs %d and %q; "+
-			"`boks proxy upgrade` creates it again", have.EgressPort, have.HostsFile, want.EgressPort, want.HostsFile))
+			"`boks proxy upgrade`, with proxy_image named, creates it again", have.EgressPort, have.HostsFile, want.EgressPort, want.HostsFile))
 	}
 	if want.HostsFile != "" && have.HostsFile == want.HostsFile {
 		host, err := r.Run(ctx, "stat", "-c", "%i", want.HostsFile)
