@@ -615,7 +615,7 @@ func (c *Config) RequireProxyImage() error {
 	}
 	return fmt.Errorf("proxy upgrade: no proxy_image in the config. boks does not choose the proxy of a server for you: "+
 		"the image built into this boks (%s) is only the one current when it was built. Name the image to run in "+
-		"proxy_image (the running one: docker inspect boks-proxy on the server, or boks proxy list)", DefaultProxyImage)
+		"proxy_image (the one running now: `docker inspect -f '{{.Config.Image}}' boks-proxy` on the server)", DefaultProxyImage)
 }
 
 func (c *Config) applyDefaults() {

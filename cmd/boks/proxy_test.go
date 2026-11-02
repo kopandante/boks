@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kopandante/boks/internal/config"
+	"github.com/kopandante/boks/internal/proxy"
 )
 
 // boks#178: `proxy upgrade` from a config that does not name proxy_image must stop before it opens a
@@ -23,6 +24,10 @@ func TestProxyUpgradeWithoutProxyImageIsRefusedBeforeTheServer(t *testing.T) {
 		err := proxyCmd(context.Background(), cfg, args, &out)
 		if err == nil || !strings.Contains(err.Error(), "no proxy_image in the config") {
 			t.Errorf("%v: want the refusal, got %v", args, err)
+		}
+		// The hint must name a command that shows the running image: `boks proxy list` shows routes only.
+		if err != nil && !strings.Contains(err.Error(), "docker inspect -f '{{.Config.Image}}' "+proxy.Container) {
+			t.Errorf("%v: the refusal does not say how to see the running image: %v", args, err)
 		}
 		if strings.Contains(out.String(), "==") {
 			t.Errorf("%v: a server was visited (%q): the refusal came too late", args, out.String())
