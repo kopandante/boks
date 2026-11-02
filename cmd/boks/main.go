@@ -49,7 +49,7 @@ const usage = `usage: boks [-f boks.yml] <command>
   proxy list       routes the proxy serves, for every app on each server
   proxy migrate    replace the kamal-proxy an earlier boks ran with Caddy, keeping every route of
                    every app on the server (once per server)
-  proxy upgrade    replace the running proxy with proxy_image (a boot leaves a running one alone);
+  proxy upgrade    replace the running proxy with proxy_image, which the config must name (a boot leaves a running one alone);
                    80 and 443 are down for the swap, and a failed one puts the old proxy back;
                    an image older than the running one (ban/gate in the tag) needs --force
   unlock           clear a stale deploy lock, and the server's admission lock if this app or a
@@ -560,6 +560,9 @@ func proxyCmd(ctx context.Context, cfg *config.Config, args []string, out io.Wri
 			return deploy.MigrateProxy(ctx, r, out, cfg.ProxyImage, deploy.Options{})
 		})
 	case "upgrade":
+		if err := cfg.RequireProxyImage(); err != nil {
+			return err
+		}
 		return each(ctx, cfg, out, func(ctx context.Context, r remote.Runner) error {
 			return deploy.UpgradeProxy(ctx, r, out, cfg.ProxyImage, deploy.Options{Now: now, Force: force})
 		})
