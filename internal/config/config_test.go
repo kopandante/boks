@@ -780,3 +780,39 @@ func TestParseListen(t *testing.T) {
 		}
 	}
 }
+
+// proxy upgrade refuses a file that does not name proxy_image (boks#178): the built-in image is filled in
+// either way, so only ProxyImageNamed tells a chosen proxy from the default. A key written with no value
+// is not a choice either.
+func TestProxyImageNamedTellsChosenFromDefault(t *testing.T) {
+	img := "ghcr.io/kopandante/boks-caddy:2.11.7-fp0aab84d-ban10-gate16-go1.27.3@sha256:94b21bdff8f1ba138cf70ac5612426055c01dabe9fe1047a5b686aff42d1aab4"
+	cases := []struct {
+		name, extra string
+		named       bool
+	}{
+		{"no key", "", false},
+		{"key with no value", "proxy_image:\n", false},
+		{"empty string", "proxy_image: \"\"\n", false},
+		{"named", "proxy_image: " + img + "\n", true},
+		{"named like the default", "proxy_image: " + DefaultProxyImage + "\n", true},
+	}
+	for _, c := range cases {
+		cfg, err := Parse([]byte(minimal + c.extra))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if cfg.ProxyImageNamed != c.named {
+			t.Errorf("%s: ProxyImageNamed = %v, want %v", c.name, cfg.ProxyImageNamed, c.named)
+		}
+		err = cfg.RequireProxyImage()
+		if c.named && err != nil {
+			t.Errorf("%s: a named proxy_image was refused: %v", c.name, err)
+		}
+		if !c.named && (err == nil || !strings.Contains(err.Error(), "proxy_image")) {
+			t.Errorf("%s: want a refusal naming proxy_image, got %v", c.name, err)
+		}
+		if cfg.ProxyImage == "" {
+			t.Errorf("%s: the built-in image must still fill ProxyImage for boot and deploy", c.name)
+		}
+	}
+}

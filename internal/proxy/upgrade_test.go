@@ -327,7 +327,7 @@ func TestBootNamesAnotherImage(t *testing.T) {
 	if err := Boot(context.Background(), s, &log, newImage); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(log.String(), "and the config names "+newImage+"; `boks proxy upgrade` replaces it") {
+	if !strings.Contains(log.String(), "and the config names "+newImage+"; `boks proxy upgrade` replaces it once proxy_image names it") {
 		t.Errorf("want the other image named: %s", log.String())
 	}
 	if s.at("docker stop") >= 0 || s.at("docker create") >= 0 {

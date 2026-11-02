@@ -474,7 +474,7 @@ func CheckGate(ctx context.Context, r remote.Runner, p Policy) error {
 		if state != "running" {
 			verb = "is a stopped container of"
 		}
-		return fmt.Errorf("the proxy %s %s, whose Caddy refuses the gate (%w); `boks proxy upgrade` with boks's own image first, then apply again", verb, image, err)
+		return fmt.Errorf("the proxy %s %s, whose Caddy refuses the gate (%w); name boks's own image in proxy_image and `boks proxy upgrade` first (an upgrade takes only a named image), then apply again", verb, image, err)
 	}
 	return nil
 }

@@ -286,7 +286,11 @@ type Config struct {
 	// string, because only a node tells a key written with no value (`network:`) from no key at all.
 	Network    yaml.Node `yaml:"network"`
 	ProxyImage string    `yaml:"proxy_image"`
-	EnvFile    string    `yaml:"env_file"`
+	// ProxyImageNamed is whether the file named proxy_image itself: ProxyImage is filled either way
+	// (DefaultProxyImage when the file names none), and only this tells a proxy the file chose from the
+	// one the build of boks happens to carry.
+	ProxyImageNamed bool   `yaml:"-"`
+	EnvFile         string `yaml:"env_file"`
 	// EnvBWS names the app whose secrets `<app>__NAME` come from BWS at deploy time (envbws.go).
 	EnvBWS        string            `yaml:"env_bws"`
 	Env           map[string]string `yaml:"env"`
@@ -602,7 +606,21 @@ func isEmptyDocument(doc *yaml.Node) bool {
 	return true
 }
 
+// RequireProxyImage is the refusal `proxy upgrade` makes of a file that does not name proxy_image. The
+// image built into boks is whatever was current when this build was cut and goes stale (the node ran
+// gate16 while a build still carried gate4), so an upgrade that took it would swap a node's proxy for
+// an old one on the strength of a key nobody wrote. The proxy a node runs is chosen in the open.
+func (c *Config) RequireProxyImage() error {
+	if c.ProxyImageNamed {
+		return nil
+	}
+	return fmt.Errorf("proxy upgrade: no proxy_image in the config. An upgrade does not choose the image to replace a running proxy with: "+
+		"the image built into this boks (%s) is only the one current when it was built. Name the image to run in "+
+		"proxy_image (the one running now: `docker inspect -f '{{.Config.Image}}' boks-proxy` on the server)", DefaultProxyImage)
+}
+
 func (c *Config) applyDefaults() {
+	c.ProxyImageNamed = c.ProxyImage != ""
 	if c.ProxyImage == "" {
 		c.ProxyImage = DefaultProxyImage
 	}

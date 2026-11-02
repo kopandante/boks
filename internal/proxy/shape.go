@@ -180,7 +180,7 @@ func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
 			verb = "is a stopped container of"
 		}
 		return fmt.Errorf("the proxy %s %s, whose Caddy refuses a ban with %s (%w); "+
-			"`boks proxy upgrade` with boks's own image first, then apply again", verb, image, fields, err)
+			"name boks's own image in proxy_image and `boks proxy upgrade` first (an upgrade takes only a named image), then apply again", verb, image, fields, err)
 	}
 	return nil
 }
@@ -233,7 +233,7 @@ func checkModule(ctx context.Context, r remote.Runner, module, lacks string) err
 		return fmt.Errorf("asking the proxy for its modules: %w", err)
 	}
 	if !slices.Contains(strings.Fields(mods), module) {
-		return fmt.Errorf("the proxy runs %s, which has %s; `boks proxy upgrade` with boks's own image first, then apply again", image, lacks)
+		return fmt.Errorf("the proxy runs %s, which has %s; name boks's own image in proxy_image and `boks proxy upgrade` first (an upgrade takes only a named image), then apply again", image, lacks)
 	}
 	return nil
 }
@@ -306,7 +306,7 @@ func Drift(ctx context.Context, r remote.Runner, p Policy) ([]string, error) {
 	}
 	if have != want {
 		out = append(out, fmt.Sprintf("the proxy publishes egress port %d and mounts hosts file %q, the policy needs %d and %q; "+
-			"`boks proxy upgrade` creates it again", have.EgressPort, have.HostsFile, want.EgressPort, want.HostsFile))
+			"`boks proxy upgrade`, with proxy_image named, creates it again", have.EgressPort, have.HostsFile, want.EgressPort, want.HostsFile))
 	}
 	if want.HostsFile != "" && have.HostsFile == want.HostsFile {
 		host, err := r.Run(ctx, "stat", "-c", "%i", want.HostsFile)
