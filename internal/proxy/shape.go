@@ -180,7 +180,7 @@ func CheckBan(ctx context.Context, r remote.Runner, p Policy) error {
 			verb = "is a stopped container of"
 		}
 		return fmt.Errorf("the proxy %s %s, whose Caddy refuses a ban with %s (%w); "+
-			"`boks proxy upgrade` with boks's own image first, then apply again", verb, image, fields, err)
+			"name boks's own image in proxy_image and `boks proxy upgrade` first (an upgrade takes only a named image), then apply again", verb, image, fields, err)
 	}
 	return nil
 }
@@ -233,7 +233,7 @@ func checkModule(ctx context.Context, r remote.Runner, module, lacks string) err
 		return fmt.Errorf("asking the proxy for its modules: %w", err)
 	}
 	if !slices.Contains(strings.Fields(mods), module) {
-		return fmt.Errorf("the proxy runs %s, which has %s; `boks proxy upgrade` with boks's own image first, then apply again", image, lacks)
+		return fmt.Errorf("the proxy runs %s, which has %s; name boks's own image in proxy_image and `boks proxy upgrade` first (an upgrade takes only a named image), then apply again", image, lacks)
 	}
 	return nil
 }

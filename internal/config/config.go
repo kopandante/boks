@@ -286,8 +286,9 @@ type Config struct {
 	// string, because only a node tells a key written with no value (`network:`) from no key at all.
 	Network    yaml.Node `yaml:"network"`
 	ProxyImage string    `yaml:"proxy_image"`
-	// ProxyImageNamed is whether the file named proxy_image itself: ProxyImage holds DefaultProxyImage
-	// either way, and only this tells a proxy the file chose from the one the build of boks happens to carry.
+	// ProxyImageNamed is whether the file named proxy_image itself: ProxyImage is filled either way
+	// (DefaultProxyImage when the file names none), and only this tells a proxy the file chose from the
+	// one the build of boks happens to carry.
 	ProxyImageNamed bool   `yaml:"-"`
 	EnvFile         string `yaml:"env_file"`
 	// EnvBWS names the app whose secrets `<app>__NAME` come from BWS at deploy time (envbws.go).
