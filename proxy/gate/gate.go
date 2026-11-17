@@ -78,8 +78,9 @@ type Handler struct {
 	Signatures   []Signature    `json:"signatures,omitempty"`
 	SignatureBan caddy.Duration `json:"signature_ban,omitempty"`
 	// RangeSets are named sets of addresses — a country's, by its registry's delegations — a signature's
-	// Ranges names (#140). boks writes into a group the sets its signatures name, from server.yml's
-	// range_sets, so a revision of the policy holds the list it was applied with.
+	// Ranges names (#140), or the group's TokenPools. boks writes into a group the sets its signatures and
+	// its token_pools name, from server.yml's range_sets, so a revision of the policy holds the list it was
+	// applied with.
 	RangeSets map[string][]string `json:"range_sets,omitempty"`
 	// TokenPools name sets of RangeSets whose addresses share their tokens: a token issued to an address of
 	// a pool passes from any other address of the same pool, as Googlebot's does (googlePool). For a crawler

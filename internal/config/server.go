@@ -56,9 +56,9 @@ type Server struct {
 	// place of each site (gate.go).
 	Gate *Gate `yaml:"gate"`
 	// RangeSets are named sets of addresses — a country's, from its registry's delegations — that a gate
-	// signature's `ranges` names (#140): a list of addresses and CIDR ranges, or a file of them beside
-	// server.yml, one on a line, # for comments. A file is read when server.yml is, and what it held goes
-	// into the policy, in the groups whose signatures name the set: a revision holds the list it was
+	// signature's `ranges` names (#140), or a group's `token_pools`: a list of addresses and CIDR ranges, or a
+	// file of them beside server.yml, one on a line, # for comments. A file is read when server.yml is, and
+	// what it held goes into the policy, in the groups whose signatures or token_pools name the set: a revision holds the list it was
 	// applied with, a rollback puts that list back, and an edit of the file changes nothing until applied.
 	RangeSets map[string]RangeSet `yaml:"range_sets"`
 	// Boks, when given, is the one boks of the server (#154): the linux build of Commit from boks's CI,

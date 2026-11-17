@@ -64,10 +64,10 @@ var gateWritten = map[string]string{
 	"secrets":    "the secret never goes in server.yml; secret_env names the variable it comes from",
 	"hosts":      "boks writes it from the app's routes",
 	"handler":    "boks writes it",
-	"range_sets": "boks writes the sets the group's signatures name, from the server's range_sets",
+	"range_sets": "boks writes the sets the group's signatures and token_pools name, from the server's range_sets",
 }
 
-// withRangeSets writes into each group of g's JSON the sets its signatures' ranges name, from sets: the
+// withRangeSets writes into each group of g's JSON the sets its signatures' ranges and its token_pools name, from sets: the
 // handler finds them there, and the policy's revision holds them. A group naming no set keeps its bytes.
 // A name no set has is refused here, not at the proxy's reload.
 func (g *Gate) withRangeSets(sets map[string]RangeSet) error {
