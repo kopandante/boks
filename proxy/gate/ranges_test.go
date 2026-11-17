@@ -112,9 +112,10 @@ func TestSignatureRangesThroughCaddy(t *testing.T) {
 // A token issued to an address of a token pool passes from another address of the same pool: Meta's in-app
 // browser takes the page's token at 57.141.20.34 and calls the API from 57.141.20.42 (todo#419). Not from
 // an address outside the pool, nor from another pool; a visitor's token from a pool's address is refused.
+// The visitor (203.0.113.7) is in no pool: the other pool is 192.0.2.0/24.
 func TestTokenPool(t *testing.T) {
 	h := enforcing(t, &Handler{
-		RangeSets:  map[string][]string{"meta": {"57.141.16.0/21", "157.240.0.0/16", "2a03:2880::/32"}, "other": {"203.0.113.0/24"}},
+		RangeSets:  map[string][]string{"meta": {"57.141.16.0/21", "157.240.0.0/16", "2a03:2880::/32"}, "other": {"192.0.2.0/24"}},
 		TokenPools: []string{"meta", "other"},
 	}, time.Now())
 	cases := []struct {
@@ -127,11 +128,13 @@ func TestTokenPool(t *testing.T) {
 		{"another range of the same pool", "57.141.20.34", "157.240.9.9", 200, "token"},
 		{"the pool over IPv6", "2a03:2880:10ff:1::1", "2a03:2880:20ff:2::7", 200, "token"},
 		{"the pool's address as IPv4-mapped IPv6", "57.141.20.34", "::ffff:57.141.20.42", 200, "token"},
+		{"a token of the pool's address written IPv4-mapped", "::ffff:57.141.20.34", "57.141.20.42", 200, "token"},
+		{"a token of an IPv4-mapped address of no pool", "::ffff:198.51.100.1", "57.141.20.42", 403, "ip_mismatch"},
 		{"the pool's token from a visitor", "57.141.20.34", visitor, 403, "ip_mismatch"},
 		{"a visitor's token from the pool", visitor, "57.141.20.42", 403, "ip_mismatch"},
 		{"the pool's token from the next address outside its range", "57.141.20.34", "57.141.24.1", 403, "ip_mismatch"},
-		{"one pool's token from another's address", "57.141.20.34", "203.0.113.7", 403, "ip_mismatch"},
-		{"another pool's token from the first's address", "203.0.113.7", "57.141.20.34", 403, "ip_mismatch"},
+		{"one pool's token from another's address", "57.141.20.34", "192.0.2.7", 403, "ip_mismatch"},
+		{"another pool's token from the first's address", "192.0.2.7", "57.141.20.34", 403, "ip_mismatch"},
 		{"the pool's token from the same pool's IPv6 and IPv4 of no pool", "2a03:2880:10ff:1::1", "198.51.100.1", 403, "ip_mismatch"},
 	}
 	for _, c := range cases {
@@ -143,9 +146,9 @@ func TestTokenPool(t *testing.T) {
 	}
 }
 
-// Without token_pools two addresses of Meta's are two visitors, as before the pool.
+// Without token_pools two addresses of Meta's are two visitors, as before the pool — though a set holds both.
 func TestNoTokenPoolKeepsAddressBinding(t *testing.T) {
-	h := enforcing(t, &Handler{RangeSets: map[string][]string{"meta": {"57.141.0.0/20"}}}, time.Now())
+	h := enforcing(t, &Handler{RangeSets: map[string][]string{"meta": {"57.141.16.0/21"}}}, time.Now())
 	r, extra := withLog(request(http.MethodGet, "/api/encar/catalog", "57.141.20.42"))
 	r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, "57.141.20.34")})
 	if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "ip_mismatch" {
