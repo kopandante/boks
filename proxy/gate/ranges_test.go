@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -109,39 +111,56 @@ func TestSignatureRangesThroughCaddy(t *testing.T) {
 	}
 }
 
-// A token issued to an address of a token pool passes from another address of the same pool: Meta's in-app
-// browser takes the page's token at 57.141.20.34 and calls the API from 57.141.20.42 (todo#419). Not from
-// an address outside the pool, nor from another pool; a visitor's token from a pool's address is refused.
-// The visitor (203.0.113.7) is in no pool: the other pool is 192.0.2.0/24.
+// A token issued to an address of a token pool passes from every other address of the same pool: Meta's in-app
+// browser takes the page's token at 57.141.20.34 and calls the API from 57.141.20.42 (todo#419). Every ordered
+// pair of the addresses below is asked, the token's and the request's each also written IPv4-mapped: a token
+// passes from the address it was issued to, as written, or from any address of its pool — never across pools,
+// never between a pool and an address of none. The verdict comes from the lists of addresses, not the ranges.
 func TestTokenPool(t *testing.T) {
-	h := enforcing(t, &Handler{
-		RangeSets:  map[string][]string{"meta": {"57.141.16.0/21", "157.240.0.0/16", "2a03:2880::/32"}, "other": {"192.0.2.0/24"}},
-		TokenPools: []string{"meta", "other"},
-	}, time.Now())
-	cases := []struct {
-		name, signedFor, from string
-		status                int
-		reason                string
-	}{
-		{"the next address of the pool", "57.141.20.34", "57.141.20.42", 200, "token"},
-		{"the same address", "57.141.20.34", "57.141.20.34", 200, "token"},
-		{"another range of the same pool", "57.141.20.34", "157.240.9.9", 200, "token"},
-		{"the pool over IPv6", "2a03:2880:10ff:1::1", "2a03:2880:20ff:2::7", 200, "token"},
-		{"the pool's address as IPv4-mapped IPv6", "57.141.20.34", "::ffff:57.141.20.42", 200, "token"},
-		{"a token of the pool's address written IPv4-mapped", "::ffff:57.141.20.34", "57.141.20.42", 200, "token"},
-		{"a token of an IPv4-mapped address of no pool", "::ffff:198.51.100.1", "57.141.20.42", 403, "ip_mismatch"},
-		{"the pool's token from a visitor", "57.141.20.34", visitor, 403, "ip_mismatch"},
-		{"a visitor's token from the pool", visitor, "57.141.20.42", 403, "ip_mismatch"},
-		{"the pool's token from the next address outside its range", "57.141.20.34", "57.141.24.1", 403, "ip_mismatch"},
-		{"one pool's token from another's address", "57.141.20.34", "192.0.2.7", 403, "ip_mismatch"},
-		{"another pool's token from the first's address", "192.0.2.7", "57.141.20.34", 403, "ip_mismatch"},
-		{"the pool's token from the same pool's IPv6 and IPv4 of no pool", "2a03:2880:10ff:1::1", "198.51.100.1", 403, "ip_mismatch"},
+	pools := map[string]struct{ ranges, addrs []string }{
+		"meta": {
+			[]string{"57.141.16.0/21", "157.240.0.0/16", "2a03:2880::/32"},
+			[]string{"57.141.20.34", "57.141.20.42", "157.240.9.9", "2a03:2880:10ff:1::1", "2a03:2880:20ff:2::7"},
+		},
+		"other": {[]string{"192.0.2.0/24"}, []string{"192.0.2.7", "192.0.2.9"}},
 	}
-	for _, c := range cases {
-		r, extra := withLog(request(http.MethodGet, "/api/encar/catalog", c.from))
-		r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, c.signedFor)})
-		if w := serve(t, h, r); w.Code != c.status || fields(extra)["gate_reason"] != c.reason {
-			t.Errorf("%s: %d %s %v, want %d %s", c.name, w.Code, w.Body.String(), fields(extra), c.status, c.reason)
+	// Of no pool: a visitor, Meta's next address past its range, another network, an IPv6 one.
+	none := []string{visitor, "57.141.24.1", "198.51.100.1", "2001:db8::1"}
+	h := &Handler{RangeSets: map[string][]string{}}
+	poolOf := map[string]string{}
+	addrs := slices.Clone(none)
+	for name, p := range pools {
+		h.RangeSets[name] = p.ranges
+		h.TokenPools = append(h.TokenPools, name)
+		for _, a := range p.addrs {
+			poolOf[a] = name
+		}
+		addrs = append(addrs, p.addrs...)
+	}
+	h = enforcing(t, h, time.Now())
+	forms := func(a string) []string {
+		if netip.MustParseAddr(a).Is4() {
+			return []string{a, "::ffff:" + a}
+		}
+		return []string{a}
+	}
+	for _, signed := range addrs {
+		for _, from := range addrs {
+			pooled := poolOf[signed] != "" && poolOf[signed] == poolOf[from]
+			for _, s := range forms(signed) {
+				for _, f := range forms(from) {
+					// The request's address is as Caddy decided it, unmapped (clientIP).
+					want, reason := 403, "ip_mismatch"
+					if s == from || pooled {
+						want, reason = 200, "token"
+					}
+					r, extra := withLog(request(http.MethodGet, "/api/encar/catalog", f))
+					r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, s)})
+					if w := serve(t, h, r); w.Code != want || fields(extra)["gate_reason"] != reason {
+						t.Errorf("token of %s from %s: %d %v, want %d %s", s, f, w.Code, fields(extra), want, reason)
+					}
+				}
+			}
 		}
 	}
 }

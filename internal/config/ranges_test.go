@@ -155,15 +155,15 @@ func poolGate(sets, pools string) string {
 	return strings.Replace(rangedGate(sets), "      secret_env: SHOP_SECRET\n", "      secret_env: SHOP_SECRET\n      token_pools: "+pools+"\n", 1)
 }
 
-// A set a group's token_pools names goes into that group, as masked ranges, though no signature names it;
-// a group naming none gets nothing from it (todo#419: Meta's addresses share their tokens).
+// Every set a group's token_pools names goes into that group, as masked ranges, though no signature names it;
+// a group naming none gets nothing from them (todo#419: Meta's addresses share their tokens).
 func TestTokenPoolSetGoesIntoItsGroup(t *testing.T) {
-	s, err := ParseServer([]byte(poolGate("range_sets:\n  jp: [126.0.0.0/8]\n  meta: [57.141.16.0/21, 157.240.1.5/16]\n", "[meta]")))
+	s, err := ParseServer([]byte(poolGate("range_sets:\n  jp: [126.0.0.0/8]\n  meta: [57.141.16.0/21, 157.240.1.5/16]\n  other: [192.0.2.0/24]\n", "[meta, other]")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	sets := groupSets(t, s)
-	if got, _ := json.Marshal(sets["shop"]); string(got) != `{"meta":["57.141.16.0/21","157.240.0.0/16"]}` {
+	if got, _ := json.Marshal(sets["shop"]); string(got) != `{"meta":["57.141.16.0/21","157.240.0.0/16"],"other":["192.0.2.0/24"]}` {
 		t.Errorf("shop: %s", got)
 	}
 	if got, _ := json.Marshal(sets["dbauto"]); string(got) != `{"jp":["126.0.0.0/8"]}` {
