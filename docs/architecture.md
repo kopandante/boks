@@ -859,7 +859,8 @@ gate:
 
 - **Что читает boks.** Из группы — только `name`, `app`, `mode`, `site_gate`, `secret_env`,
   `bearer.digests_env`, `token_ttl`; структурно: приложение не в двух группах, `site_gate: off` только при `enforce`,
-  `token_ttl` — только при `site_gate: off`, от 3m до 24h,
+  `token_ttl` — только при `site_gate: off`, от 3m до 24h, имена наборов в `signatures[].ranges` и
+  `token_pools` сверяются с `range_sets` (и сами наборы boks пишет в группу),
   секретов и `hosts` в файле нет, ключи — только строчные ASCII, цифры и `_` (JSON обработчика сопоставляет поля без учёта регистра, по Unicode). Остальное уходит в обработчик как написано; схему проверяет Caddy при
   reload (`DisallowUnknownFields`, старый конфиг остаётся). Новое поле обработчика — новый образ и ревизия
   политики, без нового формата.
