@@ -99,6 +99,24 @@ func (g *Gate) withRangeSets(sets map[string]RangeSet) error {
 			}
 			named[name] = rs.RangePrefixes()
 		}
+		// token_pools: the sets whose addresses share their tokens (proxy/gate Handler.TokenPools).
+		if v, set := m["token_pools"]; set {
+			pools, ok := v.([]any)
+			if !ok {
+				return fmt.Errorf("groups[%d].token_pools: a list of names of sets of range_sets", i)
+			}
+			for _, p := range pools {
+				name, ok := p.(string)
+				if !ok {
+					return fmt.Errorf("groups[%d].token_pools: a list of names of sets of range_sets", i)
+				}
+				rs, ok := sets[name]
+				if !ok {
+					return fmt.Errorf("groups[%d].token_pools: no set %q in range_sets", i, name)
+				}
+				named[name] = rs.RangePrefixes()
+			}
+		}
 		if len(named) > 0 {
 			m["range_sets"] = named
 			changed = true

@@ -108,3 +108,61 @@ func TestSignatureRangesThroughCaddy(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A token issued to an address of a token pool passes from another address of the same pool: Meta's in-app
+// browser takes the page's token at 57.141.20.34 and calls the API from 57.141.20.42 (todo#419). Not from
+// an address outside the pool, nor from another pool; a visitor's token from a pool's address is refused.
+func TestTokenPool(t *testing.T) {
+	h := enforcing(t, &Handler{
+		RangeSets:  map[string][]string{"meta": {"57.141.16.0/21", "157.240.0.0/16", "2a03:2880::/32"}, "other": {"203.0.113.0/24"}},
+		TokenPools: []string{"meta", "other"},
+	}, time.Now())
+	cases := []struct {
+		name, signedFor, from string
+		status                int
+		reason                string
+	}{
+		{"the next address of the pool", "57.141.20.34", "57.141.20.42", 200, "token"},
+		{"the same address", "57.141.20.34", "57.141.20.34", 200, "token"},
+		{"another range of the same pool", "57.141.20.34", "157.240.9.9", 200, "token"},
+		{"the pool over IPv6", "2a03:2880:10ff:1::1", "2a03:2880:20ff:2::7", 200, "token"},
+		{"the pool's address as IPv4-mapped IPv6", "57.141.20.34", "::ffff:57.141.20.42", 200, "token"},
+		{"the pool's token from a visitor", "57.141.20.34", visitor, 403, "ip_mismatch"},
+		{"a visitor's token from the pool", visitor, "57.141.20.42", 403, "ip_mismatch"},
+		{"the pool's token from the next address outside its range", "57.141.20.34", "57.141.24.1", 403, "ip_mismatch"},
+		{"one pool's token from another's address", "57.141.20.34", "203.0.113.7", 403, "ip_mismatch"},
+		{"another pool's token from the first's address", "203.0.113.7", "57.141.20.34", 403, "ip_mismatch"},
+		{"the pool's token from the same pool's IPv6 and IPv4 of no pool", "2a03:2880:10ff:1::1", "198.51.100.1", 403, "ip_mismatch"},
+	}
+	for _, c := range cases {
+		r, extra := withLog(request(http.MethodGet, "/api/encar/catalog", c.from))
+		r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, c.signedFor)})
+		if w := serve(t, h, r); w.Code != c.status || fields(extra)["gate_reason"] != c.reason {
+			t.Errorf("%s: %d %s %v, want %d %s", c.name, w.Code, w.Body.String(), fields(extra), c.status, c.reason)
+		}
+	}
+}
+
+// Without token_pools two addresses of Meta's are two visitors, as before the pool.
+func TestNoTokenPoolKeepsAddressBinding(t *testing.T) {
+	h := enforcing(t, &Handler{RangeSets: map[string][]string{"meta": {"57.141.0.0/20"}}}, time.Now())
+	r, extra := withLog(request(http.MethodGet, "/api/encar/catalog", "57.141.20.42"))
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, "57.141.20.34")})
+	if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "ip_mismatch" {
+		t.Errorf("%d %v", w.Code, fields(extra))
+	}
+}
+
+// A token pool naming no set, or an empty one, is refused at Provision, not left to pool no one.
+func TestTokenPoolNeedsASet(t *testing.T) {
+	for name, h := range map[string]*Handler{
+		"no set":    {TokenPools: []string{"meta"}},
+		"wrong set": {RangeSets: map[string][]string{"other": {"203.0.113.0/24"}}, TokenPools: []string{"meta"}},
+		"empty set": {RangeSets: map[string][]string{"meta": {}}, TokenPools: []string{"meta"}},
+	} {
+		h.Name, h.Mode, h.Secrets = "site", "enforce", []string{secret}
+		if err := h.Provision(ctxForTest(t)); err == nil || !strings.Contains(err.Error(), "token_pools") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

@@ -149,3 +149,38 @@ func TestFleetLoadReadsNoSetFile(t *testing.T) {
 		}
 	}
 }
+
+// poolGate is rangedGate with the shop group (no signature) sharing the tokens of the set named pools.
+func poolGate(sets, pools string) string {
+	return strings.Replace(rangedGate(sets), "      secret_env: SHOP_SECRET\n", "      secret_env: SHOP_SECRET\n      token_pools: "+pools+"\n", 1)
+}
+
+// A set a group's token_pools names goes into that group, as masked ranges, though no signature names it;
+// a group naming none gets nothing from it (todo#419: Meta's addresses share their tokens).
+func TestTokenPoolSetGoesIntoItsGroup(t *testing.T) {
+	s, err := ParseServer([]byte(poolGate("range_sets:\n  jp: [126.0.0.0/8]\n  meta: [57.141.16.0/21, 157.240.1.5/16]\n", "[meta]")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sets := groupSets(t, s)
+	if got, _ := json.Marshal(sets["shop"]); string(got) != `{"meta":["57.141.16.0/21","157.240.0.0/16"]}` {
+		t.Errorf("shop: %s", got)
+	}
+	if got, _ := json.Marshal(sets["dbauto"]); string(got) != `{"jp":["126.0.0.0/8"]}` {
+		t.Errorf("dbauto names no pool and got %s", got)
+	}
+}
+
+// A token_pools naming a set there is not, or no list of names, is refused at the apply.
+func TestTokenPoolNamesMustBeSets(t *testing.T) {
+	for pools, want := range map[string]string{
+		"[meta]":   `no set "meta" in range_sets`,
+		"meta":     "token_pools: a list of names",
+		"[[meta]]": "token_pools: a list of names",
+	} {
+		_, err := ParseServer([]byte(poolGate("range_sets:\n  jp: [126.0.0.0/8]\n", pools)))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("token_pools: %s: %v, want %q", pools, err, want)
+		}
+	}
+}
