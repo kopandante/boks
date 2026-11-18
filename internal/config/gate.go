@@ -64,10 +64,10 @@ var gateWritten = map[string]string{
 	"secrets":    "the secret never goes in server.yml; secret_env names the variable it comes from",
 	"hosts":      "boks writes it from the app's routes",
 	"handler":    "boks writes it",
-	"range_sets": "boks writes the sets the group's signatures name, from the server's range_sets",
+	"range_sets": "boks writes the sets the group's signatures and token_pools name, from the server's range_sets",
 }
 
-// withRangeSets writes into each group of g's JSON the sets its signatures' ranges name, from sets: the
+// withRangeSets writes into each group of g's JSON the sets its signatures' ranges and its token_pools name, from sets: the
 // handler finds them there, and the policy's revision holds them. A group naming no set keeps its bytes.
 // A name no set has is refused here, not at the proxy's reload.
 func (g *Gate) withRangeSets(sets map[string]RangeSet) error {
@@ -98,6 +98,24 @@ func (g *Gate) withRangeSets(sets map[string]RangeSet) error {
 				return fmt.Errorf("groups[%d].signatures[%d]: ranges: no set %q in range_sets", i, j, name)
 			}
 			named[name] = rs.RangePrefixes()
+		}
+		// token_pools: the sets whose addresses share their tokens (proxy/gate Handler.TokenPools).
+		if v, set := m["token_pools"]; set {
+			pools, ok := v.([]any)
+			if !ok {
+				return fmt.Errorf("groups[%d].token_pools: a list of names of sets of range_sets", i)
+			}
+			for _, p := range pools {
+				name, ok := p.(string)
+				if !ok {
+					return fmt.Errorf("groups[%d].token_pools: a list of names of sets of range_sets", i)
+				}
+				rs, ok := sets[name]
+				if !ok {
+					return fmt.Errorf("groups[%d].token_pools: no set %q in range_sets", i, name)
+				}
+				named[name] = rs.RangePrefixes()
+			}
 		}
 		if len(named) > 0 {
 			m["range_sets"] = named

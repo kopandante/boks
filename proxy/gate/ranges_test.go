@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -106,5 +108,83 @@ func TestSignatureRangesThroughCaddy(t *testing.T) {
 	}
 	if err := caddy.Stop(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A token issued to an address of a token pool passes from every other address of the same pool: Meta's in-app
+// browser takes the page's token at 57.141.20.34 and calls the API from 57.141.20.42 (todo#419). Every ordered
+// pair of the addresses below is asked, the token's and the request's each also written IPv4-mapped: a token
+// passes from the address it was issued to, as written, or from any address of its pool — never across pools,
+// never between a pool and an address of none. The verdict comes from the lists of addresses, not the ranges.
+func TestTokenPool(t *testing.T) {
+	pools := map[string]struct{ ranges, addrs []string }{
+		"meta": {
+			[]string{"57.141.16.0/21", "157.240.0.0/16", "2a03:2880::/32"},
+			[]string{"57.141.20.34", "57.141.20.42", "157.240.9.9", "2a03:2880:10ff:1::1", "2a03:2880:20ff:2::7"},
+		},
+		"other": {[]string{"192.0.2.0/24"}, []string{"192.0.2.7", "192.0.2.9"}},
+	}
+	// Of no pool: a visitor, Meta's next address past its range, another network, an IPv6 one.
+	none := []string{visitor, "57.141.24.1", "198.51.100.1", "2001:db8::1"}
+	h := &Handler{RangeSets: map[string][]string{}}
+	poolOf := map[string]string{}
+	addrs := slices.Clone(none)
+	for name, p := range pools {
+		h.RangeSets[name] = p.ranges
+		h.TokenPools = append(h.TokenPools, name)
+		for _, a := range p.addrs {
+			poolOf[a] = name
+		}
+		addrs = append(addrs, p.addrs...)
+	}
+	h = enforcing(t, h, time.Now())
+	forms := func(a string) []string {
+		if netip.MustParseAddr(a).Is4() {
+			return []string{a, "::ffff:" + a}
+		}
+		return []string{a}
+	}
+	for _, signed := range addrs {
+		for _, from := range addrs {
+			pooled := poolOf[signed] != "" && poolOf[signed] == poolOf[from]
+			for _, s := range forms(signed) {
+				for _, f := range forms(from) {
+					// The request's address is as Caddy decided it, unmapped (clientIP).
+					want, reason := 403, "ip_mismatch"
+					if s == from || pooled {
+						want, reason = 200, "token"
+					}
+					r, extra := withLog(request(http.MethodGet, "/api/encar/catalog", f))
+					r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, s)})
+					if w := serve(t, h, r); w.Code != want || fields(extra)["gate_reason"] != reason {
+						t.Errorf("token of %s from %s: %d %v, want %d %s", s, f, w.Code, fields(extra), want, reason)
+					}
+				}
+			}
+		}
+	}
+}
+
+// Without token_pools two addresses of Meta's are two visitors, as before the pool — though a set holds both.
+func TestNoTokenPoolKeepsAddressBinding(t *testing.T) {
+	h := enforcing(t, &Handler{RangeSets: map[string][]string{"meta": {"57.141.16.0/21"}}}, time.Now())
+	r, extra := withLog(request(http.MethodGet, "/api/encar/catalog", "57.141.20.42"))
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: h.sign(fp, "57.141.20.34")})
+	if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "ip_mismatch" {
+		t.Errorf("%d %v", w.Code, fields(extra))
+	}
+}
+
+// A token pool naming no set, or an empty one, is refused at Provision, not left to pool no one.
+func TestTokenPoolNeedsASet(t *testing.T) {
+	for name, h := range map[string]*Handler{
+		"no set":    {TokenPools: []string{"meta"}},
+		"wrong set": {RangeSets: map[string][]string{"other": {"203.0.113.0/24"}}, TokenPools: []string{"meta"}},
+		"empty set": {RangeSets: map[string][]string{"meta": {}}, TokenPools: []string{"meta"}},
+	} {
+		h.Name, h.Mode, h.Secrets = "site", "enforce", []string{secret}
+		if err := h.Provision(ctxForTest(t)); err == nil || !strings.Contains(err.Error(), "token_pools") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

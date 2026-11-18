@@ -78,9 +78,16 @@ type Handler struct {
 	Signatures   []Signature    `json:"signatures,omitempty"`
 	SignatureBan caddy.Duration `json:"signature_ban,omitempty"`
 	// RangeSets are named sets of addresses — a country's, by its registry's delegations — a signature's
-	// Ranges names (#140). boks writes into a group the sets its signatures name, from server.yml's
-	// range_sets, so a revision of the policy holds the list it was applied with.
+	// Ranges names (#140), or the group's TokenPools. boks writes into a group the sets its signatures and
+	// its token_pools name, from server.yml's range_sets, so a revision of the policy holds the list it was
+	// applied with.
 	RangeSets map[string][]string `json:"range_sets,omitempty"`
+	// TokenPools name sets of RangeSets whose addresses share their tokens: a token issued to an address of
+	// a pool passes from any other address of the same pool, as Googlebot's does (googlePool). For a crawler
+	// whose renderer takes the page's token from one address and calls the API from the next — Meta's
+	// in-app browser (57.141.20.34, then .42, todo#419). Two pools never share: the token of an address
+	// in one pool from an address of another, or from none, is an ip_mismatch as ever.
+	TokenPools []string `json:"token_pools,omitempty"`
 	// PageFirst, when on, refuses the API to an address that asked for no page of the group within its
 	// window (pagefirst.go).
 	PageFirst *PageFirst `json:"page_first,omitempty"`
@@ -91,6 +98,7 @@ type Handler struct {
 	exempt       []exemptRule
 	checksExempt []netip.Prefix
 	checksNoBan  []netip.Prefix
+	tokenPools   [][]netip.Prefix // TokenPools' sets, one slice of prefixes each
 	bearer       *bearer
 	bans         *banStore    // the tests' own; sharedBans when nil
 	pages        *pageStore   // the tests' own; sharedPages when nil
@@ -142,6 +150,14 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		if err := h.Signatures[i].compile(sets); err != nil {
 			return err
 		}
+	}
+	h.tokenPools = nil
+	for _, name := range h.TokenPools {
+		set, ok := sets[name]
+		if !ok || len(set) == 0 {
+			return fmt.Errorf("token_pools: no set %q in range_sets, or it is empty", name)
+		}
+		h.tokenPools = append(h.tokenPools, set)
 	}
 	if h.PageFirst.on() {
 		h.pageStore().begin(h.Name, h.now())
@@ -512,10 +528,31 @@ func (h *Handler) decideToken(r *http.Request, p, ip string) (decision, *payload
 			return deny("no_fp_header", forbidden), &pl
 		}
 	}
-	if pl.ip != ip && !googlePool(pl.ip, ip) {
+	if pl.ip != ip && !googlePool(pl.ip, ip) && !h.samePool(pl.ip, ip) {
 		return deny("ip_mismatch", addressMismatch), &pl
 	}
 	return allow("token"), &pl
+}
+
+// samePool says whether the token's address a and the request's b are in one of the group's TokenPools —
+// the same one: an address of two pools' is no bridge between them, a pool's token from outside it is
+// refused.
+func (h *Handler) samePool(a, b string) bool {
+	if len(h.tokenPools) == 0 {
+		return false
+	}
+	x, errA := netip.ParseAddr(a)
+	y, errB := netip.ParseAddr(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	x, y = x.Unmap(), y.Unmap()
+	for _, pool := range h.tokenPools {
+		if inRanges(pool, x) && inRanges(pool, y) {
+			return true
+		}
+	}
+	return false
 }
 
 // googleGrace is how long after its issue an expired token of a Googlebot address still passes from one:
