@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
 // scraperAE is the Accept-Encoding the scraper of cars.dbauto.kr sends under Chrome's name (todo#419);
@@ -265,6 +267,9 @@ func TestSignatureValidate(t *testing.T) {
 		{"an unless taking everything", Handler{Signatures: []Signature{sig(func(s *Signature) {
 			s.Unless = []HeaderPattern{{Name: "sec-ch-ua", Pattern: `.*`}}
 		})}}, "absent header"},
+		{"the second unless taking an absent header", Handler{Signatures: []Signature{sig(func(s *Signature) {
+			s.Unless = []HeaderPattern{{Name: "sec-ch-ua", Pattern: `"OperaMobile"`}, {Name: "sec-ch-ua-model", Pattern: `x?`}}
+		})}}, "unless[sec-ch-ua-model]"},
 		{"a name twice", Handler{Signatures: []Signature{scraperSig, scraperSig}}, "twice"},
 		{"a ban of a second", Handler{Signatures: []Signature{scraperSig}, SignatureBan: 1e9}, "signature_ban"},
 		{"a ban of a month", Handler{Signatures: []Signature{scraperSig}, SignatureBan: 30 * caddyDay}, "signature_ban"},
@@ -355,41 +360,84 @@ func TestSignatureUnless(t *testing.T) {
 	}
 }
 
-// A spared request is not banned: the address of Opera Mobile goes on, page and API, while the bot's is refused on
-// every request after the first. The exception is the signature's own, not the group's: another signature
-// that matches the Opera request takes it as before.
-func TestSignatureUnlessSparesBanAndOthers(t *testing.T) {
+const operaMobileCHUA = `"Chromium";v="156", "OperaMobile";v="104", "Opera";v="140", " Not A;Brand";v="99"`
+
+// operaMobile is the request of Opera Mobile without zstd that chrome-no-zstd's headers match and its exception spares.
+func operaMobile(h *Handler, ip, path string) (*http.Request, *caddyhttp.ExtraLogFields) {
+	r, extra := withLog(browserClient(androidUAOpera, ip).request(h, "GET", path))
+	r.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	r.Header.Set("Sec-CH-UA", operaMobileCHUA)
+	return r, extra
+}
+
+// A spared request is not banned: the address of Opera Mobile goes on, page and API, while the bot's address is
+// banned at its first match — its next request, which no signature matches, is refused as signature_ban.
+func TestSignatureUnlessSparesBan(t *testing.T) {
 	now := time.Now()
-	h := signing(t, &now, chromeNoZstd, scraperSig)
-	opera := func(ip, path string) int {
-		r := browserClient(androidUAOpera, ip).request(h, "GET", path)
-		r.Header.Set("Accept-Encoding", "gzip, deflate, br")
-		r.Header.Set("Sec-CH-UA", `"Chromium";v="156", "OperaMobile";v="104", "Opera";v="140", " Not A;Brand";v="99"`)
-		return serve(t, h, r).Code
-	}
+	h := signing(t, &now, chromeNoZstd)
 	for _, p := range []string{"/api/x", "/", "/_next/static/a.js", "/api/y"} {
-		if code := opera("203.0.113.90", p); code != 200 {
-			t.Errorf("Opera Mobile %s: %d", p, code)
+		r, extra := operaMobile(h, "203.0.113.90", p)
+		if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_signature"] != nil {
+			t.Errorf("Opera Mobile %s: %d %v", p, w.Code, fields(extra))
 		}
 	}
-	bot := func(path string) int {
-		r := browserClient(winChrome145UA, "203.0.113.91").request(h, "GET", path)
-		r.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	bot := func(ae string) (int, map[string]any) {
+		r, extra := withLog(browserClient(winChrome145UA, "203.0.113.91").request(h, "GET", "/api/x"))
+		r.Header.Set("Accept-Encoding", ae)
 		r.Header.Set("Sec-CH-UA", `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`)
-		return serve(t, h, r).Code
+		return serve(t, h, r).Code, fields(extra)
 	}
-	if code := bot("/api/x"); code != 403 {
-		t.Errorf("the bot: %d", code)
+	if code, f := bot("gzip, deflate, br"); code != 403 || f["gate_reason"] != "signature" {
+		t.Errorf("the bot: %d %v", code, f)
 	}
-	if code := bot("/"); code != 403 {
-		t.Errorf("the bot's page after its first match: %d", code)
+	if code, f := bot("gzip, deflate, br, zstd"); code != 403 || f["gate_reason"] != "signature_ban" {
+		t.Errorf("the bot's address after its first match, with zstd: %d %v", code, f)
 	}
-	// Opera Mobile with the scraper's Accept-Encoding is taken by the other signature, the exception being chrome-no-zstd's alone.
-	r := browserClient(androidUAOpera, "203.0.113.92").request(h, "GET", "/api/x")
-	r.Header.Set("Accept-Encoding", scraperAE)
-	r.Header.Set("Sec-CH-UA", `"OperaMobile";v="104"`)
-	if code := serve(t, h, r).Code; code != 403 {
-		t.Errorf("the scraper's headers under Opera's name: %d", code)
+}
+
+// The exception is the signature's own, not the group's: another signature that matches the same request of Opera
+// Mobile — one chrome-no-zstd's headers match too and its exception spares — takes it as before, in enforce (refused
+// and banned) as in log (written, passed on).
+func TestSignatureUnlessIsTheSignaturesOwn(t *testing.T) {
+	operaAPI := Signature{Name: "opera-api", Headers: []HeaderPattern{
+		{Name: "user-agent", Pattern: `OPR/`}, {Name: "accept-encoding", Pattern: `^gzip, deflate, br$`},
+	}}
+	for _, mode := range []string{"enforce", "log"} {
+		other := operaAPI
+		other.Mode = mode
+		now := time.Now()
+		h := signing(t, &now, chromeNoZstd, other)
+		r, extra := operaMobile(h, "203.0.113.92", "/api/x")
+		w := serve(t, h, r)
+		f := fields(extra)
+		switch {
+		case f["gate_signature"] != "opera-api":
+			t.Errorf("%s: %d %v, want gate_signature opera-api", mode, w.Code, f)
+		case mode == "enforce" && (w.Code != 403 || f["gate_reason"] != "signature"):
+			t.Errorf("enforce: %d %v", w.Code, f)
+		case mode == "log" && w.Code != 200:
+			t.Errorf("log: %d %v", w.Code, f)
+		}
+		if mode != "enforce" {
+			continue
+		}
+		r, extra = withLog(browserClient(chromeUA, "203.0.113.92").request(h, "GET", "/"))
+		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+		if w := serve(t, h, r); w.Code != 403 || fields(extra)["gate_reason"] != "signature_ban" {
+			t.Errorf("enforce: the address after opera-api's match: %d %v", w.Code, fields(extra))
+		}
+	}
+}
+
+// Any one exception spares: the second of two, the first not matching, does as well as the first.
+func TestSignatureUnlessAnyOne(t *testing.T) {
+	two := chromeNoZstd
+	two.Unless = []HeaderPattern{{Name: "sec-ch-ua", Pattern: `"Samsung Internet"`}, {Name: "sec-ch-ua", Pattern: `"OperaMobile"`}}
+	now := time.Now()
+	h := signing(t, &now, two)
+	r, extra := operaMobile(h, "203.0.113.93", "/api/x")
+	if w := serve(t, h, r); w.Code != 200 || fields(extra)["gate_reason"] != "token" {
+		t.Errorf("Opera Mobile, spared by the second exception: %d %v", w.Code, fields(extra))
 	}
 }
 
