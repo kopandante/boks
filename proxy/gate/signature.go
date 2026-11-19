@@ -5,7 +5,8 @@ package gate
 // cars.dbauto.kr sends Accept-Encoding "br, gzip, deflate" under Chrome's User-Agent, which no Chrome
 // does. A signature matches a request when each header it names matches its pattern: the header's
 // first value, "" when it is absent, so a signature names what a client sends and no browser does as
-// well as what every browser sends and the client leaves out. It is asked of every request on the
+// well as what every browser sends and the client leaves out — unless a header it names in unless matches
+// that exception's pattern: a browser's own that the shape would take for a bot. It is asked of every request on the
 // group's hosts — pages, the token's issue and the exemptions too, as a scraper takes what it can.
 //
 // In log a match goes into the access log as gate_signature and nothing else changes; in enforce the
@@ -39,11 +40,18 @@ type Signature struct {
 	// other rules and Caddy's path matcher see it, so that dot segments do not take a file past it.
 	Path    string          `json:"path,omitempty"`
 	Headers []HeaderPattern `json:"headers"`
+	// Unless are the exceptions: a request one of whose headers matches its pattern here is not the
+	// signature's, whatever Headers say. Headers can only name what a client sends; this names a client
+	// the shape would take for a bot though it is a browser's own — Opera Mobile and Samsung Internet send no
+	// zstd under Chrome's name (todo#419, 19.11). Like Headers, the pattern is asked of the header's first
+	// value. A pattern that matches an absent header is refused: it would spare every request without it.
+	Unless []HeaderPattern `json:"unless,omitempty"`
 	// Ranges, when set, names the group's range set the client's address must be in too (#140): the
 	// address as the ban and the token judge it, past the trusted proxies.
 	Ranges string `json:"ranges,omitempty"`
 
 	compiled []*regexp.Regexp
+	unless   []*regexp.Regexp
 	path     *regexp.Regexp
 	ranges   []netip.Prefix
 }
@@ -93,11 +101,21 @@ func (s *Signature) compile(sets map[string][]netip.Prefix) error {
 		}
 		s.compiled = append(s.compiled, re)
 	}
+	s.unless = s.unless[:0]
+	for _, hp := range s.Unless {
+		re, err := regexp.Compile(hp.Pattern)
+		if err != nil {
+			return fmt.Errorf("signatures[%s]: unless[%s]: %w", s.Name, hp.Name, err)
+		}
+		s.unless = append(s.unless, re)
+	}
 	return nil
 }
 
 // validate refuses a signature that is not named, has no header, or would match every request
-// without its headers: one pattern at least must refuse an absent header.
+// without its headers: one pattern at least must refuse an absent header. It refuses an exception
+// without a header's name, and one whose pattern takes an absent header. It reads the patterns
+// compile made, as Caddy provisions a handler before it validates it.
 func (s *Signature) validate(groupMode string) error {
 	switch {
 	case !signatureName.MatchString(s.Name):
@@ -114,6 +132,14 @@ func (s *Signature) validate(groupMode string) error {
 			return fmt.Errorf("signatures[%s]: a header without a name", s.Name)
 		}
 	}
+	for i, hp := range s.Unless {
+		switch {
+		case hp.Name == "":
+			return fmt.Errorf("signatures[%s]: an unless without a header name", s.Name)
+		case i < len(s.unless) && s.unless[i].MatchString(""):
+			return fmt.Errorf("signatures[%s]: unless[%s]: the pattern matches an absent header, so it would spare every request without it", s.Name, hp.Name)
+		}
+	}
 	for _, re := range s.compiled {
 		if !re.MatchString("") {
 			return nil
@@ -123,7 +149,7 @@ func (s *Signature) validate(groupMode string) error {
 }
 
 // matches says whether the cleaned path p of r matches s's, when it has one, every header its pattern,
-// and the client's address a its range set, when it has one. The set last: thousands of ranges are
+// no header of Unless its exception, and the client's address a its range set, when it has one. The set last: thousands of ranges are
 // walked only for a request whose headers already match.
 func (s *Signature) matches(r *http.Request, p string, a netip.Addr) bool {
 	if s.path != nil && !s.path.MatchString(p) {
@@ -131,6 +157,11 @@ func (s *Signature) matches(r *http.Request, p string, a netip.Addr) bool {
 	}
 	for i, hp := range s.Headers {
 		if !s.compiled[i].MatchString(r.Header.Get(hp.Name)) {
+			return false
+		}
+	}
+	for i, hp := range s.Unless {
+		if s.unless[i].MatchString(r.Header.Get(hp.Name)) {
 			return false
 		}
 	}
