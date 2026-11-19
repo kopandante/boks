@@ -5,7 +5,8 @@ package gate
 // cars.dbauto.kr sends Accept-Encoding "br, gzip, deflate" under Chrome's User-Agent, which no Chrome
 // does. A signature matches a request when each header it names matches its pattern: the header's
 // first value, "" when it is absent, so a signature names what a client sends and no browser does as
-// well as what every browser sends and the client leaves out. It is asked of every request on the
+// well as what every browser sends and the client leaves out — unless a header it names in unless matches
+// that exception's pattern: a browser's own that the shape would take for a bot. It is asked of every request on the
 // group's hosts — pages, the token's issue and the exemptions too, as a scraper takes what it can.
 //
 // In log a match goes into the access log as gate_signature and nothing else changes; in enforce the
@@ -112,7 +113,9 @@ func (s *Signature) compile(sets map[string][]netip.Prefix) error {
 }
 
 // validate refuses a signature that is not named, has no header, or would match every request
-// without its headers: one pattern at least must refuse an absent header.
+// without its headers: one pattern at least must refuse an absent header. It refuses an exception
+// without a header's name, and one whose pattern takes an absent header. It reads the patterns
+// compile made, as Caddy provisions a handler before it validates it.
 func (s *Signature) validate(groupMode string) error {
 	switch {
 	case !signatureName.MatchString(s.Name):
@@ -146,7 +149,7 @@ func (s *Signature) validate(groupMode string) error {
 }
 
 // matches says whether the cleaned path p of r matches s's, when it has one, every header its pattern,
-// and the client's address a its range set, when it has one. The set last: thousands of ranges are
+// no header of Unless its exception, and the client's address a its range set, when it has one. The set last: thousands of ranges are
 // walked only for a request whose headers already match.
 func (s *Signature) matches(r *http.Request, p string, a netip.Addr) bool {
 	if s.path != nil && !s.path.MatchString(p) {
