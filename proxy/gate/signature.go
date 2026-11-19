@@ -39,11 +39,18 @@ type Signature struct {
 	// other rules and Caddy's path matcher see it, so that dot segments do not take a file past it.
 	Path    string          `json:"path,omitempty"`
 	Headers []HeaderPattern `json:"headers"`
+	// Unless are the exceptions: a request one of whose headers matches its pattern here is not the
+	// signature's, whatever Headers say. Headers can only name what a client sends; this names a client
+	// the shape would take for a bot though it is a browser's own — Opera Mobile and Samsung Internet send no
+	// zstd under Chrome's name (todo#419, 19.11). Like Headers, the pattern is asked of the header's first
+	// value. A pattern that matches an absent header is refused: it would spare every request without it.
+	Unless []HeaderPattern `json:"unless,omitempty"`
 	// Ranges, when set, names the group's range set the client's address must be in too (#140): the
 	// address as the ban and the token judge it, past the trusted proxies.
 	Ranges string `json:"ranges,omitempty"`
 
 	compiled []*regexp.Regexp
+	unless   []*regexp.Regexp
 	path     *regexp.Regexp
 	ranges   []netip.Prefix
 }
@@ -93,6 +100,14 @@ func (s *Signature) compile(sets map[string][]netip.Prefix) error {
 		}
 		s.compiled = append(s.compiled, re)
 	}
+	s.unless = s.unless[:0]
+	for _, hp := range s.Unless {
+		re, err := regexp.Compile(hp.Pattern)
+		if err != nil {
+			return fmt.Errorf("signatures[%s]: unless[%s]: %w", s.Name, hp.Name, err)
+		}
+		s.unless = append(s.unless, re)
+	}
 	return nil
 }
 
@@ -114,6 +129,14 @@ func (s *Signature) validate(groupMode string) error {
 			return fmt.Errorf("signatures[%s]: a header without a name", s.Name)
 		}
 	}
+	for i, hp := range s.Unless {
+		switch {
+		case hp.Name == "":
+			return fmt.Errorf("signatures[%s]: an unless without a header name", s.Name)
+		case i < len(s.unless) && s.unless[i].MatchString(""):
+			return fmt.Errorf("signatures[%s]: unless[%s]: the pattern matches an absent header, so it would spare every request without it", s.Name, hp.Name)
+		}
+	}
 	for _, re := range s.compiled {
 		if !re.MatchString("") {
 			return nil
@@ -131,6 +154,11 @@ func (s *Signature) matches(r *http.Request, p string, a netip.Addr) bool {
 	}
 	for i, hp := range s.Headers {
 		if !s.compiled[i].MatchString(r.Header.Get(hp.Name)) {
+			return false
+		}
+	}
+	for i, hp := range s.Unless {
+		if s.unless[i].MatchString(r.Header.Get(hp.Name)) {
 			return false
 		}
 	}
